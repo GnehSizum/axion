@@ -2,6 +2,8 @@
 
 Axion exposes built-in native APIs as bridge commands. Every command must be listed in the active window's capability section before frontend code can call it.
 
+For application-defined Rust commands, see `custom-commands.md`.
+
 ## App Commands
 
 ### `app.ping`
@@ -14,10 +16,19 @@ await window.__AXION__.invoke("app.ping", { from: "frontend" });
 
 ### `app.info`
 
-Returns app name, identifier, and run mode.
+Returns app name, identifier, optional app metadata, and run mode.
 
 ```js
 await window.__AXION__.invoke("app.info", null);
+// {
+//   appName: "hello-axion",
+//   identifier: "dev.axion.hello",
+//   version: "0.1.0",
+//   description: "Hello Axion example",
+//   authors: ["Axion Maintainers"],
+//   homepage: "https://example.dev/hello-axion",
+//   mode: "production"
+// }
 ```
 
 ### `app.version`
@@ -26,7 +37,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.1", release: "v0.1.1.0", framework: "axion" }
+// { version: "0.1.2", release: "v0.1.2.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -80,7 +91,7 @@ await window.__AXION__.invoke("fs.read_text", {
 
 ## Dialog Commands
 
-`dialog.open` and `dialog.save` are registered capability-gated preview commands. In v0.1.1.0 they are headless-safe stubs and return `{ canceled: true, path: null }` until a native dialog backend is added.
+`dialog.open` and `dialog.save` are registered capability-gated preview commands. In v0.1.2.0 they are headless-safe stubs and return `{ canceled: true, path: null }` until a native dialog backend is added.
 
 ```js
 await window.__AXION__.invoke("dialog.open", null);

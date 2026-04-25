@@ -22,6 +22,14 @@ pub struct AppSection {
     pub name: String,
     #[serde(default)]
     pub identifier: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub authors: Vec<String>,
+    #[serde(default)]
+    pub homepage: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -8,6 +8,7 @@ This directory contains public, user-facing documentation for Axion.
 - `cli.md`: command reference for `axion-cli`.
 - `manifest.md`: `axion.toml` configuration guide.
 - `native-api.md`: built-in bridge command reference.
+- `custom-commands.md`: Rust command registration and frontend invocation.
 - `versioning.md`: public release and Cargo version mapping.
 - `architecture.md`: high-level runtime architecture.
 - `security.md`: capabilities, bridge permissions, navigation, and CSP.
@@ -16,7 +17,7 @@ This directory contains public, user-facing documentation for Axion.
 
 ## Current Version
 
-Axion is at **v0.1.1.0 developer preview**. The preview focuses on the core desktop framework loop:
+Axion is at **v0.1.2.0 developer preview**. The current preview focuses on the core desktop framework loop:
 
 1. load an app manifest
 2. build a runtime plan

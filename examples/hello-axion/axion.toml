@@ -1,6 +1,10 @@
 [app]
 name = "hello-axion"
 identifier = "dev.axion.hello"
+version = "0.1.0"
+description = "Axion single-window smoke application"
+authors = ["Axion Maintainers"]
+homepage = "https://example.dev/hello-axion"
 
 [window]
 id = "main"

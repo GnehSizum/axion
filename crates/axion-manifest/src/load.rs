@@ -110,10 +110,23 @@ pub fn load_app_config_from_path(path: impl AsRef<Path>) -> Result<AppConfig, Ma
     }
     reject_invalid_app_name(&path, app_name)?;
 
-    let identity = match manifest.app.identifier {
-        Some(identifier) => AppIdentity::new(app_name).with_identifier(identifier),
-        None => AppIdentity::new(app_name),
-    };
+    let mut identity = AppIdentity::new(app_name);
+    if let Some(identifier) = clean_optional_string(manifest.app.identifier) {
+        identity = identity.with_identifier(identifier);
+    }
+    if let Some(version) = clean_optional_string(manifest.app.version) {
+        identity = identity.with_version(version);
+    }
+    if let Some(description) = clean_optional_string(manifest.app.description) {
+        identity = identity.with_description(description);
+    }
+    let authors = clean_string_list(manifest.app.authors);
+    if !authors.is_empty() {
+        identity = identity.with_authors(authors);
+    }
+    if let Some(homepage) = clean_optional_string(manifest.app.homepage) {
+        identity = identity.with_homepage(homepage);
+    }
 
     let dev = manifest
         .dev
@@ -174,6 +187,23 @@ fn reject_invalid_app_name(path: &Path, app_name: &str) -> Result<(), ManifestEr
     }
 
     Ok(())
+}
+
+fn clean_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn clean_string_list(values: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = value.trim().to_owned();
+        if !value.is_empty() && !normalized.contains(&value) {
+            normalized.push(value);
+        }
+    }
+    normalized
 }
 
 fn reject_invalid_windows(path: &Path, windows: &[WindowConfig]) -> Result<(), ManifestError> {
@@ -500,6 +530,10 @@ mod tests {
 [app]
 name = "hello"
 identifier = "dev.axion.hello"
+version = "1.2.3"
+description = " Hello from Axion "
+authors = [" Alice ", "Bob", "Alice", ""]
+homepage = " https://example.dev "
 
 [window]
 id = "main"
@@ -529,6 +563,16 @@ allow_remote_navigation = false
         assert_eq!(
             config.identity.identifier.as_deref(),
             Some("dev.axion.hello")
+        );
+        assert_eq!(config.identity.version.as_deref(), Some("1.2.3"));
+        assert_eq!(
+            config.identity.description.as_deref(),
+            Some("Hello from Axion")
+        );
+        assert_eq!(config.identity.authors, vec!["Alice", "Bob"]);
+        assert_eq!(
+            config.identity.homepage.as_deref(),
+            Some("https://example.dev")
         );
         assert_eq!(config.windows[0].title, "Hello");
         assert!(config.build.frontend_dist.is_absolute());

@@ -38,6 +38,10 @@ impl Builder {
         self.identity = Some(AppIdentity {
             name,
             identifier: identity.identifier,
+            version: identity.version,
+            description: identity.description,
+            authors: identity.authors,
+            homepage: identity.homepage,
         });
         self
     }

@@ -9,6 +9,10 @@ use crate::WindowConfig;
 pub struct AppIdentity {
     pub name: String,
     pub identifier: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub authors: Vec<String>,
+    pub homepage: Option<String>,
 }
 
 impl AppIdentity {
@@ -16,11 +20,35 @@ impl AppIdentity {
         Self {
             name: name.into(),
             identifier: None,
+            version: None,
+            description: None,
+            authors: Vec::new(),
+            homepage: None,
         }
     }
 
     pub fn with_identifier(mut self, identifier: impl Into<String>) -> Self {
         self.identifier = Some(identifier.into());
+        self
+    }
+
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
+        self
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn with_authors(mut self, authors: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.authors = authors.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn with_homepage(mut self, homepage: impl Into<String>) -> Self {
+        self.homepage = Some(homepage.into());
         self
     }
 }

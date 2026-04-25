@@ -8,6 +8,10 @@ Axion applications are configured with `axion.toml`.
 [app]
 name = "hello-axion"
 identifier = "dev.axion.hello"
+version = "0.1.0"
+description = "Hello Axion example"
+authors = ["Axion Maintainers"]
+homepage = "https://example.dev/hello-axion"
 
 [window]
 id = "main"
@@ -36,6 +40,12 @@ allow_remote_navigation = false
 
 - `name`: package-safe application name.
 - `identifier`: stable reverse-DNS style app identifier.
+- `version`: optional application version used by diagnostics and bundle metadata.
+- `description`: optional human-readable app summary.
+- `authors`: optional list of maintainers or organizations.
+- `homepage`: optional project or product URL.
+
+Optional metadata is surfaced by `app.info`, `axion doctor`, and `axion bundle` scaffolds. Empty metadata strings are ignored when loading the manifest.
 
 ## Window
 
@@ -96,3 +106,5 @@ allow_remote_navigation = false
 ```
 
 Only declared commands, frontend events, protocols, and navigation origins are available to that window.
+
+Custom Rust commands use the same capability list as built-in commands. For example, a plugin command registered as `demo.greet` must appear in `commands` before frontend code can call `window.__AXION__.invoke("demo.greet", payload)`.

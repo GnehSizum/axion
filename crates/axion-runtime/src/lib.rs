@@ -12,7 +12,7 @@ pub use axion_bridge::{
     BridgeEmitRequest, BridgeEvent as RuntimeBridgeEvent, BridgeRequest, CommandRegistryError,
 };
 
-const AXION_RELEASE_VERSION: &str = "v0.1.1.0";
+const AXION_RELEASE_VERSION: &str = "v0.1.2.0";
 
 pub trait RuntimePlugin: Send + Sync {
     fn register(&self, builder: &mut RuntimeBridgeBindingsBuilder);
@@ -480,6 +480,10 @@ fn build_command_context(
     CommandContext {
         app_name: launch_config.app_name.clone(),
         identifier: launch_config.identifier.clone(),
+        version: launch_config.version.clone(),
+        description: launch_config.description.clone(),
+        authors: launch_config.authors.clone(),
+        homepage: launch_config.homepage.clone(),
         mode: match launch_config.mode {
             RunMode::Development => BridgeRunMode::Development,
             RunMode::Production => BridgeRunMode::Production,
@@ -587,9 +591,13 @@ fn register_builtin_commands(
     if allowed_commands.iter().any(|command| command == "app.info") {
         builder.register_command("app.info", |context, _request| {
             Ok(format!(
-                "{{\"appName\":{},\"identifier\":{},\"mode\":{}}}",
+                "{{\"appName\":{},\"identifier\":{},\"version\":{},\"description\":{},\"authors\":{},\"homepage\":{},\"mode\":{}}}",
                 json_string_literal(&context.app_name),
                 optional_json_string_literal(context.identifier.as_deref()),
+                optional_json_string_literal(context.version.as_deref()),
+                optional_json_string_literal(context.description.as_deref()),
+                json_string_array_literal(&context.authors),
+                optional_json_string_literal(context.homepage.as_deref()),
                 json_string_literal(match context.mode {
                     BridgeRunMode::Development => "development",
                     BridgeRunMode::Production => "production",
@@ -1286,7 +1294,15 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.1.0\""));
+        assert!(version.contains("\"release\":\"v0.1.2.0\""));
+    }
+
+    #[test]
+    fn json_string_literal_escapes_custom_command_output() {
+        assert_eq!(
+            super::json_string_literal("hello \"axion\"\n"),
+            "\"hello \\\"axion\\\"\\n\""
+        );
     }
 
     #[test]
@@ -1476,7 +1492,11 @@ mod tests {
     }
 }
 
-fn json_string_literal(value: &str) -> String {
+/// Escape a Rust string as a JSON string literal for command responses.
+///
+/// Custom command handlers return JSON text today. Use this helper when building
+/// small JSON responses without adding an application-level JSON dependency.
+pub fn json_string_literal(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -1506,6 +1526,16 @@ fn json_string_map_literal(values: &std::collections::BTreeMap<String, String>) 
         .join(",");
 
     format!("{{{entries}}}")
+}
+
+fn json_string_array_literal(values: &[String]) -> String {
+    let entries = values
+        .iter()
+        .map(|value| json_string_literal(value))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!("[{entries}]")
 }
 
 fn json_string_field(payload: &str, field: &str) -> Option<String> {
