@@ -8,7 +8,7 @@ cargo run -p axion-cli -- <command>
 
 ## `new`
 
-Generate a minimal application with local artifact hygiene, panic reporting, and bridge demos.
+Generate a minimal application with local artifact hygiene, panic reporting, a default bundle icon, and bridge demos.
 
 ```sh
 cargo run -p axion-cli -- new demo-app --template vanilla --path /tmp/demo-app
@@ -18,7 +18,7 @@ Project names are normalized to lowercase kebab-case for package use.
 
 Options:
 
-- `--template vanilla`: generate a plain HTML/CSS/JavaScript app with bridge, native API, custom command, and capability-denial demos.
+- `--template vanilla`: generate a plain HTML/CSS/JavaScript app with bridge, native API, custom command, capability-denial, and bundle-icon demos.
 - `--path <path>`: choose the output directory.
 
 ## `dev`
@@ -89,7 +89,7 @@ cargo run -p axion-cli -- build --manifest-path examples/hello-axion/axion.toml
 
 ## `bundle`
 
-Create a platform bundle scaffold and copy staged app resources. App metadata from `[app]` is written into bundle metadata files where supported.
+Create a platform bundle scaffold and copy staged app resources. App metadata from `[app]` and icon configuration from `[bundle]` are written into bundle metadata files where supported. Each bundle also includes `axion-bundle-manifest.json`, a deterministic integrity manifest listing bundle paths, byte sizes, and `fnv1a64` content fingerprints. After staging, `bundle` verifies the generated entry, metadata, asset manifest, bundle manifest, icon, executable references, sizes, and fingerprints.
 
 ```sh
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml
@@ -100,6 +100,8 @@ Executable handling:
 - If `--executable <path>` is passed, that binary is copied into the bundle.
 - If no executable is passed, Axion searches nearby `target/release/` and `target/debug/` directories for a binary matching the app name.
 - Pass `--build-executable` to run `cargo build --release` for the app before bundling.
+- Use the printed `bundle_manifest` path to inspect the generated entry, resource, metadata, icon, executable, and file list.
+- `verification: ok` means every referenced bundle path exists and the manifest file list matches generated file sizes and `fnv1a64` fingerprints.
 
 ```sh
 cargo run -p axion-cli -- bundle \

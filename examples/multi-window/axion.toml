@@ -26,6 +26,9 @@ visible = true
 frontend_dist = "frontend"
 entry = "frontend/index.html"
 
+[bundle]
+icon = "icons/app.icns"
+
 [capabilities.main]
 commands = ["app.ping", "app.info", "app.echo"]
 events = ["app.log"]

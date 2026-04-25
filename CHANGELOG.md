@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.1.3.0 - Preview
+
+Axion v0.1.3.0 completes the native application polish and packaging quality milestone on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.3`.
+- Axion public release metadata is `v0.1.3.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Manifest `[bundle] icon = "path/to/icon"` support for project-relative bundle icons.
+- `axion doctor` and `axion self-test` validate configured bundle icons.
+- `axion bundle` copies configured icons into bundle resources and records them in bundle metadata.
+- Example apps and `axion new --template vanilla` include a default `icons/app.icns` bundle icon.
+- `axion bundle` writes `axion-bundle-manifest.json` with bundle target, entry, metadata, executable, icon, file sizes, and content fingerprints.
+- `axion bundle` performs post-stage verification of required bundle paths, file sizes, and content fingerprints before reporting success.
+- Bundle manifests now include per-file `fnv1a64` content fingerprints, and verification detects same-size file tampering.
+
+### Deferred
+
+- Installer generation, signing, notarization, auto-updates, and platform store packaging.
+- Native dialog backend implementation beyond the current headless-safe preview stubs.
+- Automated GUI CI across platforms.
+
 ## v0.1.2.0 - Preview
 
 Axion v0.1.2.0 completes the next developer-preview feature milestone on the current Servo `0.1` baseline.

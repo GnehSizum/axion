@@ -37,7 +37,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.2", release: "v0.1.2.0", framework: "axion" }
+// { version: "0.1.3", release: "v0.1.3.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -91,7 +91,7 @@ await window.__AXION__.invoke("fs.read_text", {
 
 ## Dialog Commands
 
-`dialog.open` and `dialog.save` are registered capability-gated preview commands. In v0.1.2.0 they are headless-safe stubs and return `{ canceled: true, path: null }` until a native dialog backend is added.
+`dialog.open` and `dialog.save` are registered capability-gated preview commands. In v0.1.3.0 they are headless-safe stubs and return `{ canceled: true, path: null }` until a native dialog backend is added.
 
 ```js
 await window.__AXION__.invoke("dialog.open", null);

@@ -2,7 +2,7 @@
 
 Axion is a Rust desktop application framework built on a vendored Servo engine. It provides an explicit manifest, capability-gated JavaScript bridge, packaged app assets, runtime diagnostics, and a `winit` desktop backend.
 
-Axion is currently at the **v0.1.2.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
+Axion is currently at the **v0.1.3.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
 
 ## What Works Today
 
@@ -13,7 +13,7 @@ Axion is currently at the **v0.1.2.0 developer preview**. It is suitable for fra
 - Compile and launch a Servo-backed desktop window behind `servo-runtime`.
 - Invoke built-in bridge commands from frontend JavaScript.
 - Use capability-gated native commands for app metadata and app-data text files.
-- Stage frontend assets and bundle scaffolds, optionally including an app executable.
+- Stage and verify bundle scaffolds with app icon, executable, metadata, and fingerprinted bundle manifest output.
 - Inspect per-window capabilities with the `multi-window` example.
 - Run non-GUI CI checks for formatting, workspace tests, and example self-tests.
 
@@ -79,10 +79,14 @@ cargo check -p hello-axion --features servo-runtime
 cargo check -p multi-window --features servo-runtime
 cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
+cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml
+cargo run -p axion-cli -- doctor --manifest-path examples/multi-window/axion.toml
+cargo run -p axion-cli -- self-test --manifest-path examples/multi-window/axion.toml
+cargo run -p axion-cli -- bundle --manifest-path examples/multi-window/axion.toml
 ```
 
 Servo warnings from the vendored `servo/` subtree are not Axion release blockers unless they correspond to an Axion regression.
 
 ## Versioning
 
-Axion public releases use four-part tags such as `v0.1.2.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.2`. See `docs/versioning.md`.
+Axion public releases use four-part tags such as `v0.1.3.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.3`. See `docs/versioning.md`.

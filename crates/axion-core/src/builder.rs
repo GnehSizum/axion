@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::{
-    App, AppConfig, AppIdentity, AxionError, BuildConfig, CapabilityConfig, DevServerConfig,
-    WindowConfig,
+    App, AppConfig, AppIdentity, AxionError, BuildConfig, BundleConfig, CapabilityConfig,
+    DevServerConfig, WindowConfig,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -12,6 +12,7 @@ pub struct Builder {
     windows: Vec<WindowConfig>,
     dev: Option<DevServerConfig>,
     build: Option<BuildConfig>,
+    bundle: BundleConfig,
     capabilities: BTreeMap<String, CapabilityConfig>,
 }
 
@@ -25,6 +26,7 @@ impl Builder {
         self.windows = config.windows;
         self.dev = config.dev;
         self.build = Some(config.build);
+        self.bundle = config.bundle;
         self.capabilities = config.capabilities;
         self
     }
@@ -67,6 +69,11 @@ impl Builder {
 
     pub fn with_build(mut self, build: BuildConfig) -> Self {
         self.build = Some(build);
+        self
+    }
+
+    pub fn with_bundle(mut self, bundle: BundleConfig) -> Self {
+        self.bundle = bundle;
         self
     }
 
@@ -131,6 +138,7 @@ impl Builder {
             windows: self.windows,
             dev: self.dev,
             build,
+            bundle: self.bundle,
             capabilities: self.capabilities,
         }))
     }
@@ -143,7 +151,9 @@ fn is_path_empty(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::Builder;
-    use crate::{AxionError, BuildConfig, WindowConfig, WindowId};
+    use crate::{
+        AppConfig, AppIdentity, AxionError, BuildConfig, BundleConfig, WindowConfig, WindowId,
+    };
 
     fn valid_builder() -> Builder {
         Builder::new()
@@ -191,5 +201,35 @@ mod tests {
             .expect_err("unknown capability window should fail");
 
         assert!(matches!(error, AxionError::UnknownCapabilityWindow { .. }));
+    }
+
+    #[test]
+    fn builder_preserves_bundle_config() {
+        let icon = std::path::PathBuf::from("icons/app.icns");
+        let app = valid_builder()
+            .with_window(WindowConfig::new(WindowId::main(), "Main", 960, 720))
+            .with_bundle(BundleConfig::new().with_icon(&icon))
+            .build()
+            .expect("bundle config should build");
+
+        assert_eq!(app.config().bundle.icon.as_ref(), Some(&icon));
+    }
+
+    #[test]
+    fn apply_config_preserves_bundle_config() {
+        let icon = std::path::PathBuf::from("icons/app.icns");
+        let app = Builder::new()
+            .apply_config(AppConfig {
+                identity: AppIdentity::new("axion-test"),
+                windows: vec![WindowConfig::new(WindowId::main(), "Main", 960, 720)],
+                dev: None,
+                build: BuildConfig::new("frontend", "frontend/index.html"),
+                bundle: BundleConfig::new().with_icon(&icon),
+                capabilities: Default::default(),
+            })
+            .build()
+            .expect("config should build");
+
+        assert_eq!(app.config().bundle.icon.as_ref(), Some(&icon));
     }
 }

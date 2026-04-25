@@ -50,6 +50,9 @@ fn print_manifest_status(manifest_path: &Path) -> Result<(), AxionCliError> {
     for line in build_asset_diagnostic_lines(&config) {
         println!("{line}");
     }
+    for line in bundle_diagnostic_lines(&config) {
+        println!("{line}");
+    }
     for line in runtime_diagnostic_lines(&config) {
         println!("{line}");
     }
@@ -143,6 +146,16 @@ fn build_asset_diagnostic_lines(config: &AppConfig) -> Vec<String> {
             lines.push(format!("entry: {}", entry.display()));
             lines
         }
+    }
+}
+
+fn bundle_diagnostic_lines(config: &AppConfig) -> Vec<String> {
+    match config.bundle.icon.as_deref() {
+        Some(icon) => match axion_packager::validate_bundle_icon(Some(icon)) {
+            Ok(_) => vec![format!("bundle.icon: ok ({})", icon.display())],
+            Err(error) => vec![format!("bundle.icon: invalid ({error})")],
+        },
+        None => vec!["bundle.icon: not configured".to_owned()],
     }
 }
 
@@ -240,8 +253,9 @@ mod tests {
     use url::Url;
 
     use super::{
-        build_asset_diagnostic_lines, dev_server_diagnostic_line, dev_server_diagnostic_line_with,
-        manifest_diagnostic_lines, runtime_diagnostic_lines, servo_path_for_manifest,
+        build_asset_diagnostic_lines, bundle_diagnostic_lines, dev_server_diagnostic_line,
+        dev_server_diagnostic_line_with, manifest_diagnostic_lines, runtime_diagnostic_lines,
+        servo_path_for_manifest,
     };
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -283,6 +297,7 @@ mod tests {
             ],
             dev: None,
             build: BuildConfig::new("frontend", "frontend/index.html"),
+            bundle: Default::default(),
             capabilities: std::collections::BTreeMap::from([(
                 "main".to_owned(),
                 CapabilityConfig {
@@ -344,6 +359,7 @@ mod tests {
             windows: vec![WindowConfig::main("Main")],
             dev: None,
             build: BuildConfig::new(&frontend, &entry),
+            bundle: Default::default(),
             capabilities: Default::default(),
         };
 
@@ -355,6 +371,35 @@ mod tests {
                 format!("frontend_dist: ok ({})", frontend.display()),
                 format!("entry: ok ({}; relative=index.html)", entry.display())
             ]
+        );
+    }
+
+    #[test]
+    fn bundle_diagnostics_report_icon_status() {
+        let root = temp_dir();
+        let icon = root.join("icons").join("app.icns");
+        fs::create_dir_all(icon.parent().unwrap()).unwrap();
+        fs::write(&icon, "icon").unwrap();
+
+        let mut config = AppConfig {
+            identity: AppIdentity::new("doctor-test"),
+            windows: vec![WindowConfig::main("Main")],
+            dev: None,
+            build: BuildConfig::new("frontend", "frontend/index.html"),
+            bundle: axion_core::BundleConfig::new().with_icon(&icon),
+            capabilities: Default::default(),
+        };
+
+        assert_eq!(
+            bundle_diagnostic_lines(&config),
+            vec![format!("bundle.icon: ok ({})", icon.display())]
+        );
+
+        config.bundle = axion_core::BundleConfig::new().with_icon(root.join("missing.icns"));
+        assert!(
+            bundle_diagnostic_lines(&config)
+                .first()
+                .is_some_and(|line| line.starts_with("bundle.icon: invalid"))
         );
     }
 
@@ -371,6 +416,7 @@ mod tests {
             windows: vec![WindowConfig::main("Main")],
             dev: None,
             build: BuildConfig::new(&frontend, &entry),
+            bundle: Default::default(),
             capabilities: std::collections::BTreeMap::from([(
                 "main".to_owned(),
                 CapabilityConfig {
@@ -419,6 +465,7 @@ mod tests {
             ],
             dev: None,
             build: BuildConfig::new(&frontend, &entry),
+            bundle: Default::default(),
             capabilities: std::collections::BTreeMap::from([
                 (
                     "main".to_owned(),
@@ -469,6 +516,7 @@ mod tests {
             windows: vec![WindowConfig::main("Main")],
             dev: None,
             build: BuildConfig::new(&frontend, &entry),
+            bundle: Default::default(),
             capabilities: Default::default(),
         };
 
@@ -506,6 +554,7 @@ mod tests {
             windows: vec![WindowConfig::main("Main")],
             dev: None,
             build: BuildConfig::new(&frontend, &entry),
+            bundle: Default::default(),
             capabilities: Default::default(),
         };
 
@@ -533,6 +582,7 @@ mod tests {
             windows: vec![WindowConfig::main("Main")],
             dev: None,
             build: BuildConfig::new(&frontend, &entry),
+            bundle: Default::default(),
             capabilities: Default::default(),
         };
 
@@ -553,6 +603,7 @@ mod tests {
             windows: vec![WindowConfig::main("Main")],
             dev: None,
             build: BuildConfig::new("frontend", "frontend/index.html"),
+            bundle: Default::default(),
             capabilities: Default::default(),
         };
 
@@ -571,6 +622,7 @@ mod tests {
                 url: Url::parse("http://127.0.0.1:3000").unwrap(),
             }),
             build: BuildConfig::new("frontend", "frontend/index.html"),
+            bundle: Default::default(),
             capabilities: Default::default(),
         };
 

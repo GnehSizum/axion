@@ -14,6 +14,8 @@ pub struct ManifestDocument {
     pub dev: Option<DevSection>,
     pub build: BuildSection,
     #[serde(default)]
+    pub bundle: Option<BundleSection>,
+    #[serde(default)]
     pub capabilities: BTreeMap<String, CapabilitySection>,
 }
 
@@ -70,6 +72,12 @@ pub struct DevSection {
 pub struct BuildSection {
     pub frontend_dist: PathBuf,
     pub entry: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BundleSection {
+    #[serde(default)]
+    pub icon: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

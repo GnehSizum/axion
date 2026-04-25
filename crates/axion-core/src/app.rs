@@ -292,6 +292,7 @@ mod tests {
                 url: Url::parse(url).expect("test URL must parse"),
             }),
             build: BuildConfig::new("frontend", "frontend/index.html"),
+            bundle: Default::default(),
             capabilities: BTreeMap::from([(
                 "main".to_owned(),
                 CapabilityConfig {
