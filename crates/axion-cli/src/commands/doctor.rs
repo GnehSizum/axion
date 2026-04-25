@@ -80,6 +80,10 @@ fn manifest_diagnostic_lines(config: &AppConfig) -> Vec<String> {
     if let Some(homepage) = &config.identity.homepage {
         lines.push(format!("app.homepage: {homepage}"));
     }
+    lines.push(format!(
+        "native.dialog.backend: {}",
+        config.native.dialog.backend.as_str()
+    ));
 
     lines.extend(config
         .windows
@@ -166,11 +170,13 @@ fn runtime_diagnostic_lines(config: &AppConfig) -> Vec<String> {
     };
     let report = axion_runtime::diagnostic_report(&app, RunMode::Production);
     let mut lines = vec![format!(
-        "runtime: app={}, mode={}, windows={}, errors={}, resource_policy={}",
+        "runtime: app={}, mode={}, windows={}, errors={}, configured_dialog_backend={}, dialog_backend={}, resource_policy={}",
         report.app_name,
         report.mode,
         report.window_count,
         report.has_errors(),
+        report.configured_dialog_backend.as_str(),
+        report.dialog_backend.as_str(),
         report.resource_policy
     )];
     for window in report.windows {
@@ -298,6 +304,7 @@ mod tests {
             dev: None,
             build: BuildConfig::new("frontend", "frontend/index.html"),
             bundle: Default::default(),
+            native: Default::default(),
             capabilities: std::collections::BTreeMap::from([(
                 "main".to_owned(),
                 CapabilityConfig {
@@ -333,6 +340,11 @@ mod tests {
                 .iter()
                 .any(|line| line == "app.homepage: https://example.dev/doctor")
         );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "native.dialog.backend: headless")
+        );
         assert!(lines.iter().any(|line| line.contains("window.main")));
         assert!(
             lines
@@ -360,6 +372,7 @@ mod tests {
             dev: None,
             build: BuildConfig::new(&frontend, &entry),
             bundle: Default::default(),
+            native: Default::default(),
             capabilities: Default::default(),
         };
 
@@ -387,6 +400,7 @@ mod tests {
             dev: None,
             build: BuildConfig::new("frontend", "frontend/index.html"),
             bundle: axion_core::BundleConfig::new().with_icon(&icon),
+            native: Default::default(),
             capabilities: Default::default(),
         };
 
@@ -417,6 +431,7 @@ mod tests {
             dev: None,
             build: BuildConfig::new(&frontend, &entry),
             bundle: Default::default(),
+            native: Default::default(),
             capabilities: std::collections::BTreeMap::from([(
                 "main".to_owned(),
                 CapabilityConfig {
@@ -432,7 +447,7 @@ mod tests {
         let lines = runtime_diagnostic_lines(&config);
 
         assert!(lines.iter().any(|line| line.starts_with(
-            "runtime: app=doctor-test, mode=production, windows=1, errors=false, resource_policy="
+            "runtime: app=doctor-test, mode=production, windows=1, errors=false, configured_dialog_backend=headless, dialog_backend=headless, resource_policy="
         )));
         assert!(
             lines
@@ -466,6 +481,7 @@ mod tests {
             dev: None,
             build: BuildConfig::new(&frontend, &entry),
             bundle: Default::default(),
+            native: Default::default(),
             capabilities: std::collections::BTreeMap::from([
                 (
                     "main".to_owned(),
@@ -493,7 +509,7 @@ mod tests {
         let lines = runtime_diagnostic_lines(&config);
 
         assert!(lines.iter().any(|line| line.starts_with(
-            "runtime: app=doctor-multi-window, mode=production, windows=2, errors=false"
+            "runtime: app=doctor-multi-window, mode=production, windows=2, errors=false, configured_dialog_backend=headless, dialog_backend=headless"
         )));
         assert!(lines.iter().any(|line| {
             line.starts_with("runtime.window.main: bridge=enabled, commands=2")
@@ -517,6 +533,7 @@ mod tests {
             dev: None,
             build: BuildConfig::new(&frontend, &entry),
             bundle: Default::default(),
+            native: Default::default(),
             capabilities: Default::default(),
         };
 
@@ -555,6 +572,7 @@ mod tests {
             dev: None,
             build: BuildConfig::new(&frontend, &entry),
             bundle: Default::default(),
+            native: Default::default(),
             capabilities: Default::default(),
         };
 
@@ -583,6 +601,7 @@ mod tests {
             dev: None,
             build: BuildConfig::new(&frontend, &entry),
             bundle: Default::default(),
+            native: Default::default(),
             capabilities: Default::default(),
         };
 
@@ -604,6 +623,7 @@ mod tests {
             dev: None,
             build: BuildConfig::new("frontend", "frontend/index.html"),
             bundle: Default::default(),
+            native: Default::default(),
             capabilities: Default::default(),
         };
 
@@ -623,6 +643,7 @@ mod tests {
             }),
             build: BuildConfig::new("frontend", "frontend/index.html"),
             bundle: Default::default(),
+            native: Default::default(),
             capabilities: Default::default(),
         };
 

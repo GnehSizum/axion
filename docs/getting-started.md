@@ -72,7 +72,7 @@ Generated projects contain:
 
 The generated `demo.greet` command is registered in Rust, allowed in `[capabilities.main]`, and invoked from frontend JavaScript. See `custom-commands.md` for the pattern.
 
-Generated manifests also include optional app metadata (`version`, `description`, `authors`, and `homepage`) plus `[bundle] icon = "icons/app.icns"`. These values appear in `app.info`, `axion doctor`, and bundle metadata scaffolds.
+Generated manifests also include optional app metadata (`version`, `description`, `authors`, and `homepage`), `[bundle] icon = "icons/app.icns"`, and `[native.dialog] backend = "headless"`. These values appear in `app.info`, `axion doctor`, self-test output, and bundle metadata scaffolds. The generated frontend also demonstrates `dialog.open` with multi-select and filter metadata plus `dialog.save` with `defaultPath`.
 
 Generated apps install Axion panic reporting by default. Crash reports are written under `target/axion/crash-reports/`, which is ignored by the generated `.gitignore`.
 
@@ -87,7 +87,7 @@ cargo run -p axion-cli -- build --manifest-path /tmp/demo-app/axion.toml
 cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml
 ```
 
-`self-test` prints app metadata, each window's configured commands/events/protocols, runtime command/event counts, host events, navigation origins, and staged asset paths.
+`self-test` prints app metadata, native dialog backend, each window's configured commands/events/protocols, runtime command/event counts, host events, navigation origins, and staged asset paths.
 
 To customize an application icon in bundle scaffolds, update `[bundle] icon = "icons/app.icns"` in `axion.toml` and keep the icon file inside the project directory. Bundle output includes `axion-bundle-manifest.json`, which records the generated entry, metadata, icon, executable, file sizes, and `fnv1a64` fingerprints. The `bundle` command prints `verification: ok` after checking those references against the generated files.
 

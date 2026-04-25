@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use axion_core::{
     AppConfig, AppIdentity, BuildConfig, BundleConfig, CapabilityConfig, DevServerConfig,
-    WindowConfig, WindowId,
+    DialogBackendConfig, DialogConfig, NativeConfig, WindowConfig, WindowId,
 };
 use url::Url;
 
@@ -87,6 +87,8 @@ pub enum ManifestError {
     UnknownCapabilityWindow { path: PathBuf, window_id: String },
     #[error("manifest at {path} defines an invalid bundle.icon path '{value}'")]
     InvalidBundleIconPath { path: PathBuf, value: PathBuf },
+    #[error("manifest at {path} defines invalid native.dialog.backend '{value}'")]
+    InvalidNativeDialogBackend { path: PathBuf, value: String },
 }
 
 pub fn load_from_path(path: impl AsRef<Path>) -> Result<ManifestDocument, ManifestError> {
@@ -149,6 +151,7 @@ pub fn load_app_config_from_path(path: impl AsRef<Path>) -> Result<AppConfig, Ma
         resolve_path(&manifest_dir, manifest.build.entry),
     );
     let bundle = bundle_config_from_manifest(&path, &manifest_dir, manifest.bundle)?;
+    let native = native_config_from_manifest(&path, manifest.native)?;
 
     let windows = manifest_windows(manifest.window, manifest.windows)
         .into_iter()
@@ -174,8 +177,37 @@ pub fn load_app_config_from_path(path: impl AsRef<Path>) -> Result<AppConfig, Ma
         dev,
         build,
         bundle,
+        native,
         capabilities,
     })
+}
+
+fn native_config_from_manifest(
+    path: &Path,
+    native: Option<crate::model::NativeSection>,
+) -> Result<NativeConfig, ManifestError> {
+    let Some(native) = native else {
+        return Ok(NativeConfig::new());
+    };
+    let Some(dialog) = native.dialog else {
+        return Ok(NativeConfig::new());
+    };
+    let Some(backend) = clean_optional_string(dialog.backend) else {
+        return Ok(NativeConfig::new());
+    };
+
+    let backend = match backend.as_str() {
+        "headless" => DialogBackendConfig::Headless,
+        "system" => DialogBackendConfig::System,
+        _ => {
+            return Err(ManifestError::InvalidNativeDialogBackend {
+                path: path.to_path_buf(),
+                value: backend,
+            });
+        }
+    };
+
+    Ok(NativeConfig::new().with_dialog(DialogConfig { backend }))
 }
 
 fn bundle_config_from_manifest(
@@ -548,6 +580,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use axion_core::DialogBackendConfig;
+
     use super::{ManifestError, load_app_config_from_path};
 
     static TEST_MANIFEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -593,6 +627,9 @@ entry = "frontend/index.html"
 [bundle]
 icon = "icons/app.icns"
 
+[native.dialog]
+backend = "headless"
+
 [capabilities.main]
 commands = ["app.ping"]
 events = ["app.log"]
@@ -626,12 +663,58 @@ allow_remote_navigation = false
             config.bundle.icon,
             Some(manifest_path.parent().unwrap().join("icons/app.icns"))
         );
+        assert_eq!(config.native.dialog.backend, DialogBackendConfig::Headless);
         assert_eq!(config.capabilities["main"].commands, vec!["app.ping"]);
         assert_eq!(config.capabilities["main"].events, vec!["app.log"]);
         assert_eq!(
             config.capabilities["main"].allowed_navigation_origins,
             vec!["https://docs.example"]
         );
+    }
+
+    #[test]
+    fn manifest_loader_accepts_system_dialog_backend() {
+        let manifest_path = write_manifest(
+            r#"
+[app]
+name = "hello"
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[native.dialog]
+backend = "system"
+"#,
+        );
+
+        let config = load_app_config_from_path(&manifest_path).expect("manifest should load");
+
+        assert_eq!(config.native.dialog.backend, DialogBackendConfig::System);
+    }
+
+    #[test]
+    fn manifest_loader_rejects_invalid_dialog_backend() {
+        let manifest_path = write_manifest(
+            r#"
+[app]
+name = "hello"
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[native.dialog]
+backend = "portal"
+"#,
+        );
+
+        let error = load_app_config_from_path(&manifest_path).expect_err("manifest should fail");
+
+        assert!(matches!(
+            error,
+            ManifestError::InvalidNativeDialogBackend { .. }
+        ));
     }
 
     #[test]

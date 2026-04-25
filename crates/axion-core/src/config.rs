@@ -90,6 +90,62 @@ impl BundleConfig {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NativeConfig {
+    pub dialog: DialogConfig,
+}
+
+impl NativeConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_dialog(mut self, dialog: DialogConfig) -> Self {
+        self.dialog = dialog;
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DialogConfig {
+    pub backend: DialogBackendConfig,
+}
+
+impl Default for DialogConfig {
+    fn default() -> Self {
+        Self {
+            backend: DialogBackendConfig::Headless,
+        }
+    }
+}
+
+impl DialogConfig {
+    pub fn headless() -> Self {
+        Self::default()
+    }
+
+    pub fn system() -> Self {
+        Self {
+            backend: DialogBackendConfig::System,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogBackendConfig {
+    Headless,
+    System,
+}
+
+impl DialogBackendConfig {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Headless => "headless",
+            Self::System => "system",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CapabilityConfig {
     pub commands: Vec<String>,
     pub events: Vec<String>,
@@ -105,6 +161,7 @@ pub struct AppConfig {
     pub dev: Option<DevServerConfig>,
     pub build: BuildConfig,
     pub bundle: BundleConfig,
+    pub native: NativeConfig,
     pub capabilities: BTreeMap<String, CapabilityConfig>,
 }
 

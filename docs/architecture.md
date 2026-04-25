@@ -45,6 +45,10 @@ Each manifest window receives its own native window, bridge token, command regis
 - `axion-bridge` owns JavaScript bridge naming, payload validation, and dispatch contracts.
 - `axion-cli` provides developer workflows without becoming part of the runtime API.
 
+## Native Preview Layer
+
+`axion-core` owns native configuration such as `[native.dialog]`. `axion-manifest` parses it, and `axion-runtime` resolves it into capability-gated bridge commands. The default dialog backend is `headless` for deterministic self-tests; `system` is a preview backend that currently opens macOS file dialogs and cancels as `system-unavailable` elsewhere.
+
 ## Version Scope
 
-v0.1.3.0 completes native application polish and packaging quality on top of the generated-app workflow, capability-gated native command surface, strict dev-server launch checks, executable-aware bundling, multi-window diagnostics, and non-GUI CI gates completed through v0.1.2.0. The release adds bundle icons, deterministic bundle manifests, post-stage verification, and per-file `fnv1a64` fingerprints. Axion public versions use four components to separate Servo baseline, Axion feature milestones, and bugfix releases; Cargo crates keep SemVer-compatible three-component versions. Installer generation, signing, auto-updates, native dialog backends, and CI GUI integration tests remain later milestones.
+v0.1.4.0 completes the native dialog preview milestone on top of the generated-app workflow, capability-gated native command surface, strict dev-server launch checks, executable-aware bundling, multi-window diagnostics, and packaging quality completed through v0.1.3.0. The release adds manifest-driven dialog backend selection, headless-safe dialog responses, macOS system dialog preview behavior, and diagnostic reporting. Axion public versions use four components to separate Servo baseline, Axion feature milestones, and bugfix releases; Cargo crates keep SemVer-compatible three-component versions. Installer generation, signing, auto-updates, broader native API coverage, and CI GUI integration tests remain later milestones.

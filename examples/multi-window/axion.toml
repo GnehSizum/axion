@@ -29,6 +29,9 @@ entry = "frontend/index.html"
 [bundle]
 icon = "icons/app.icns"
 
+[native.dialog]
+backend = "headless"
+
 [capabilities.main]
 commands = ["app.ping", "app.info", "app.echo"]
 events = ["app.log"]

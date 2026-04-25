@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::{
     App, AppConfig, AppIdentity, AxionError, BuildConfig, BundleConfig, CapabilityConfig,
-    DevServerConfig, WindowConfig,
+    DevServerConfig, NativeConfig, WindowConfig,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -13,6 +13,7 @@ pub struct Builder {
     dev: Option<DevServerConfig>,
     build: Option<BuildConfig>,
     bundle: BundleConfig,
+    native: NativeConfig,
     capabilities: BTreeMap<String, CapabilityConfig>,
 }
 
@@ -27,6 +28,7 @@ impl Builder {
         self.dev = config.dev;
         self.build = Some(config.build);
         self.bundle = config.bundle;
+        self.native = config.native;
         self.capabilities = config.capabilities;
         self
     }
@@ -74,6 +76,11 @@ impl Builder {
 
     pub fn with_bundle(mut self, bundle: BundleConfig) -> Self {
         self.bundle = bundle;
+        self
+    }
+
+    pub fn with_native(mut self, native: NativeConfig) -> Self {
+        self.native = native;
         self
     }
 
@@ -139,6 +146,7 @@ impl Builder {
             dev: self.dev,
             build,
             bundle: self.bundle,
+            native: self.native,
             capabilities: self.capabilities,
         }))
     }
@@ -152,7 +160,8 @@ fn is_path_empty(path: &Path) -> bool {
 mod tests {
     use super::Builder;
     use crate::{
-        AppConfig, AppIdentity, AxionError, BuildConfig, BundleConfig, WindowConfig, WindowId,
+        AppConfig, AppIdentity, AxionError, BuildConfig, BundleConfig, DialogConfig, NativeConfig,
+        WindowConfig, WindowId,
     };
 
     fn valid_builder() -> Builder {
@@ -225,11 +234,23 @@ mod tests {
                 dev: None,
                 build: BuildConfig::new("frontend", "frontend/index.html"),
                 bundle: BundleConfig::new().with_icon(&icon),
+                native: NativeConfig::new(),
                 capabilities: Default::default(),
             })
             .build()
             .expect("config should build");
 
         assert_eq!(app.config().bundle.icon.as_ref(), Some(&icon));
+    }
+
+    #[test]
+    fn builder_preserves_native_config() {
+        let app = valid_builder()
+            .with_window(WindowConfig::new(WindowId::main(), "Main", 960, 720))
+            .with_native(NativeConfig::new().with_dialog(DialogConfig::system()))
+            .build()
+            .expect("native config should build");
+
+        assert_eq!(app.config().native.dialog, DialogConfig::system());
     }
 }

@@ -64,7 +64,7 @@ cargo run -p axion-cli --features servo-runtime -- dev \
 
 ## `doctor`
 
-Validate local tooling, manifest configuration, app metadata, frontend assets, runtime diagnostics, and Servo path availability.
+Validate local tooling, manifest configuration, app metadata, native dialog backend configuration, effective runtime dialog backend, frontend assets, runtime diagnostics, and Servo path availability.
 
 ```sh
 cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml
@@ -72,7 +72,7 @@ cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml
 
 ## `self-test`
 
-Run the non-GUI release gate for a manifest. It loads the app, prints app metadata and per-window capability/runtime summaries, checks runtime diagnostics, stages frontend assets, and removes generated artifacts by default.
+Run the non-GUI release gate for a manifest. It loads the app, prints app metadata, configured and effective native dialog backend, and per-window capability/runtime summaries, checks runtime diagnostics, stages frontend assets, and removes generated artifacts by default.
 
 ```sh
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml

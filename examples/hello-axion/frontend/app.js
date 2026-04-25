@@ -42,6 +42,18 @@ window.addEventListener('DOMContentLoaded', async () => {
       contents: 'hello-axion wrote this through the Axion bridge',
     });
     const fsRead = await window.__AXION__.invoke('fs.read_text', { path: 'notes/hello.txt' });
+    const dialogOpen = await window.__AXION__.invoke('dialog.open', {
+      title: 'Select files for the Axion preview',
+      multiple: true,
+      filters: [
+        { name: 'Text', extensions: ['txt', 'md'] },
+        { name: 'Images', extensions: ['png', 'jpg'] },
+      ],
+    });
+    const dialogSave = await window.__AXION__.invoke('dialog.save', {
+      title: 'Choose a save path for the Axion preview',
+      defaultPath: 'notes/export.txt',
+    });
     const hostLog = window.__AXION__.events.includes('app.log')
       ? await window.__AXION__.emit('app.log', {
           message: 'hello-axion frontend is ready',
@@ -52,7 +64,20 @@ window.addEventListener('DOMContentLoaded', async () => {
     status.textContent = `Axion bridge ready: ${ping.message} from ${ping.appName}; plugin=${greeting.appName}`;
     if (details) {
       details.textContent = JSON.stringify(
-        { appInfo, appVersion, appEcho, windowInfo, greeting, pluginEvent, fsWrite, fsRead, hostLog, lifecycleEvents },
+        {
+          appInfo,
+          appVersion,
+          appEcho,
+          windowInfo,
+          greeting,
+          pluginEvent,
+          fsWrite,
+          fsRead,
+          dialogOpen,
+          dialogSave,
+          hostLog,
+          lifecycleEvents,
+        },
         null,
         2,
       );

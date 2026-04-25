@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use url::Url;
 
-use crate::{AppConfig, WindowConfig};
+use crate::{AppConfig, NativeConfig, WindowConfig};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunMode {
@@ -99,6 +99,7 @@ pub struct RuntimeLaunchConfig {
     pub entrypoint: LaunchEntrypoint,
     pub frontend_dist: PathBuf,
     pub packaged_entry: PathBuf,
+    pub native: NativeConfig,
     pub windows: Vec<WindowLaunchConfig>,
 }
 
@@ -214,6 +215,7 @@ impl App {
             entrypoint,
             frontend_dist: self.config.build.frontend_dist.clone(),
             packaged_entry: self.config.build.entry.clone(),
+            native: self.config.native.clone(),
             windows: self
                 .config
                 .windows
@@ -293,6 +295,7 @@ mod tests {
             }),
             build: BuildConfig::new("frontend", "frontend/index.html"),
             bundle: Default::default(),
+            native: Default::default(),
             capabilities: BTreeMap::from([(
                 "main".to_owned(),
                 CapabilityConfig {

@@ -16,6 +16,8 @@ pub struct ManifestDocument {
     #[serde(default)]
     pub bundle: Option<BundleSection>,
     #[serde(default)]
+    pub native: Option<NativeSection>,
+    #[serde(default)]
     pub capabilities: BTreeMap<String, CapabilitySection>,
 }
 
@@ -78,6 +80,18 @@ pub struct BuildSection {
 pub struct BundleSection {
     #[serde(default)]
     pub icon: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NativeSection {
+    #[serde(default)]
+    pub dialog: Option<DialogSection>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DialogSection {
+    #[serde(default)]
+    pub backend: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
