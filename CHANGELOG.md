@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.1.4.0 - Preview
+
+Axion v0.1.4.0 completes the native dialog preview milestone on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.4`.
+- Axion public release metadata is `v0.1.4.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `[native.dialog] backend = "headless" | "system"` manifest configuration.
+- Added `NativeConfig`, `DialogConfig`, and dialog backend types to `axion-core`.
+- `dialog.open` and `dialog.save` now dispatch through a runtime dialog backend abstraction.
+- The default `headless` backend returns deterministic canceled responses with `backend = "headless"`.
+- The preview `system` backend opens macOS dialogs through `osascript` and reports `system-unavailable` on unsupported platforms.
+- `dialog.open` now accepts preview `multiple`, `directory`, and `filters` request metadata; `dialog.save` validates unsupported combinations instead of silently ignoring them.
+- `axion doctor`, `axion self-test`, examples, and generated app templates now surface configured versus effective native dialog backend state.
+
+### Deferred
+
+- Rich dialog options such as filters, directory selection, multi-select, and save overwrite policy.
+- Windows/Linux native dialog implementations beyond the current unavailable fallback.
+- Automated GUI CI across platforms.
+
 ## v0.1.3.0 - Preview
 
 Axion v0.1.3.0 completes the native application polish and packaging quality milestone on the current Servo `0.1` baseline.

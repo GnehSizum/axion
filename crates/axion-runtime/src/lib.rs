@@ -2,7 +2,7 @@ use axion_bridge::{
     BridgeBindings, BridgeBindingsBuilder, BridgeBindingsPlugin, BridgeEvent, BridgeRunMode,
     CommandContext, WindowCommandContext,
 };
-use axion_core::{App, RunMode, RuntimeLaunchConfig, WindowLaunchConfig};
+use axion_core::{App, DialogBackendConfig, RunMode, RuntimeLaunchConfig, WindowLaunchConfig};
 use axion_protocol::AppAssetResolver;
 use axion_security::SecurityPolicy;
 use thiserror::Error;
@@ -12,7 +12,7 @@ pub use axion_bridge::{
     BridgeEmitRequest, BridgeEvent as RuntimeBridgeEvent, BridgeRequest, CommandRegistryError,
 };
 
-const AXION_RELEASE_VERSION: &str = "v0.1.3.0";
+const AXION_RELEASE_VERSION: &str = "v0.1.4.0";
 
 pub trait RuntimePlugin: Send + Sync {
     fn register(&self, builder: &mut RuntimeBridgeBindingsBuilder);
@@ -54,6 +54,8 @@ pub struct RuntimeDiagnosticReport {
     pub mode: RunMode,
     pub target: Option<RuntimeLaunchTarget>,
     pub frontend_dist: std::path::PathBuf,
+    pub configured_dialog_backend: DialogBackendKind,
+    pub dialog_backend: DialogBackendKind,
     pub resource_policy: String,
     pub window_count: usize,
     pub windows: Vec<WindowDiagnostic>,
@@ -159,8 +161,97 @@ pub struct RuntimeLaunchRequest {
     pub mode: RunMode,
     pub target: RuntimeLaunchTarget,
     pub frontend_dist: std::path::PathBuf,
+    pub configured_dialog_backend: DialogBackendKind,
+    pub dialog_backend: DialogBackendKind,
     pub windows: Vec<axion_core::WindowLaunchConfig>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogBackendKind {
+    Headless,
+    System,
+    SystemUnavailable,
+}
+
+impl DialogBackendKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Headless => "headless",
+            Self::System => "system",
+            Self::SystemUnavailable => "system-unavailable",
+        }
+    }
+
+    pub const fn resolve_for_current_platform(self) -> Self {
+        match self {
+            Self::System => {
+                #[cfg(target_os = "macos")]
+                {
+                    Self::System
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    Self::SystemUnavailable
+                }
+            }
+            other => other,
+        }
+    }
+}
+
+impl From<DialogBackendConfig> for DialogBackendKind {
+    fn from(value: DialogBackendConfig) -> Self {
+        match value {
+            DialogBackendConfig::Headless => Self::Headless,
+            DialogBackendConfig::System => Self::System,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogRequestKind {
+    Open,
+    Save,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialogRequest {
+    pub kind: DialogRequestKind,
+    pub title: Option<String>,
+    pub default_path: Option<std::path::PathBuf>,
+    pub directory: bool,
+    pub multiple: bool,
+    pub filters: Vec<DialogFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialogFilter {
+    pub name: String,
+    pub extensions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialogResponse {
+    pub canceled: bool,
+    pub path: Option<std::path::PathBuf>,
+    pub paths: Option<Vec<std::path::PathBuf>>,
+    pub backend: DialogBackendKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogRequestError {
+    InvalidPayload { message: String },
+}
+
+impl std::fmt::Display for DialogRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPayload { message } => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for DialogRequestError {}
 
 #[derive(Debug, Clone)]
 pub struct RuntimeWindowBinding {
@@ -210,6 +301,9 @@ pub fn diagnostic_report(app: &App, mode: RunMode) -> RuntimeDiagnosticReport {
             mode,
             target: None,
             frontend_dist: app.config().build.frontend_dist.clone(),
+            configured_dialog_backend: DialogBackendKind::from(app.config().native.dialog.backend),
+            dialog_backend: DialogBackendKind::from(app.config().native.dialog.backend)
+                .resolve_for_current_platform(),
             resource_policy: axion_protocol::default_resource_policy_summary().to_owned(),
             window_count: app.config().windows.len(),
             windows: Vec::new(),
@@ -266,6 +360,16 @@ fn diagnostic_report_from_launch_request(request: RuntimeLaunchRequest) -> Runti
             message: "runtime launch has no windows".to_owned(),
         });
     }
+    if request.configured_dialog_backend != request.dialog_backend {
+        issues.push(RuntimeDiagnosticIssue {
+            severity: DiagnosticSeverity::Warning,
+            message: format!(
+                "native dialog backend '{}' resolves to '{}' on this platform",
+                request.configured_dialog_backend.as_str(),
+                request.dialog_backend.as_str()
+            ),
+        });
+    }
     for window in &windows {
         if !window.bridge_enabled {
             issues.push(RuntimeDiagnosticIssue {
@@ -289,6 +393,8 @@ fn diagnostic_report_from_launch_request(request: RuntimeLaunchRequest) -> Runti
         mode: request.mode,
         target: Some(target),
         frontend_dist: request.frontend_dist,
+        configured_dialog_backend: request.configured_dialog_backend,
+        dialog_backend: request.dialog_backend,
         resource_policy: axion_protocol::default_resource_policy_summary().to_owned(),
         window_count: request.windows.len(),
         windows,
@@ -390,6 +496,8 @@ pub fn launch_request_with_plugins(
     plugins: &[&dyn RuntimePlugin],
 ) -> Result<RuntimeLaunchRequest, RuntimeError> {
     let launch_config = launch_config(app, mode);
+    let configured_dialog_backend = DialogBackendKind::from(launch_config.native.dialog.backend);
+    let dialog_backend = configured_dialog_backend.resolve_for_current_platform();
     let app_protocol_resolver = AppAssetResolver::new(
         launch_config.frontend_dist.clone(),
         launch_config.packaged_entry.clone(),
@@ -421,6 +529,7 @@ pub fn launch_request_with_plugins(
                     &security_policy,
                     &command_context,
                     app_data_dir,
+                    dialog_backend,
                     plugins,
                 ),
                 security_policy,
@@ -437,6 +546,8 @@ pub fn launch_request_with_plugins(
         mode: launch_config.mode,
         target,
         frontend_dist: launch_config.frontend_dist,
+        configured_dialog_backend,
+        dialog_backend,
         windows: launch_config.windows,
     })
 }
@@ -503,6 +614,7 @@ fn build_bridge_bindings(
     security_policy: &SecurityPolicy,
     command_context: &CommandContext,
     app_data_dir: std::path::PathBuf,
+    dialog_backend: DialogBackendKind,
     plugins: &[&dyn RuntimePlugin],
 ) -> BridgeBindings {
     let allowed_commands = if security_policy.allows_protocol("axion") {
@@ -520,6 +632,7 @@ fn build_bridge_bindings(
         allowed_commands: allowed_commands.clone(),
         allowed_events: allowed_events.clone(),
         app_data_dir,
+        dialog_backend,
     };
     builder.apply_plugin(&plugin);
     for plugin in plugins {
@@ -536,13 +649,19 @@ struct BuiltinBridgePlugin {
     allowed_commands: Vec<String>,
     allowed_events: Vec<String>,
     app_data_dir: std::path::PathBuf,
+    dialog_backend: DialogBackendKind,
 }
 
 impl BridgeBindingsPlugin for BuiltinBridgePlugin {
     fn register(&self, builder: &mut BridgeBindingsBuilder) {
         let command_context = builder.command_context().clone();
 
-        register_builtin_commands(builder, &self.allowed_commands, self.app_data_dir.clone());
+        register_builtin_commands(
+            builder,
+            &self.allowed_commands,
+            self.app_data_dir.clone(),
+            self.dialog_backend,
+        );
         register_builtin_events(builder, &self.allowed_events);
 
         builder.push_startup_event(BridgeEvent::new(
@@ -577,6 +696,7 @@ fn register_builtin_commands(
     builder: &mut BridgeBindingsBuilder,
     allowed_commands: &[String],
     app_data_dir: std::path::PathBuf,
+    dialog_backend: DialogBackendKind,
 ) {
     if allowed_commands.iter().any(|command| command == "app.ping") {
         builder.register_command("app.ping", |context, request| {
@@ -695,8 +815,10 @@ fn register_builtin_commands(
         .iter()
         .any(|command| command == "dialog.open")
     {
-        builder.register_command("dialog.open", |_context, _request| {
-            Ok("{\"canceled\":true,\"path\":null}".to_owned())
+        builder.register_command("dialog.open", move |_context, request| {
+            let request = DialogRequest::from_payload(DialogRequestKind::Open, &request.payload)
+                .map_err(|error| error.to_string())?;
+            Ok(execute_dialog_request(dialog_backend, request).to_json())
         });
     }
 
@@ -704,10 +826,249 @@ fn register_builtin_commands(
         .iter()
         .any(|command| command == "dialog.save")
     {
-        builder.register_command("dialog.save", |_context, _request| {
-            Ok("{\"canceled\":true,\"path\":null}".to_owned())
+        builder.register_command("dialog.save", move |_context, request| {
+            let request = DialogRequest::from_payload(DialogRequestKind::Save, &request.payload)
+                .map_err(|error| error.to_string())?;
+            Ok(execute_dialog_request(dialog_backend, request).to_json())
         });
     }
+}
+
+impl DialogRequest {
+    fn from_payload(kind: DialogRequestKind, payload: &str) -> Result<Self, DialogRequestError> {
+        let request = Self {
+            kind,
+            title: json_string_field(payload, "title"),
+            default_path: json_string_field(payload, "defaultPath").map(std::path::PathBuf::from),
+            directory: json_bool_field(payload, "directory").unwrap_or(false),
+            multiple: json_bool_field(payload, "multiple").unwrap_or(false),
+            filters: dialog_filters_field(payload, "filters")?,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    fn validate(&self) -> Result<(), DialogRequestError> {
+        if matches!(self.kind, DialogRequestKind::Save) && self.directory {
+            return Err(DialogRequestError::InvalidPayload {
+                message: "dialog.save does not support 'directory=true'".to_owned(),
+            });
+        }
+        if matches!(self.kind, DialogRequestKind::Save) && self.multiple {
+            return Err(DialogRequestError::InvalidPayload {
+                message: "dialog.save does not support 'multiple=true'".to_owned(),
+            });
+        }
+        if self
+            .filters
+            .iter()
+            .any(|filter| filter.name.trim().is_empty())
+        {
+            return Err(DialogRequestError::InvalidPayload {
+                message: "dialog filters require a non-empty 'name'".to_owned(),
+            });
+        }
+        if self.filters.iter().any(|filter| {
+            filter.extensions.is_empty()
+                || filter.extensions.iter().any(|ext| ext.trim().is_empty())
+        }) {
+            return Err(DialogRequestError::InvalidPayload {
+                message: "dialog filters require at least one non-empty extension".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl DialogResponse {
+    fn canceled(backend: DialogBackendKind) -> Self {
+        Self {
+            canceled: true,
+            path: None,
+            paths: None,
+            backend,
+        }
+    }
+
+    fn selected(path: impl Into<std::path::PathBuf>, backend: DialogBackendKind) -> Self {
+        let path = path.into();
+        Self {
+            canceled: false,
+            path: Some(path),
+            paths: None,
+            backend,
+        }
+    }
+
+    fn selected_multiple(paths: Vec<std::path::PathBuf>, backend: DialogBackendKind) -> Self {
+        let path = paths.first().cloned();
+        Self {
+            canceled: false,
+            path,
+            paths: Some(paths),
+            backend,
+        }
+    }
+
+    fn to_json(&self) -> String {
+        format!(
+            "{{\"canceled\":{},\"path\":{},\"paths\":{},\"backend\":{}}}",
+            self.canceled,
+            self.path
+                .as_ref()
+                .and_then(|path| path.to_str())
+                .map(json_string_literal)
+                .unwrap_or_else(|| "null".to_owned()),
+            self.paths
+                .as_ref()
+                .map(|paths| {
+                    let entries = paths
+                        .iter()
+                        .filter_map(|path| path.to_str())
+                        .map(json_string_literal)
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("[{entries}]")
+                })
+                .unwrap_or_else(|| "null".to_owned()),
+            json_string_literal(self.backend.as_str()),
+        )
+    }
+}
+
+pub fn execute_dialog_request(
+    backend: DialogBackendKind,
+    request: DialogRequest,
+) -> DialogResponse {
+    match backend {
+        DialogBackendKind::Headless => DialogResponse::canceled(DialogBackendKind::Headless),
+        DialogBackendKind::SystemUnavailable => {
+            DialogResponse::canceled(DialogBackendKind::SystemUnavailable)
+        }
+        DialogBackendKind::System => execute_system_dialog_request(request),
+    }
+}
+
+fn execute_system_dialog_request(request: DialogRequest) -> DialogResponse {
+    #[cfg(target_os = "macos")]
+    {
+        execute_macos_dialog_request(request)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = request;
+        DialogResponse::canceled(DialogBackendKind::SystemUnavailable)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn execute_macos_dialog_request(request: DialogRequest) -> DialogResponse {
+    let script = macos_dialog_script(&request);
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output();
+    let Ok(output) = output else {
+        return DialogResponse::canceled(DialogBackendKind::SystemUnavailable);
+    };
+
+    if !output.status.success() {
+        return DialogResponse::canceled(DialogBackendKind::System);
+    }
+
+    let paths = parse_macos_dialog_paths(&output.stdout);
+    if paths.is_empty() {
+        DialogResponse::canceled(DialogBackendKind::System)
+    } else if request.multiple {
+        DialogResponse::selected_multiple(paths, DialogBackendKind::System)
+    } else {
+        DialogResponse::selected(paths[0].clone(), DialogBackendKind::System)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_dialog_script(request: &DialogRequest) -> String {
+    let prompt = request
+        .title
+        .as_deref()
+        .map(applescript_string_literal)
+        .map(|title| format!(" with prompt {title}"))
+        .unwrap_or_default();
+    let default_location = request
+        .default_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .and_then(|path| path.to_str())
+        .map(applescript_string_literal)
+        .map(|path| format!(" default location POSIX file {path}"))
+        .unwrap_or_default();
+
+    let command = match request.kind {
+        DialogRequestKind::Open if request.directory => {
+            let multiple = if request.multiple {
+                " with multiple selections allowed"
+            } else {
+                ""
+            };
+            format!("my axionJoinPaths(choose folder{prompt}{default_location}{multiple})")
+        }
+        DialogRequestKind::Open => {
+            let multiple = if request.multiple {
+                " with multiple selections allowed"
+            } else {
+                ""
+            };
+            format!("my axionJoinPaths(choose file{prompt}{default_location}{multiple})")
+        }
+        DialogRequestKind::Save => {
+            let default_name = request
+                .default_path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .and_then(|file_name| file_name.to_str())
+                .map(applescript_string_literal)
+                .map(|name| format!(" default name {name}"))
+                .unwrap_or_default();
+            format!("my axionJoinPaths(choose file name{prompt}{default_name}{default_location})")
+        }
+    };
+
+    format!(
+        "{command}\n\
+        on axionJoinPaths(selectionResult)\n\
+            if class of selectionResult is list then\n\
+                set joinedPaths to \"\"\n\
+                repeat with selectedItem in selectionResult\n\
+                    set joinedPaths to joinedPaths & POSIX path of selectedItem & linefeed\n\
+                end repeat\n\
+                return joinedPaths\n\
+            end if\n\
+            return POSIX path of selectionResult\n\
+        end axionJoinPaths"
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_dialog_paths(stdout: &[u8]) -> Vec<std::path::PathBuf> {
+    String::from_utf8_lossy(stdout)
+        .trim()
+        .split('\n')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(entry))
+            }
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn applescript_string_literal(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 fn register_builtin_events(builder: &mut BridgeBindingsBuilder, allowed_events: &[String]) {
@@ -801,15 +1162,18 @@ mod tests {
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use axion_core::{BuildConfig, Builder, CapabilityConfig, DevServerConfig, WindowConfig};
+    use axion_core::{
+        BuildConfig, Builder, CapabilityConfig, DevServerConfig, DialogConfig, NativeConfig,
+        WindowConfig,
+    };
     use axion_protocol::ProtocolError;
     use url::Url;
 
     use super::{
-        AppProtocolLaunch, BridgeRequest, DiagnosticSeverity, PanicReportConfig,
-        RuntimeBridgeBindingsBuilder, RuntimeError, RuntimeLaunchTarget, RuntimePlugin,
-        diagnostic_report, format_panic_report_body, launch_request, launch_request_with_plugins,
-        panic_report_path,
+        AppProtocolLaunch, BridgeRequest, DiagnosticSeverity, DialogBackendKind, DialogRequest,
+        DialogRequestKind, PanicReportConfig, RuntimeBridgeBindingsBuilder, RuntimeError,
+        RuntimeLaunchTarget, RuntimePlugin, diagnostic_report, execute_dialog_request,
+        format_panic_report_body, launch_request, launch_request_with_plugins, panic_report_path,
     };
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -979,6 +1343,27 @@ mod tests {
                         "dialog.open".to_owned(),
                         "dialog.save".to_owned(),
                     ],
+                    events: Vec::new(),
+                    protocols: vec!["axion".to_owned()],
+                    allowed_navigation_origins: Vec::new(),
+                    allow_remote_navigation: false,
+                },
+            )
+            .build()
+            .expect("test app should build")
+    }
+
+    fn app_with_system_dialog_backend() -> axion_core::App {
+        let (frontend_dist, entry) = frontend_fixture("system-dialog");
+        Builder::new()
+            .with_name("axion-runtime-test")
+            .with_window(WindowConfig::main("Runtime Test"))
+            .with_build(BuildConfig::new(frontend_dist, entry))
+            .with_native(NativeConfig::new().with_dialog(DialogConfig::system()))
+            .with_capability(
+                "main",
+                CapabilityConfig {
+                    commands: vec!["dialog.open".to_owned()],
                     events: Vec::new(),
                     protocols: vec!["axion".to_owned()],
                     allowed_navigation_origins: Vec::new(),
@@ -1294,7 +1679,35 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.3.0\""));
+        assert!(version.contains("\"release\":\"v0.1.4.0\""));
+
+        let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("dialog.open", "{\"title\":\"Open fixture\"}"),
+        ))
+        .expect("dialog.open should dispatch");
+        assert_eq!(
+            dialog_open,
+            "{\"canceled\":true,\"path\":null,\"paths\":null,\"backend\":\"headless\"}"
+        );
+    }
+
+    #[test]
+    fn dialog_command_rejects_invalid_save_multiple_payload() {
+        let request = launch_request(&app_with_native_commands(), axion_core::RunMode::Production)
+            .expect("launch request should build");
+        let binding = request
+            .window_bindings
+            .first()
+            .expect("main window binding should exist");
+
+        let error = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("dialog.save", "{\"multiple\":true}"),
+        ))
+        .expect_err("dialog.save should reject multiple=true");
+
+        assert!(format!("{error:?}").contains("does not support 'multiple=true'"));
     }
 
     #[test]
@@ -1364,6 +1777,11 @@ mod tests {
 
         assert_eq!(report.app_name, "axion-runtime-test");
         assert_eq!(report.window_count, 2);
+        assert_eq!(
+            report.configured_dialog_backend,
+            DialogBackendKind::Headless
+        );
+        assert_eq!(report.dialog_backend, DialogBackendKind::Headless);
         assert!(report.resource_policy.contains("nosniff=true"));
         assert!(!report.has_errors());
         assert_eq!(settings.command_count, 1);
@@ -1429,6 +1847,82 @@ mod tests {
                 "window.redraw_failed".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn dialog_headless_backend_returns_canceled_response() {
+        let response = execute_dialog_request(
+            DialogBackendKind::Headless,
+            DialogRequest {
+                kind: DialogRequestKind::Save,
+                title: Some("Save fixture".to_owned()),
+                default_path: Some(PathBuf::from("notes.txt")),
+                directory: false,
+                multiple: false,
+                filters: Vec::new(),
+            },
+        );
+
+        assert_eq!(response.canceled, true);
+        assert_eq!(response.path, None);
+        assert_eq!(response.paths, None);
+        assert_eq!(response.backend, DialogBackendKind::Headless);
+    }
+
+    #[test]
+    fn dialog_request_parses_multiple_directory_and_filters() {
+        let request = DialogRequest::from_payload(
+            DialogRequestKind::Open,
+            r#"{
+                "title":"Select fixtures",
+                "defaultPath":"fixtures",
+                "directory":true,
+                "multiple":true,
+                "filters":[{"name":"Images","extensions":["png","jpg"]}]
+            }"#,
+        )
+        .expect("dialog request should parse");
+
+        assert_eq!(request.title.as_deref(), Some("Select fixtures"));
+        assert_eq!(request.default_path, Some(PathBuf::from("fixtures")));
+        assert!(request.directory);
+        assert!(request.multiple);
+        assert_eq!(request.filters.len(), 1);
+        assert_eq!(request.filters[0].name, "Images");
+        assert_eq!(request.filters[0].extensions, vec!["png", "jpg"]);
+    }
+
+    #[test]
+    fn dialog_request_rejects_invalid_filter_shape() {
+        let error = DialogRequest::from_payload(
+            DialogRequestKind::Open,
+            r#"{"filters":[{"name":"Images","extensions":"png"}]}"#,
+        )
+        .expect_err("invalid filters should fail");
+
+        assert!(error.to_string().contains("string array 'extensions'"));
+    }
+
+    #[test]
+    fn system_dialog_backend_resolves_per_platform() {
+        let report = diagnostic_report(
+            &app_with_system_dialog_backend(),
+            axion_core::RunMode::Production,
+        );
+
+        assert_eq!(report.configured_dialog_backend, DialogBackendKind::System);
+        #[cfg(target_os = "macos")]
+        assert_eq!(report.dialog_backend, DialogBackendKind::System);
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(report.dialog_backend, DialogBackendKind::SystemUnavailable);
+            assert!(
+                report
+                    .issues
+                    .iter()
+                    .any(|issue| issue.message.contains("resolves to 'system-unavailable'"))
+            );
+        }
     }
 
     #[test]
@@ -1538,21 +2032,198 @@ fn json_string_array_literal(values: &[String]) -> String {
     format!("[{entries}]")
 }
 
+fn json_bool_field(payload: &str, field: &str) -> Option<bool> {
+    let value = json_field_value(payload, field)?;
+    if value.starts_with("true") {
+        Some(true)
+    } else if value.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn json_string_field(payload: &str, field: &str) -> Option<String> {
-    let field_pattern = format!("\"{}\"", field);
     let mut search_start = 0;
 
-    while let Some(relative_position) = payload[search_start..].find(&field_pattern) {
-        let field_start = search_start + relative_position + field_pattern.len();
-        let after_field = payload[field_start..].trim_start();
-        let after_colon = after_field.strip_prefix(':')?.trim_start();
+    while let Some(after_colon) = json_field_value_from(payload, field, &mut search_start) {
         if let Some(value) = parse_json_string(after_colon) {
             return Some(value);
         }
-        search_start = field_start;
     }
 
     None
+}
+
+fn json_string_array_field(payload: &str, field: &str) -> Option<Vec<String>> {
+    let array = extract_json_array(json_field_value(payload, field)?)?;
+    let entries = split_top_level_json_array(array)?;
+    let mut values = Vec::new();
+    for entry in entries {
+        values.push(parse_json_string(entry.trim())?);
+    }
+    Some(values)
+}
+
+fn dialog_filters_field(
+    payload: &str,
+    field: &str,
+) -> Result<Vec<DialogFilter>, DialogRequestError> {
+    let Some(value) = json_field_value(payload, field) else {
+        return Ok(Vec::new());
+    };
+    if value.starts_with("null") {
+        return Ok(Vec::new());
+    }
+
+    let Some(array) = extract_json_array(value) else {
+        return Err(DialogRequestError::InvalidPayload {
+            message: "dialog filters must be a JSON array".to_owned(),
+        });
+    };
+    let Some(entries) = split_top_level_json_array(array) else {
+        return Err(DialogRequestError::InvalidPayload {
+            message: "dialog filters must be a valid JSON array".to_owned(),
+        });
+    };
+
+    let mut filters = Vec::new();
+    for entry in entries {
+        let entry = entry.trim();
+        if !entry.starts_with('{') {
+            return Err(DialogRequestError::InvalidPayload {
+                message: "dialog filters must be objects with 'name' and 'extensions'".to_owned(),
+            });
+        }
+        let name =
+            json_string_field(entry, "name").ok_or_else(|| DialogRequestError::InvalidPayload {
+                message: "dialog filters require a string 'name'".to_owned(),
+            })?;
+        let extensions = json_string_array_field(entry, "extensions").ok_or_else(|| {
+            DialogRequestError::InvalidPayload {
+                message: "dialog filters require a string array 'extensions'".to_owned(),
+            }
+        })?;
+        filters.push(DialogFilter { name, extensions });
+    }
+
+    Ok(filters)
+}
+
+fn json_field_value<'a>(payload: &'a str, field: &str) -> Option<&'a str> {
+    let mut search_start = 0;
+    json_field_value_from(payload, field, &mut search_start)
+}
+
+fn json_field_value_from<'a>(
+    payload: &'a str,
+    field: &str,
+    search_start: &mut usize,
+) -> Option<&'a str> {
+    let field_pattern = format!("\"{}\"", field);
+
+    while let Some(relative_position) = payload[*search_start..].find(&field_pattern) {
+        let field_start = *search_start + relative_position + field_pattern.len();
+        let after_field = payload[field_start..].trim_start();
+        let after_colon = after_field.strip_prefix(':')?.trim_start();
+        *search_start = field_start;
+        return Some(after_colon);
+    }
+
+    None
+}
+
+fn extract_json_array(input: &str) -> Option<&str> {
+    extract_json_enclosed(input, '[', ']')
+}
+
+fn extract_json_enclosed(input: &str, open: char, close: char) -> Option<&str> {
+    let trimmed = input.trim_start();
+    if !trimmed.starts_with(open) {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, character) in trimmed.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match character {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match character {
+            '"' => in_string = true,
+            value if value == open => depth += 1,
+            value if value == close => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(&trimmed[..=index]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn split_top_level_json_array(input: &str) -> Option<Vec<&str>> {
+    let trimmed = input.trim();
+    if trimmed == "[]" {
+        return Some(Vec::new());
+    }
+    let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?;
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let mut values = Vec::new();
+    let mut start = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, character) in inner.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match character {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match character {
+            '"' => in_string = true,
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            ',' if bracket_depth == 0 && brace_depth == 0 => {
+                values.push(inner[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+
+    values.push(inner[start..].trim());
+    Some(values)
 }
 
 fn parse_json_string(input: &str) -> Option<String> {

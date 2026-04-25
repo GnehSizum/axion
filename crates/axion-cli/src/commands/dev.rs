@@ -335,6 +335,7 @@ mod tests {
             }),
             build: BuildConfig::new("frontend", "frontend/index.html"),
             bundle: Default::default(),
+            native: Default::default(),
             capabilities: Default::default(),
         }
     }
@@ -364,6 +365,7 @@ mod tests {
                 }),
                 build: BuildConfig::new(&frontend, &entry),
                 bundle: Default::default(),
+                native: Default::default(),
                 capabilities: Default::default(),
             })
             .build()

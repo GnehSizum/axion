@@ -28,6 +28,9 @@ entry = "frontend/index.html"
 [dev]
 url = "http://127.0.0.1:3000"
 
+[native.dialog]
+backend = "headless"
+
 [capabilities.main]
 commands = ["app.ping", "app.info", "app.version", "app.echo", "window.info"]
 events = ["app.log"]
@@ -103,13 +106,27 @@ Icon paths must be relative to the manifest directory and must not contain `..`.
 
 If `[dev]` is absent, development planning still works, but `axion dev --launch` requires `--fallback-packaged` to launch packaged assets.
 
+## Native
+
+Native preview behavior is configured under `[native]`.
+
+```toml
+[native.dialog]
+backend = "headless"
+```
+
+- `backend = "headless"`: default, deterministic behavior for CI and non-GUI validation.
+- `backend = "system"`: preview system file dialogs. macOS uses `osascript`; unsupported platforms report `system-unavailable` and cancel.
+
+`axion doctor` reports both the configured backend and the effective runtime backend so unsupported-platform fallbacks are visible before launch.
+
 ## Capabilities
 
 Capabilities are scoped by window id:
 
 ```toml
 [capabilities.main]
-commands = ["app.ping", "app.version", "fs.read_text", "fs.write_text"]
+commands = ["app.ping", "app.version", "fs.read_text", "fs.write_text", "dialog.open", "dialog.save"]
 events = ["app.log"]
 protocols = ["axion"]
 allowed_navigation_origins = ["https://docs.example"]

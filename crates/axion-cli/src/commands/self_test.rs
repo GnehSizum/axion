@@ -59,6 +59,10 @@ pub fn run(args: SelfTestArgs) -> Result<(), AxionCliError> {
     }
     println!("frontend_dist: {}", report.frontend_dist.display());
     println!("entry: {}", report.entry.display());
+    println!(
+        "native_dialog_backend: {} (configured={})",
+        report.dialog_backend, report.configured_dialog_backend
+    );
     match &report.icon {
         Some(icon) => println!("bundle_icon: {}", icon.display()),
         None => println!("bundle_icon: not configured"),
@@ -90,6 +94,8 @@ struct SelfTestReport {
     windows: Vec<SelfTestWindowReport>,
     frontend_dist: PathBuf,
     entry: PathBuf,
+    configured_dialog_backend: String,
+    dialog_backend: String,
     icon: Option<PathBuf>,
     host_events: Vec<String>,
     staged_app_dir: PathBuf,
@@ -219,6 +225,8 @@ fn run_self_test(args: &SelfTestArgs) -> Result<SelfTestReport, AxionCliError> {
         windows,
         frontend_dist: launch_config.frontend_dist.clone(),
         entry: launch_config.packaged_entry.clone(),
+        configured_dialog_backend: diagnostics.configured_dialog_backend.as_str().to_owned(),
+        dialog_backend: diagnostics.dialog_backend.as_str().to_owned(),
         icon,
         host_events,
         staged_app_dir,
@@ -392,6 +400,8 @@ allowed_navigation_origins = ["https://docs.example"]
             icon.file_name()
                 .is_some_and(|file_name| file_name == "app.icns")
         }));
+        assert_eq!(report.configured_dialog_backend, "headless");
+        assert_eq!(report.dialog_backend, "headless");
         assert_eq!(report.windows.len(), 1);
         assert_eq!(report.windows[0].id, "main");
         assert!(report.windows[0].bridge_enabled);

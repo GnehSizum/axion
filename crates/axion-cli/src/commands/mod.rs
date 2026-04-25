@@ -90,7 +90,7 @@ impl NewProject {
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.1.3\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.1.4\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root
@@ -115,7 +115,7 @@ impl NewProject {
 
     fn manifest(&self) -> String {
         format!(
-            "[app]\nname = {name:?}\nidentifier = \"dev.axion.{identifier}\"\nversion = \"0.1.0\"\ndescription = \"Generated Axion application\"\nauthors = [\"Axion Developer\"]\nhomepage = \"https://example.dev/{name}\"\n\n[window]\nid = \"main\"\ntitle = {title:?}\nwidth = 960\nheight = 720\nresizable = true\nvisible = true\n\n[build]\nfrontend_dist = \"frontend\"\nentry = \"frontend/index.html\"\n\n[bundle]\nicon = \"icons/app.icns\"\n\n[capabilities.main]\ncommands = [\"app.ping\", \"app.info\", \"app.version\", \"app.echo\", \"window.info\", \"fs.write_text\", \"fs.read_text\", \"dialog.open\", \"dialog.save\", \"demo.greet\"]\nevents = [\"app.log\"]\nprotocols = [\"axion\"]\nallowed_navigation_origins = []\nallow_remote_navigation = false\n",
+            "[app]\nname = {name:?}\nidentifier = \"dev.axion.{identifier}\"\nversion = \"0.1.0\"\ndescription = \"Generated Axion application\"\nauthors = [\"Axion Developer\"]\nhomepage = \"https://example.dev/{name}\"\n\n[window]\nid = \"main\"\ntitle = {title:?}\nwidth = 960\nheight = 720\nresizable = true\nvisible = true\n\n[build]\nfrontend_dist = \"frontend\"\nentry = \"frontend/index.html\"\n\n[bundle]\nicon = \"icons/app.icns\"\n\n[native.dialog]\nbackend = \"headless\"\n\n[capabilities.main]\ncommands = [\"app.ping\", \"app.info\", \"app.version\", \"app.echo\", \"window.info\", \"fs.write_text\", \"fs.read_text\", \"dialog.open\", \"dialog.save\", \"demo.greet\"]\nevents = [\"app.log\"]\nprotocols = [\"axion\"]\nallowed_navigation_origins = []\nallow_remote_navigation = false\n",
             name = self.name,
             identifier = self.name.replace('-', "."),
             title = title_case(&self.name),
@@ -353,8 +353,18 @@ pre {
       contents: `${appName} wrote this through the Axion bridge`,
     });
     const fsRead = await axion.invoke('fs.read_text', { path: 'notes/hello.txt' });
-    const dialogOpen = await axion.invoke('dialog.open', null);
-    const dialogSave = await axion.invoke('dialog.save', null);
+    const dialogOpen = await axion.invoke('dialog.open', {
+      title: 'Select files for the Axion preview',
+      multiple: true,
+      filters: [
+        { name: 'Text', extensions: ['txt', 'md'] },
+        { name: 'Images', extensions: ['png', 'jpg'] },
+      ],
+    });
+    const dialogSave = await axion.invoke('dialog.save', {
+      title: 'Choose a save path for the Axion preview',
+      defaultPath: 'notes/export.txt',
+    });
     renderJson('native-api', { fsWrite, fsRead, dialogOpen, dialogSave });
 
     const [greeting, pluginEvent] = await Promise.all([
@@ -516,6 +526,8 @@ mod tests {
         assert!(project.manifest().contains("\"dialog.save\""));
         assert!(project.manifest().contains("[bundle]"));
         assert!(project.manifest().contains("icon = \"icons/app.icns\""));
+        assert!(project.manifest().contains("[native.dialog]"));
+        assert!(project.manifest().contains("backend = \"headless\""));
         assert!(project.main_rs().contains("struct DemoPlugin"));
         assert!(
             project
