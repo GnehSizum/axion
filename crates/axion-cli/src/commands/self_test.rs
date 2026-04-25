@@ -12,7 +12,51 @@ pub fn run(args: SelfTestArgs) -> Result<(), AxionCliError> {
     println!("Axion self-test");
     println!("manifest: {}", report.manifest_path.display());
     println!("app: {}", report.app_name);
+    if let Some(identifier) = &report.identifier {
+        println!("identifier: {identifier}");
+    }
+    if let Some(version) = &report.version {
+        println!("version: {version}");
+    }
+    if let Some(description) = &report.description {
+        println!("description: {description}");
+    }
+    if !report.authors.is_empty() {
+        println!("authors: {}", report.authors.join(", "));
+    }
+    if let Some(homepage) = &report.homepage {
+        println!("homepage: {homepage}");
+    }
     println!("windows: {}", report.window_count);
+    for window in &report.windows {
+        println!(
+            "window.{}: title={:?}, bridge={}, commands={}, events={}, protocols={}, runtime_commands={}, runtime_events={}",
+            window.id,
+            window.title,
+            if window.bridge_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            list_or_none(&window.configured_commands),
+            list_or_none(&window.configured_events),
+            list_or_none(&window.configured_protocols),
+            window.runtime_command_count,
+            window.runtime_event_count,
+        );
+        println!(
+            "window.{}.host_events: {}",
+            window.id,
+            list_or_none(&window.host_events)
+        );
+        println!(
+            "window.{}.navigation: trusted_origins={}, allowed_origins={}, remote_navigation={}",
+            window.id,
+            list_or_none(&window.trusted_origins),
+            list_or_none(&window.allowed_navigation_origins),
+            window.allow_remote_navigation,
+        );
+    }
     println!("frontend_dist: {}", report.frontend_dist.display());
     println!("entry: {}", report.entry.display());
     println!("runtime_errors: false");
@@ -33,7 +77,13 @@ pub fn run(args: SelfTestArgs) -> Result<(), AxionCliError> {
 struct SelfTestReport {
     manifest_path: PathBuf,
     app_name: String,
+    identifier: Option<String>,
+    version: Option<String>,
+    description: Option<String>,
+    authors: Vec<String>,
+    homepage: Option<String>,
     window_count: usize,
+    windows: Vec<SelfTestWindowReport>,
     frontend_dist: PathBuf,
     entry: PathBuf,
     host_events: Vec<String>,
@@ -42,9 +92,25 @@ struct SelfTestReport {
     artifacts_removed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelfTestWindowReport {
+    id: String,
+    title: String,
+    bridge_enabled: bool,
+    configured_commands: Vec<String>,
+    configured_events: Vec<String>,
+    configured_protocols: Vec<String>,
+    runtime_command_count: usize,
+    runtime_event_count: usize,
+    host_events: Vec<String>,
+    trusted_origins: Vec<String>,
+    allowed_navigation_origins: Vec<String>,
+    allow_remote_navigation: bool,
+}
+
 fn run_self_test(args: &SelfTestArgs) -> Result<SelfTestReport, AxionCliError> {
     let config = axion_manifest::load_app_config_from_path(&args.manifest_path)?;
-    let app = Builder::new().apply_config(config).build()?;
+    let app = Builder::new().apply_config(config.clone()).build()?;
     let launch_config = app.runtime_launch_config(RunMode::Production);
     let diagnostics = axion_runtime::diagnostic_report(&app, RunMode::Production);
     if diagnostics.has_errors() {
@@ -79,6 +145,53 @@ fn run_self_test(args: &SelfTestArgs) -> Result<SelfTestReport, AxionCliError> {
             }
             events
         });
+    let windows = launch_config
+        .windows
+        .iter()
+        .map(|window| {
+            let capability = config.capabilities.get(&window.id);
+            let diagnostic = diagnostics
+                .windows
+                .iter()
+                .find(|diagnostic| diagnostic.window_id == window.id);
+            let configured_protocols = capability
+                .map(|capability| capability.protocols.clone())
+                .unwrap_or_default();
+
+            SelfTestWindowReport {
+                id: window.id.clone(),
+                title: window.title.clone(),
+                bridge_enabled: configured_protocols
+                    .iter()
+                    .any(|protocol| protocol == "axion"),
+                configured_commands: capability
+                    .map(|capability| capability.commands.clone())
+                    .unwrap_or_default(),
+                configured_events: capability
+                    .map(|capability| capability.events.clone())
+                    .unwrap_or_default(),
+                configured_protocols,
+                runtime_command_count: diagnostic
+                    .map(|diagnostic| diagnostic.command_count)
+                    .unwrap_or_default(),
+                runtime_event_count: diagnostic
+                    .map(|diagnostic| diagnostic.event_count)
+                    .unwrap_or_default(),
+                host_events: diagnostic
+                    .map(|diagnostic| diagnostic.host_events.clone())
+                    .unwrap_or_default(),
+                trusted_origins: diagnostic
+                    .map(|diagnostic| diagnostic.trusted_origins.clone())
+                    .unwrap_or_default(),
+                allowed_navigation_origins: diagnostic
+                    .map(|diagnostic| diagnostic.allowed_navigation_origins.clone())
+                    .unwrap_or_default(),
+                allow_remote_navigation: diagnostic
+                    .map(|diagnostic| diagnostic.allow_remote_navigation)
+                    .unwrap_or_default(),
+            }
+        })
+        .collect();
     let staged_app_dir = artifact.app_dir.clone();
     let asset_manifest_path = artifact.asset_manifest_path.clone();
     let artifacts_removed = if args.keep_artifacts {
@@ -90,10 +203,16 @@ fn run_self_test(args: &SelfTestArgs) -> Result<SelfTestReport, AxionCliError> {
 
     Ok(SelfTestReport {
         manifest_path: args.manifest_path.clone(),
-        app_name: launch_config.app_name,
+        app_name: launch_config.app_name.clone(),
+        identifier: launch_config.identifier.clone(),
+        version: launch_config.version.clone(),
+        description: launch_config.description.clone(),
+        authors: launch_config.authors.clone(),
+        homepage: launch_config.homepage.clone(),
         window_count: launch_config.windows.len(),
-        frontend_dist: launch_config.frontend_dist,
-        entry: launch_config.packaged_entry,
+        windows,
+        frontend_dist: launch_config.frontend_dist.clone(),
+        entry: launch_config.packaged_entry.clone(),
         host_events,
         staged_app_dir,
         asset_manifest_path,
@@ -131,16 +250,20 @@ fn list_or_none(values: &[String]) -> String {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{default_output_dir, run_self_test};
     use crate::cli::SelfTestArgs;
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
     fn temp_dir() -> PathBuf {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time must be after unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("axion-self-test-{unique}"))
+        let serial = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("axion-self-test-{unique}-{serial}"))
     }
 
     fn write_project(root: &Path) -> PathBuf {
@@ -154,6 +277,11 @@ mod tests {
             r#"
 [app]
 name = "self-test-app"
+identifier = "dev.axion.self-test"
+version = "1.2.3"
+description = "Self-test fixture"
+authors = ["Axion Tests"]
+homepage = "https://example.dev/self-test"
 
 [window]
 id = "main"
@@ -239,6 +367,36 @@ allowed_navigation_origins = ["https://docs.example"]
         .expect("self-test should pass");
 
         assert_eq!(report.app_name, "self-test-app");
+        assert_eq!(report.identifier.as_deref(), Some("dev.axion.self-test"));
+        assert_eq!(report.version.as_deref(), Some("1.2.3"));
+        assert_eq!(report.description.as_deref(), Some("Self-test fixture"));
+        assert_eq!(report.authors, vec!["Axion Tests".to_owned()]);
+        assert_eq!(
+            report.homepage.as_deref(),
+            Some("https://example.dev/self-test")
+        );
+        assert_eq!(report.windows.len(), 1);
+        assert_eq!(report.windows[0].id, "main");
+        assert!(report.windows[0].bridge_enabled);
+        assert_eq!(
+            report.windows[0].configured_commands,
+            vec!["app.ping".to_owned()]
+        );
+        assert_eq!(
+            report.windows[0].configured_events,
+            vec!["app.log".to_owned()]
+        );
+        assert_eq!(
+            report.windows[0].configured_protocols,
+            vec!["axion".to_owned()]
+        );
+        assert_eq!(report.windows[0].runtime_command_count, 1);
+        assert_eq!(report.windows[0].runtime_event_count, 1);
+        assert!(
+            report.windows[0]
+                .trusted_origins
+                .contains(&"axion://app".to_owned())
+        );
         assert!(report.host_events.contains(&"app.ready".to_owned()));
         assert!(report.artifacts_removed);
         assert!(!output_dir.exists());
@@ -279,6 +437,23 @@ allowed_navigation_origins = ["https://docs.example"]
 
         assert_eq!(report.app_name, "self-test-multi-window");
         assert_eq!(report.window_count, 2);
+        assert_eq!(report.windows.len(), 2);
+        assert_eq!(report.windows[0].id, "main");
+        assert_eq!(
+            report.windows[0].configured_commands,
+            vec!["app.info".to_owned(), "app.ping".to_owned()]
+        );
+        assert_eq!(report.windows[0].runtime_command_count, 2);
+        assert_eq!(report.windows[1].id, "settings");
+        assert_eq!(
+            report.windows[1].configured_commands,
+            vec!["window.info".to_owned()]
+        );
+        assert_eq!(report.windows[1].runtime_command_count, 1);
+        assert_eq!(
+            report.windows[1].allowed_navigation_origins,
+            vec!["https://docs.example".to_owned()]
+        );
         assert!(report.host_events.contains(&"app.ready".to_owned()));
         assert!(
             report

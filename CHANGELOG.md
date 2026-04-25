@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.1.2.0 - Preview
+
+Axion v0.1.2.0 completes the next developer-preview feature milestone on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.2`.
+- Axion public release metadata is `v0.1.2.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Generated vanilla apps now include a `demo.greet` custom Rust command plugin, manifest capability, frontend invocation, startup event listener, and denied-command probe.
+- Added `docs/custom-commands.md` with plugin registration, capability, frontend invocation, startup event, and validation guidance.
+- Exposed `axion_runtime::json_string_literal` for small JSON command responses.
+- Added optional app metadata fields in `axion.toml`: `version`, `description`, `authors`, and `homepage`.
+- `axion dev` now prints launch mode, dev-server status, packaged fallback status, and per-window entry URLs before the runtime plan.
+- Generated vanilla apps now include a CSP-compatible `frontend/style.css` and clearer card-based bridge, native API, event, custom-command, and capability-denial demos.
+- Generated vanilla apps now include `.gitignore` and install Axion panic reporting to `target/axion/crash-reports/`.
+- `axion self-test` now prints app metadata and per-window capability/runtime summaries.
+
+### Changed
+
+- `app.info`, `axion doctor`, runtime plans, generated templates, and bundle metadata now surface app metadata.
+- `axion dev --launch --fallback-packaged` validates packaged asset availability before selecting production-mode fallback.
+- Generated vanilla manifests now allow preview `dialog.open` and `dialog.save` commands so the template demonstrates the current native API surface.
+
 ## v0.1.1.0 - Preview
 
 Axion v0.1.1.0 completes the next developer-preview milestone with app generation, capability-gated native APIs, stricter dev workflows, executable-aware bundling, and multi-window validation.

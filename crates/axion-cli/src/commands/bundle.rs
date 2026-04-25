@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use axion_core::{Builder, RunMode};
-use axion_packager::{BundlePlan, current_bundle_target, stage_bundle_from_web_assets};
+use axion_packager::{
+    BundleMetadata, BundlePlan, current_bundle_target, stage_bundle_from_web_assets_with_metadata,
+};
 
 use crate::cli::BundleArgs;
 use crate::error::AxionCliError;
@@ -22,7 +24,7 @@ pub fn run(args: BundleArgs) -> Result<(), AxionCliError> {
         args.build_executable,
     )?;
 
-    let artifact = stage_bundle_from_web_assets(
+    let artifact = stage_bundle_from_web_assets_with_metadata(
         launch_config.frontend_dist,
         launch_config.packaged_entry,
         BundlePlan {
@@ -30,12 +32,25 @@ pub fn run(args: BundleArgs) -> Result<(), AxionCliError> {
             output_dir: output_dir.clone(),
             executable_path,
         },
-        &launch_config.app_name,
+        &BundleMetadata {
+            app_name: launch_config.app_name.clone(),
+            identifier: launch_config.identifier.clone(),
+            version: launch_config.version.clone(),
+            description: launch_config.description.clone(),
+            authors: launch_config.authors.clone(),
+            homepage: launch_config.homepage.clone(),
+        },
     )?;
 
     println!("Axion bundle");
     println!("manifest: {}", args.manifest_path.display());
     println!("app: {}", launch_config.app_name);
+    if let Some(identifier) = &launch_config.identifier {
+        println!("identifier: {identifier}");
+    }
+    if let Some(version) = &launch_config.version {
+        println!("version: {version}");
+    }
     println!("target: {:?}", artifact.target);
     println!("output_dir: {}", artifact.output_dir.display());
     println!("bundle_dir: {}", artifact.bundle_dir.display());

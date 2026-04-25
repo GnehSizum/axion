@@ -47,7 +47,7 @@ To inspect the development launch path:
 cargo run -p axion-cli -- dev --manifest-path examples/hello-axion/axion.toml
 ```
 
-`axion dev --launch` requires the configured frontend dev server to be running. If it is not reachable, the command exits with a diagnostic instead of silently launching packaged assets.
+`axion dev` reports the selected launch mode, dev-server reachability, packaged fallback availability, and each window entry URL. `axion dev --launch` requires the configured frontend dev server to be running. If it is not reachable, the command exits with a diagnostic instead of silently launching packaged assets. Use `--fallback-packaged` only when you explicitly want to launch the packaged `axion://app` entry instead.
 
 ## Create a New App
 
@@ -61,10 +61,19 @@ cargo run --features servo-runtime
 Generated projects contain:
 
 - `Cargo.toml`: path dependencies back to this Axion checkout
+- `.gitignore`: ignores `target/` build output, runtime data, bundles, and crash reports
 - `README.md`: generated app usage notes
 - `axion.toml`: app, window, build, and capability configuration
-- `src/main.rs`: Rust entrypoint
-- `frontend/index.html` and `frontend/app.js`: minimal bridge demo
+- `src/main.rs`: Rust entrypoint with panic reporting and a `demo.greet` custom command plugin
+- `frontend/index.html`: packaged HTML entry
+- `frontend/style.css`: CSP-compatible external styles
+- `frontend/app.js`: bridge, native API, filesystem, custom command, event, and denied-command demos
+
+The generated `demo.greet` command is registered in Rust, allowed in `[capabilities.main]`, and invoked from frontend JavaScript. See `custom-commands.md` for the pattern.
+
+Generated manifests also include optional app metadata (`version`, `description`, `authors`, and `homepage`). These values appear in `app.info`, `axion doctor`, and bundle metadata scaffolds.
+
+Generated apps install Axion panic reporting by default. Crash reports are written under `target/axion/crash-reports/`, which is ignored by the generated `.gitignore`.
 
 ## Validate a Generated App
 
@@ -76,5 +85,7 @@ cargo run -p axion-cli -- self-test --manifest-path /tmp/demo-app/axion.toml
 cargo run -p axion-cli -- build --manifest-path /tmp/demo-app/axion.toml
 cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml
 ```
+
+`self-test` prints app metadata, each window's configured commands/events/protocols, runtime command/event counts, host events, navigation origins, and staged asset paths.
 
 `build` and `bundle` produce staging output, not signed production installers. To include an app executable, build it first or pass `--build-executable` to `bundle`.

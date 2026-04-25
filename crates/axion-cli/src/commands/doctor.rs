@@ -58,7 +58,27 @@ fn print_manifest_status(manifest_path: &Path) -> Result<(), AxionCliError> {
 }
 
 fn manifest_diagnostic_lines(config: &AppConfig) -> Vec<String> {
-    config
+    let mut lines = Vec::new();
+    if let Some(identifier) = &config.identity.identifier {
+        lines.push(format!("app.identifier: {identifier}"));
+    }
+    if let Some(version) = &config.identity.version {
+        lines.push(format!("app.version: {version}"));
+    }
+    if let Some(description) = &config.identity.description {
+        lines.push(format!("app.description: {description}"));
+    }
+    if !config.identity.authors.is_empty() {
+        lines.push(format!(
+            "app.authors: {}",
+            config.identity.authors.join(", ")
+        ));
+    }
+    if let Some(homepage) = &config.identity.homepage {
+        lines.push(format!("app.homepage: {homepage}"));
+    }
+
+    lines.extend(config
         .windows
         .iter()
         .flat_map(|window| {
@@ -92,7 +112,8 @@ fn manifest_diagnostic_lines(config: &AppConfig) -> Vec<String> {
 
             [window_line, capability_line]
         })
-        .collect()
+        .collect::<Vec<_>>());
+    lines
 }
 
 fn list_or_none(values: &[String]) -> String {
@@ -250,7 +271,12 @@ mod tests {
     #[test]
     fn manifest_diagnostics_include_windows_and_bridge_status() {
         let config = AppConfig {
-            identity: AppIdentity::new("doctor-test"),
+            identity: AppIdentity::new("doctor-test")
+                .with_identifier("dev.axion.doctor")
+                .with_version("1.2.3")
+                .with_description("Doctor test app")
+                .with_authors(["Axion Maintainers"])
+                .with_homepage("https://example.dev/doctor"),
             windows: vec![
                 WindowConfig::main("Main"),
                 WindowConfig::new(WindowId::new("settings"), "Settings", 480, 360),
@@ -271,6 +297,27 @@ mod tests {
 
         let lines = manifest_diagnostic_lines(&config);
 
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "app.identifier: dev.axion.doctor")
+        );
+        assert!(lines.iter().any(|line| line == "app.version: 1.2.3"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "app.description: Doctor test app")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "app.authors: Axion Maintainers")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "app.homepage: https://example.dev/doctor")
+        );
         assert!(lines.iter().any(|line| line.contains("window.main")));
         assert!(
             lines

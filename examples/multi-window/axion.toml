@@ -1,6 +1,10 @@
 [app]
 name = "multi-window"
 identifier = "dev.axion.multi-window"
+version = "0.1.0"
+description = "Axion multi-window capability smoke application"
+authors = ["Axion Maintainers"]
+homepage = "https://example.dev/multi-window"
 
 [[windows]]
 id = "main"

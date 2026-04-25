@@ -91,6 +91,10 @@ pub enum LaunchEntrypoint {
 pub struct RuntimeLaunchConfig {
     pub app_name: String,
     pub identifier: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub authors: Vec<String>,
+    pub homepage: Option<String>,
     pub mode: RunMode,
     pub entrypoint: LaunchEntrypoint,
     pub frontend_dist: PathBuf,
@@ -102,6 +106,10 @@ pub struct RuntimeLaunchConfig {
 pub struct RuntimePlan {
     pub app_name: String,
     pub identifier: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub authors: Vec<String>,
+    pub homepage: Option<String>,
     pub mode: RunMode,
     pub entrypoint: RunEntrypoint,
     pub frontend_dist: PathBuf,
@@ -114,6 +122,18 @@ impl Display for RuntimePlan {
         writeln!(formatter, "app: {}", self.app_name)?;
         if let Some(identifier) = &self.identifier {
             writeln!(formatter, "identifier: {identifier}")?;
+        }
+        if let Some(version) = &self.version {
+            writeln!(formatter, "version: {version}")?;
+        }
+        if let Some(description) = &self.description {
+            writeln!(formatter, "description: {description}")?;
+        }
+        if !self.authors.is_empty() {
+            writeln!(formatter, "authors: {}", self.authors.join(", "))?;
+        }
+        if let Some(homepage) = &self.homepage {
+            writeln!(formatter, "homepage: {homepage}")?;
         }
         writeln!(formatter, "mode: {}", self.mode)?;
         writeln!(formatter, "entrypoint: {}", self.entrypoint)?;
@@ -186,6 +206,10 @@ impl App {
         RuntimeLaunchConfig {
             app_name: self.config.identity.name.clone(),
             identifier: self.config.identity.identifier.clone(),
+            version: self.config.identity.version.clone(),
+            description: self.config.identity.description.clone(),
+            authors: self.config.identity.authors.clone(),
+            homepage: self.config.identity.homepage.clone(),
             mode,
             entrypoint,
             frontend_dist: self.config.build.frontend_dist.clone(),
@@ -224,6 +248,10 @@ impl App {
         RuntimePlan {
             app_name: launch_config.app_name,
             identifier: launch_config.identifier,
+            version: launch_config.version,
+            description: launch_config.description,
+            authors: launch_config.authors,
+            homepage: launch_config.homepage,
             mode: launch_config.mode,
             entrypoint,
             frontend_dist: launch_config.frontend_dist,

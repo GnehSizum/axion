@@ -7,7 +7,7 @@ use std::sync::Arc;
 pub const BRIDGE_MAX_NAME_BYTES: usize = 128;
 pub const BRIDGE_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const BRIDGE_MAX_REQUEST_ID_BYTES: usize = 128;
-const AXION_RELEASE_VERSION: &str = "v0.1.1.0";
+const AXION_RELEASE_VERSION: &str = "v0.1.2.0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeRequest {
@@ -137,6 +137,10 @@ pub struct WindowCommandContext {
 pub struct CommandContext {
     pub app_name: String,
     pub identifier: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub authors: Vec<String>,
+    pub homepage: Option<String>,
     pub mode: BridgeRunMode,
     pub window: WindowCommandContext,
 }
@@ -1218,6 +1222,10 @@ mod tests {
         CommandContext {
             app_name: "hello-axion".to_owned(),
             identifier: Some("dev.axion.hello".to_owned()),
+            version: Some("1.0.0".to_owned()),
+            description: Some("Hello Axion".to_owned()),
+            authors: vec!["Axion Maintainers".to_owned()],
+            homepage: Some("https://example.dev".to_owned()),
             mode: BridgeRunMode::Development,
             window: WindowCommandContext {
                 id: "main".to_owned(),

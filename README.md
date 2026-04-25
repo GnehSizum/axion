@@ -2,12 +2,13 @@
 
 Axion is a Rust desktop application framework built on a vendored Servo engine. It provides an explicit manifest, capability-gated JavaScript bridge, packaged app assets, runtime diagnostics, and a `winit` desktop backend.
 
-Axion is currently a **v0.1.1.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
+Axion is currently at the **v0.1.2.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
 
 ## What Works Today
 
-- Generate a minimal Axion application with `axion-cli new --template vanilla`.
+- Generate a guided Axion application with `axion-cli new --template vanilla`.
 - Load and validate `axion.toml` manifests.
+- Install crash reporting in generated and example applications.
 - Run runtime planning and diagnostics without opening a window.
 - Compile and launch a Servo-backed desktop window behind `servo-runtime`.
 - Invoke built-in bridge commands from frontend JavaScript.
@@ -61,6 +62,7 @@ cargo run --features servo-runtime
 - CLI reference: `docs/cli.md`
 - Manifest guide: `docs/manifest.md`
 - Native API reference: `docs/native-api.md`
+- Custom command guide: `docs/custom-commands.md`
 - Versioning policy: `docs/versioning.md`
 - Architecture overview: `docs/architecture.md`
 - Security model: `docs/security.md`
@@ -83,4 +85,4 @@ Servo warnings from the vendored `servo/` subtree are not Axion release blockers
 
 ## Versioning
 
-Axion public releases use four-part tags such as `v0.1.1.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.1`. See `docs/versioning.md`.
+Axion public releases use four-part tags such as `v0.1.2.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.2`. See `docs/versioning.md`.

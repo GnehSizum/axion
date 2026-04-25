@@ -20,6 +20,29 @@ pub struct BundlePlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleMetadata {
+    pub app_name: String,
+    pub identifier: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub authors: Vec<String>,
+    pub homepage: Option<String>,
+}
+
+impl BundleMetadata {
+    pub fn new(app_name: impl Into<String>) -> Self {
+        Self {
+            app_name: app_name.into(),
+            identifier: None,
+            version: None,
+            description: None,
+            authors: Vec::new(),
+            homepage: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebAssetsValidation {
     pub relative_entry: PathBuf,
 }
@@ -123,12 +146,26 @@ pub fn stage_bundle_from_web_assets(
     bundle_plan: BundlePlan,
     app_name: &str,
 ) -> Result<BundleArtifact, PackagerError> {
+    let metadata = BundleMetadata::new(app_name);
+    stage_bundle_from_web_assets_with_metadata(frontend_dist, entry, bundle_plan, &metadata)
+}
+
+pub fn stage_bundle_from_web_assets_with_metadata(
+    frontend_dist: impl Into<PathBuf>,
+    entry: impl Into<PathBuf>,
+    bundle_plan: BundlePlan,
+    metadata: &BundleMetadata,
+) -> Result<BundleArtifact, PackagerError> {
     let frontend_dist = frontend_dist.into();
     let entry = entry.into();
     let validation = validate_web_assets(&frontend_dist, &entry)?;
     let executable_path = validate_bundle_executable(bundle_plan.executable_path.as_deref())?;
 
-    let bundle_dir = bundle_root_dir(&bundle_plan.output_dir, bundle_plan.target, app_name);
+    let bundle_dir = bundle_root_dir(
+        &bundle_plan.output_dir,
+        bundle_plan.target,
+        &metadata.app_name,
+    );
     let resources_app_dir = bundle_resources_dir(&bundle_dir, bundle_plan.target);
     reject_output_inside_frontend_dist(&frontend_dist, &resources_app_dir)?;
     let asset_files = collect_asset_files(&frontend_dist)?;
@@ -144,12 +181,12 @@ pub fn stage_bundle_from_web_assets(
         executable_path.as_deref(),
         &bundle_dir,
         bundle_plan.target,
-        app_name,
+        &metadata.app_name,
     )?;
     let metadata_path = write_bundle_metadata(
         &bundle_dir,
         bundle_plan.target,
-        app_name,
+        metadata,
         copied_executable_path.as_deref(),
     )?;
 
@@ -234,20 +271,20 @@ fn bundle_executable_path(bundle_dir: &Path, target: BundleTarget, app_name: &st
 fn write_bundle_metadata(
     bundle_dir: &Path,
     target: BundleTarget,
-    app_name: &str,
+    metadata: &BundleMetadata,
     executable_path: Option<&Path>,
 ) -> Result<PathBuf, PackagerError> {
     match target {
-        BundleTarget::MacOsApp => write_macos_metadata(bundle_dir, app_name, executable_path),
+        BundleTarget::MacOsApp => write_macos_metadata(bundle_dir, metadata, executable_path),
         BundleTarget::LinuxDir | BundleTarget::WindowsDir => {
-            write_directory_bundle_metadata(bundle_dir, target, app_name, executable_path)
+            write_directory_bundle_metadata(bundle_dir, target, metadata, executable_path)
         }
     }
 }
 
 fn write_macos_metadata(
     bundle_dir: &Path,
-    app_name: &str,
+    metadata: &BundleMetadata,
     executable_path: Option<&Path>,
 ) -> Result<PathBuf, PackagerError> {
     let contents_dir = bundle_dir.join("Contents");
@@ -257,7 +294,22 @@ fn write_macos_metadata(
     let executable_name = executable_path
         .and_then(Path::file_name)
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| app_name.to_owned());
+        .unwrap_or_else(|| metadata.app_name.clone());
+    let identifier = metadata
+        .identifier
+        .clone()
+        .unwrap_or_else(|| format!("dev.axion.{}", metadata.app_name));
+    let version = metadata
+        .version
+        .as_deref()
+        .unwrap_or(env!("CARGO_PKG_VERSION"));
+    let description = metadata.description.as_deref().unwrap_or("");
+    let homepage = metadata.homepage.as_deref().unwrap_or("");
+    let authors = metadata
+        .authors
+        .iter()
+        .map(|author| format!("    <string>{}</string>\n", xml_escape(author)))
+        .collect::<String>();
     let info_plist = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
@@ -266,19 +318,29 @@ fn write_macos_metadata(
   <key>CFBundleExecutable</key>\n\
   <string>{}</string>\n\
   <key>CFBundleIdentifier</key>\n\
-  <string>dev.axion.{}</string>\n\
+  <string>{}</string>\n\
   <key>CFBundleName</key>\n\
   <string>{}</string>\n\
   <key>CFBundlePackageType</key>\n\
   <string>APPL</string>\n\
   <key>CFBundleShortVersionString</key>\n\
   <string>{}</string>\n\
+  <key>AxionDescription</key>\n\
+  <string>{}</string>\n\
+  <key>AxionHomepage</key>\n\
+  <string>{}</string>\n\
+  <key>AxionAuthors</key>\n\
+  <array>\n\
+{}  </array>\n\
 </dict>\n\
 </plist>\n",
         xml_escape(&executable_name),
-        xml_escape(app_name),
-        xml_escape(app_name),
-        env!("CARGO_PKG_VERSION"),
+        xml_escape(&identifier),
+        xml_escape(&metadata.app_name),
+        xml_escape(version),
+        xml_escape(description),
+        xml_escape(homepage),
+        authors,
     );
     let metadata_path = contents_dir.join("Info.plist");
     fs::write(&metadata_path, info_plist)?;
@@ -288,7 +350,7 @@ fn write_macos_metadata(
 fn write_directory_bundle_metadata(
     bundle_dir: &Path,
     target: BundleTarget,
-    app_name: &str,
+    metadata: &BundleMetadata,
     executable_path: Option<&Path>,
 ) -> Result<PathBuf, PackagerError> {
     fs::create_dir_all(bundle_dir)?;
@@ -299,7 +361,16 @@ fn write_directory_bundle_metadata(
     fs::write(
         &metadata_path,
         format!(
-            "app={app_name}\ntarget={target:?}\nexecutable={executable}\nresources=resources/app\n"
+            "app={}\nidentifier={}\nversion={}\ndescription={}\nauthors={}\nhomepage={}\ntarget={target:?}\nexecutable={executable}\nresources=resources/app\n",
+            metadata.app_name,
+            metadata.identifier.as_deref().unwrap_or(""),
+            metadata
+                .version
+                .as_deref()
+                .unwrap_or(env!("CARGO_PKG_VERSION")),
+            metadata.description.as_deref().unwrap_or(""),
+            metadata.authors.join(","),
+            metadata.homepage.as_deref().unwrap_or(""),
         ),
     )?;
     Ok(metadata_path)
@@ -539,8 +610,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        AXION_ASSET_MANIFEST_FILE_NAME, BundlePlan, BundleTarget, PackagerError,
-        current_bundle_target, stage_bundle_from_web_assets, stage_web_assets, validate_web_assets,
+        AXION_ASSET_MANIFEST_FILE_NAME, BundleMetadata, BundlePlan, BundleTarget, PackagerError,
+        current_bundle_target, stage_bundle_from_web_assets,
+        stage_bundle_from_web_assets_with_metadata, stage_web_assets, validate_web_assets,
     };
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -859,6 +931,41 @@ mod tests {
                 .unwrap()
                 .contains("<key>CFBundleExecutable</key>")
         );
+    }
+
+    #[test]
+    fn stage_bundle_from_web_assets_writes_app_metadata() {
+        let source = temp_dir("bundle-metadata-source");
+        let output = temp_dir("bundle-metadata-output");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("index.html"), "<html>Hello</html>").unwrap();
+
+        let artifact = stage_bundle_from_web_assets_with_metadata(
+            source.clone(),
+            source.join("index.html"),
+            BundlePlan {
+                target: BundleTarget::LinuxDir,
+                output_dir: output,
+                executable_path: None,
+            },
+            &BundleMetadata {
+                app_name: "hello-axion".to_owned(),
+                identifier: Some("dev.axion.hello".to_owned()),
+                version: Some("1.2.3".to_owned()),
+                description: Some("Hello metadata".to_owned()),
+                authors: vec!["Axion Maintainers".to_owned()],
+                homepage: Some("https://example.dev/hello".to_owned()),
+            },
+        )
+        .unwrap();
+
+        let metadata = fs::read_to_string(&artifact.metadata_path).unwrap();
+        assert!(metadata.contains("app=hello-axion"));
+        assert!(metadata.contains("identifier=dev.axion.hello"));
+        assert!(metadata.contains("version=1.2.3"));
+        assert!(metadata.contains("description=Hello metadata"));
+        assert!(metadata.contains("authors=Axion Maintainers"));
+        assert!(metadata.contains("homepage=https://example.dev/hello"));
     }
 
     #[test]
