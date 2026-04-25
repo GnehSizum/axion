@@ -8,7 +8,7 @@ Capabilities are scoped to a window id:
 
 ```toml
 [capabilities.main]
-commands = ["app.ping", "window.info"]
+commands = ["app.ping", "window.info", "fs.read_text", "fs.write_text"]
 events = ["app.log"]
 protocols = ["axion"]
 allowed_navigation_origins = []
@@ -26,6 +26,8 @@ const response = await window.__AXION__.invoke("app.ping", { from: "frontend" })
 ```
 
 Bridge payloads must be valid JSON values. Request ids, command names, event names, and payload sizes are validated before dispatch.
+
+File commands are restricted to Axion's app-data directory. Absolute paths, `..` components, root components, and symlink targets are rejected.
 
 ## Frontend Events
 

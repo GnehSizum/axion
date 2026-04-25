@@ -272,12 +272,13 @@ fn write_macos_metadata(
   <key>CFBundlePackageType</key>\n\
   <string>APPL</string>\n\
   <key>CFBundleShortVersionString</key>\n\
-  <string>0.1.0</string>\n\
+  <string>{}</string>\n\
 </dict>\n\
 </plist>\n",
         xml_escape(&executable_name),
         xml_escape(app_name),
         xml_escape(app_name),
+        env!("CARGO_PKG_VERSION"),
     );
     let metadata_path = contents_dir.join("Info.plist");
     fs::write(&metadata_path, info_plist)?;

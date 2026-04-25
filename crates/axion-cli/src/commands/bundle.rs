@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use axion_core::{Builder, RunMode};
 use axion_packager::{BundlePlan, current_bundle_target, stage_bundle_from_web_assets};
@@ -14,9 +15,12 @@ pub fn run(args: BundleArgs) -> Result<(), AxionCliError> {
     let output_dir = args
         .output_dir
         .unwrap_or_else(|| default_output_dir(&args.manifest_path, &launch_config.app_name));
-    let executable_path = args
-        .executable
-        .or_else(|| default_executable_path(&args.manifest_path, &launch_config.app_name));
+    let executable_path = resolve_executable_path(
+        &args.manifest_path,
+        &launch_config.app_name,
+        args.executable,
+        args.build_executable,
+    )?;
 
     let artifact = stage_bundle_from_web_assets(
         launch_config.frontend_dist,
@@ -44,7 +48,64 @@ pub fn run(args: BundleArgs) -> Result<(), AxionCliError> {
     println!("metadata: {}", artifact.metadata_path.display());
     match &artifact.executable_path {
         Some(path) => println!("executable: {}", path.display()),
-        None => println!("executable: not bundled (pass --executable to include one)"),
+        None => println!(
+            "executable: not bundled (pass --executable or --build-executable to include one)"
+        ),
+    }
+
+    Ok(())
+}
+
+fn resolve_executable_path(
+    manifest_path: &Path,
+    app_name: &str,
+    explicit_executable: Option<PathBuf>,
+    build_executable: bool,
+) -> Result<Option<PathBuf>, AxionCliError> {
+    if let Some(executable) = explicit_executable {
+        return Ok(Some(executable));
+    }
+
+    if build_executable {
+        build_release_executable(manifest_path)?;
+    }
+
+    Ok(default_executable_path(manifest_path, app_name))
+}
+
+fn build_release_executable(manifest_path: &Path) -> Result<(), AxionCliError> {
+    let cargo_manifest_path = manifest_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("Cargo.toml");
+    if !cargo_manifest_path.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "cannot build executable because Cargo.toml was not found next to manifest '{}'",
+                manifest_path.display()
+            ),
+        )
+        .into());
+    }
+
+    println!(
+        "building executable: cargo build --release --manifest-path {}",
+        cargo_manifest_path.display()
+    );
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = Command::new(cargo)
+        .arg("build")
+        .arg("--release")
+        .arg("--manifest-path")
+        .arg(&cargo_manifest_path)
+        .status()?;
+
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "cargo build --release failed with status {status}"
+        ))
+        .into());
     }
 
     Ok(())
@@ -63,23 +124,21 @@ fn default_output_dir(manifest_path: &Path, app_name: &str) -> PathBuf {
 fn default_executable_path(manifest_path: &Path, app_name: &str) -> Option<PathBuf> {
     let executable_name = executable_file_name(app_name);
     let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-    let mut candidates = vec![
-        manifest_dir
-            .join("target")
-            .join("release")
-            .join(&executable_name),
-    ];
+    let mut target_dirs = vec![manifest_dir.join("target")];
 
     for ancestor in manifest_dir.ancestors() {
-        candidates.push(
-            ancestor
-                .join("target")
-                .join("release")
-                .join(&executable_name),
-        );
+        target_dirs.push(ancestor.join("target"));
     }
 
-    candidates.into_iter().find(|path| path.is_file())
+    target_dirs
+        .into_iter()
+        .flat_map(|target_dir| {
+            let executable_name = executable_name.clone();
+            ["release", "debug"]
+                .into_iter()
+                .map(move |profile| target_dir.join(profile).join(&executable_name))
+        })
+        .find(|path| path.is_file())
 }
 
 fn executable_file_name(app_name: &str) -> String {
@@ -125,6 +184,56 @@ mod tests {
         assert_eq!(
             default_executable_path(&app_dir.join("axion.toml"), "hello-axion"),
             Some(executable)
+        );
+    }
+
+    #[test]
+    fn default_executable_path_prefers_release_over_debug() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time must be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("axion-bundle-cli-prefer-{unique}"));
+        let app_dir = root.join("examples").join("hello-axion");
+        let debug_executable = root
+            .join("target")
+            .join("debug")
+            .join(executable_file_name("hello-axion"));
+        let release_executable = root
+            .join("target")
+            .join("release")
+            .join(executable_file_name("hello-axion"));
+        fs::create_dir_all(debug_executable.parent().unwrap()).unwrap();
+        fs::create_dir_all(release_executable.parent().unwrap()).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(&debug_executable, "debug").unwrap();
+        fs::write(&release_executable, "release").unwrap();
+
+        assert_eq!(
+            default_executable_path(&app_dir.join("axion.toml"), "hello-axion"),
+            Some(release_executable)
+        );
+    }
+
+    #[test]
+    fn default_executable_path_falls_back_to_debug() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time must be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("axion-bundle-cli-debug-{unique}"));
+        let app_dir = root.join("examples").join("hello-axion");
+        let debug_executable = root
+            .join("target")
+            .join("debug")
+            .join(executable_file_name("hello-axion"));
+        fs::create_dir_all(debug_executable.parent().unwrap()).unwrap();
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(&debug_executable, "debug").unwrap();
+
+        assert_eq!(
+            default_executable_path(&app_dir.join("axion.toml"), "hello-axion"),
+            Some(debug_executable)
         );
     }
 }

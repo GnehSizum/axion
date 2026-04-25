@@ -16,7 +16,7 @@ title = "Settings"
 width = 520
 height = 420
 resizable = false
-visible = false
+visible = true
 
 [build]
 frontend_dist = "frontend"

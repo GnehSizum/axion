@@ -12,6 +12,8 @@ pub use axion_bridge::{
     BridgeEmitRequest, BridgeEvent as RuntimeBridgeEvent, BridgeRequest, CommandRegistryError,
 };
 
+const AXION_RELEASE_VERSION: &str = "v0.1.1.0";
+
 pub trait RuntimePlugin: Send + Sync {
     fn register(&self, builder: &mut RuntimeBridgeBindingsBuilder);
 }
@@ -411,10 +413,16 @@ pub fn launch_request_with_plugins(
         .map(|window| {
             let command_context = build_command_context(&launch_config, window);
             let security_policy = build_security_policy(app, &target, &app_protocol, &window.id);
+            let app_data_dir = app_data_dir(&launch_config);
             RuntimeWindowBinding {
                 window_id: window.id.clone(),
                 bridge_token: uuid::Uuid::new_v4().to_string(),
-                bridge_bindings: build_bridge_bindings(&security_policy, &command_context, plugins),
+                bridge_bindings: build_bridge_bindings(
+                    &security_policy,
+                    &command_context,
+                    app_data_dir,
+                    plugins,
+                ),
                 security_policy,
                 command_context,
             }
@@ -431,6 +439,38 @@ pub fn launch_request_with_plugins(
         frontend_dist: launch_config.frontend_dist,
         windows: launch_config.windows,
     })
+}
+
+fn app_data_dir(launch_config: &RuntimeLaunchConfig) -> std::path::PathBuf {
+    let app_root = launch_config
+        .frontend_dist
+        .parent()
+        .unwrap_or(&launch_config.frontend_dist);
+    app_root
+        .join("target")
+        .join("axion-data")
+        .join(sanitize_path_segment(&launch_config.app_name))
+}
+
+fn sanitize_path_segment(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+
+    if sanitized.is_empty() {
+        "app".to_owned()
+    } else {
+        sanitized
+    }
 }
 
 fn build_command_context(
@@ -458,6 +498,7 @@ fn build_command_context(
 fn build_bridge_bindings(
     security_policy: &SecurityPolicy,
     command_context: &CommandContext,
+    app_data_dir: std::path::PathBuf,
     plugins: &[&dyn RuntimePlugin],
 ) -> BridgeBindings {
     let allowed_commands = if security_policy.allows_protocol("axion") {
@@ -474,6 +515,7 @@ fn build_bridge_bindings(
     let plugin = BuiltinBridgePlugin {
         allowed_commands: allowed_commands.clone(),
         allowed_events: allowed_events.clone(),
+        app_data_dir,
     };
     builder.apply_plugin(&plugin);
     for plugin in plugins {
@@ -489,13 +531,14 @@ fn build_bridge_bindings(
 struct BuiltinBridgePlugin {
     allowed_commands: Vec<String>,
     allowed_events: Vec<String>,
+    app_data_dir: std::path::PathBuf,
 }
 
 impl BridgeBindingsPlugin for BuiltinBridgePlugin {
     fn register(&self, builder: &mut BridgeBindingsBuilder) {
         let command_context = builder.command_context().clone();
 
-        register_builtin_commands(builder, &self.allowed_commands);
+        register_builtin_commands(builder, &self.allowed_commands, self.app_data_dir.clone());
         register_builtin_events(builder, &self.allowed_events);
 
         builder.push_startup_event(BridgeEvent::new(
@@ -526,7 +569,11 @@ impl BridgeBindingsPlugin for BuiltinBridgePlugin {
     }
 }
 
-fn register_builtin_commands(builder: &mut BridgeBindingsBuilder, allowed_commands: &[String]) {
+fn register_builtin_commands(
+    builder: &mut BridgeBindingsBuilder,
+    allowed_commands: &[String],
+    app_data_dir: std::path::PathBuf,
+) {
     if allowed_commands.iter().any(|command| command == "app.ping") {
         builder.register_command("app.ping", |context, request| {
             Ok(format!(
@@ -547,6 +594,19 @@ fn register_builtin_commands(builder: &mut BridgeBindingsBuilder, allowed_comman
                     BridgeRunMode::Development => "development",
                     BridgeRunMode::Production => "production",
                 }),
+            ))
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "app.version")
+    {
+        builder.register_command("app.version", |_context, _request| {
+            Ok(format!(
+                "{{\"version\":{},\"release\":{},\"framework\":\"axion\"}}",
+                json_string_literal(env!("CARGO_PKG_VERSION")),
+                json_string_literal(AXION_RELEASE_VERSION),
             ))
         });
     }
@@ -577,6 +637,67 @@ fn register_builtin_commands(builder: &mut BridgeBindingsBuilder, allowed_comman
                 context.window.resizable,
                 context.window.visible,
             ))
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "fs.read_text")
+    {
+        let app_data_dir = app_data_dir.clone();
+        builder.register_command("fs.read_text", move |_context, request| {
+            let relative_path = json_string_field(&request.payload, "path").ok_or_else(|| {
+                "fs.read_text requires a JSON string field named 'path'".to_owned()
+            })?;
+            let path = resolve_app_data_path(&app_data_dir, &relative_path, false)?;
+            let contents = std::fs::read_to_string(&path)
+                .map_err(|error| format!("failed to read app data file: {error}"))?;
+            Ok(format!(
+                "{{\"path\":{},\"contents\":{}}}",
+                json_string_literal(&relative_path),
+                json_string_literal(&contents),
+            ))
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "fs.write_text")
+    {
+        let app_data_dir = app_data_dir.clone();
+        builder.register_command("fs.write_text", move |_context, request| {
+            let relative_path = json_string_field(&request.payload, "path").ok_or_else(|| {
+                "fs.write_text requires a JSON string field named 'path'".to_owned()
+            })?;
+            let contents = json_string_field(&request.payload, "contents").ok_or_else(|| {
+                "fs.write_text requires a JSON string field named 'contents'".to_owned()
+            })?;
+            let path = resolve_app_data_path(&app_data_dir, &relative_path, true)?;
+            std::fs::write(&path, &contents)
+                .map_err(|error| format!("failed to write app data file: {error}"))?;
+            Ok(format!(
+                "{{\"path\":{},\"bytes\":{}}}",
+                json_string_literal(&relative_path),
+                contents.len(),
+            ))
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "dialog.open")
+    {
+        builder.register_command("dialog.open", |_context, _request| {
+            Ok("{\"canceled\":true,\"path\":null}".to_owned())
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "dialog.save")
+    {
+        builder.register_command("dialog.save", |_context, _request| {
+            Ok("{\"canceled\":true,\"path\":null}".to_owned())
         });
     }
 }
@@ -665,8 +786,11 @@ pub fn run_with_plugins(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::future::Future;
     use std::path::PathBuf;
+    use std::pin::pin;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use axion_core::{BuildConfig, Builder, CapabilityConfig, DevServerConfig, WindowConfig};
@@ -674,9 +798,10 @@ mod tests {
     use url::Url;
 
     use super::{
-        AppProtocolLaunch, DiagnosticSeverity, PanicReportConfig, RuntimeBridgeBindingsBuilder,
-        RuntimeError, RuntimeLaunchTarget, RuntimePlugin, diagnostic_report,
-        format_panic_report_body, launch_request, launch_request_with_plugins, panic_report_path,
+        AppProtocolLaunch, BridgeRequest, DiagnosticSeverity, PanicReportConfig,
+        RuntimeBridgeBindingsBuilder, RuntimeError, RuntimeLaunchTarget, RuntimePlugin,
+        diagnostic_report, format_panic_report_body, launch_request, launch_request_with_plugins,
+        panic_report_path,
     };
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -696,6 +821,35 @@ mod tests {
         fs::create_dir_all(&frontend).expect("test frontend directory should be created");
         fs::write(&entry, "<html>Axion</html>").expect("test frontend entry should be written");
         (frontend, entry)
+    }
+
+    fn block_on<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        fn noop_raw_waker() -> RawWaker {
+            fn clone(_: *const ()) -> RawWaker {
+                noop_raw_waker()
+            }
+            fn wake(_: *const ()) {}
+            fn wake_by_ref(_: *const ()) {}
+            fn drop(_: *const ()) {}
+
+            RawWaker::new(
+                std::ptr::null(),
+                &RawWakerVTable::new(clone, wake, wake_by_ref, drop),
+            )
+        }
+
+        let waker = unsafe { Waker::from_raw(noop_raw_waker()) };
+        let mut context = Context::from_waker(&waker);
+        let mut future = pin!(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
     }
 
     fn app_with_build(dev: Option<&str>) -> axion_core::App {
@@ -792,6 +946,32 @@ mod tests {
                 CapabilityConfig {
                     commands: vec!["app.ping".to_owned(), command.to_owned()],
                     events: vec!["app.log".to_owned(), "plugin.event".to_owned()],
+                    protocols: vec!["axion".to_owned()],
+                    allowed_navigation_origins: Vec::new(),
+                    allow_remote_navigation: false,
+                },
+            )
+            .build()
+            .expect("test app should build")
+    }
+
+    fn app_with_native_commands() -> axion_core::App {
+        let (frontend_dist, entry) = frontend_fixture("native-commands");
+        Builder::new()
+            .with_name("axion-runtime-test")
+            .with_window(WindowConfig::main("Runtime Test"))
+            .with_build(BuildConfig::new(frontend_dist, entry))
+            .with_capability(
+                "main",
+                CapabilityConfig {
+                    commands: vec![
+                        "app.version".to_owned(),
+                        "fs.read_text".to_owned(),
+                        "fs.write_text".to_owned(),
+                        "dialog.open".to_owned(),
+                        "dialog.save".to_owned(),
+                    ],
+                    events: Vec::new(),
                     protocols: vec!["axion".to_owned()],
                     allowed_navigation_origins: Vec::new(),
                     allow_remote_navigation: false,
@@ -1081,6 +1261,83 @@ mod tests {
     }
 
     #[test]
+    fn builtin_native_commands_are_registered_by_capability() {
+        let request = launch_request(&app_with_native_commands(), axion_core::RunMode::Production)
+            .expect("launch request should build");
+        let binding = request
+            .window_bindings
+            .first()
+            .expect("main window binding should exist");
+
+        assert_eq!(
+            binding.bridge_bindings.command_registry.command_names(),
+            vec![
+                "app.version".to_owned(),
+                "dialog.open".to_owned(),
+                "dialog.save".to_owned(),
+                "fs.read_text".to_owned(),
+                "fs.write_text".to_owned(),
+            ]
+        );
+
+        let version = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("app.version", "null"),
+        ))
+        .expect("app.version should dispatch");
+        assert!(version.contains("\"framework\":\"axion\""));
+        assert!(version.contains("\"release\":\"v0.1.1.0\""));
+    }
+
+    #[test]
+    fn builtin_fs_commands_round_trip_app_data_text() {
+        let request = launch_request(&app_with_native_commands(), axion_core::RunMode::Production)
+            .expect("launch request should build");
+        let binding = request
+            .window_bindings
+            .first()
+            .expect("main window binding should exist");
+
+        let write = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.write_text",
+                "{\"path\":\"notes/hello.txt\",\"contents\":\"hello from axion\"}",
+            ),
+        ))
+        .expect("fs.write_text should dispatch");
+        assert!(write.contains("\"bytes\":16"));
+
+        let read = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("fs.read_text", "{\"path\":\"notes/hello.txt\"}"),
+        ))
+        .expect("fs.read_text should dispatch");
+        assert!(read.contains("\"contents\":\"hello from axion\""));
+    }
+
+    #[test]
+    fn builtin_fs_commands_reject_path_escape() {
+        let request = launch_request(&app_with_native_commands(), axion_core::RunMode::Production)
+            .expect("launch request should build");
+        let binding = request
+            .window_bindings
+            .first()
+            .expect("main window binding should exist");
+
+        let error = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.write_text",
+                "{\"path\":\"../escape.txt\",\"contents\":\"x\"}",
+            ),
+        ))
+        .expect_err("path escape should be rejected");
+
+        assert!(format!("{error:?}").contains("parent or root components"));
+    }
+
+    #[test]
     fn diagnostic_report_summarizes_runtime_launch() {
         let report = diagnostic_report(&multi_window_app(), axion_core::RunMode::Production);
         let settings = report
@@ -1249,4 +1506,115 @@ fn json_string_map_literal(values: &std::collections::BTreeMap<String, String>) 
         .join(",");
 
     format!("{{{entries}}}")
+}
+
+fn json_string_field(payload: &str, field: &str) -> Option<String> {
+    let field_pattern = format!("\"{}\"", field);
+    let mut search_start = 0;
+
+    while let Some(relative_position) = payload[search_start..].find(&field_pattern) {
+        let field_start = search_start + relative_position + field_pattern.len();
+        let after_field = payload[field_start..].trim_start();
+        let after_colon = after_field.strip_prefix(':')?.trim_start();
+        if let Some(value) = parse_json_string(after_colon) {
+            return Some(value);
+        }
+        search_start = field_start;
+    }
+
+    None
+}
+
+fn parse_json_string(input: &str) -> Option<String> {
+    let mut chars = input.chars();
+    if chars.next()? != '"' {
+        return None;
+    }
+
+    let mut value = String::new();
+    let mut escaped = false;
+    for character in chars {
+        if escaped {
+            match character {
+                '"' => value.push('"'),
+                '\\' => value.push('\\'),
+                '/' => value.push('/'),
+                'b' => value.push('\u{0008}'),
+                'f' => value.push('\u{000c}'),
+                'n' => value.push('\n'),
+                'r' => value.push('\r'),
+                't' => value.push('\t'),
+                'u' => return None,
+                other => value.push(other),
+            }
+            escaped = false;
+            continue;
+        }
+
+        match character {
+            '\\' => escaped = true,
+            '"' => return Some(value),
+            other => value.push(other),
+        }
+    }
+
+    None
+}
+
+fn resolve_app_data_path(
+    app_data_dir: &std::path::Path,
+    relative_path: &str,
+    create_parent: bool,
+) -> Result<std::path::PathBuf, String> {
+    let relative = std::path::Path::new(relative_path);
+    if relative_path.trim().is_empty() || relative.is_absolute() {
+        return Err("app data path must be a non-empty relative path".to_owned());
+    }
+
+    for component in relative.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err("app data path must not contain parent or root components".to_owned());
+        }
+    }
+
+    if create_parent {
+        std::fs::create_dir_all(app_data_dir)
+            .map_err(|error| format!("failed to create app data directory: {error}"))?;
+    }
+    let canonical_base = app_data_dir
+        .canonicalize()
+        .map_err(|error| format!("failed to access app data directory: {error}"))?;
+    let path = app_data_dir.join(relative);
+
+    if create_parent {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("failed to create app data parent directory: {error}"))?;
+            let canonical_parent = parent
+                .canonicalize()
+                .map_err(|error| format!("failed to access app data parent directory: {error}"))?;
+            if !canonical_parent.starts_with(&canonical_base) {
+                return Err("app data path escapes the app data directory".to_owned());
+            }
+        }
+    }
+
+    if path
+        .symlink_metadata()
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err("app data path must not be a symlink".to_owned());
+    }
+
+    if !create_parent {
+        let canonical_path = path
+            .canonicalize()
+            .map_err(|error| format!("failed to access app data file: {error}"))?;
+        if !canonical_path.starts_with(&canonical_base) {
+            return Err("app data path escapes the app data directory".to_owned());
+        }
+    }
+
+    Ok(path)
 }

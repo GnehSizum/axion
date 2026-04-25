@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "axion", version, about = "Axion framework command line")]
@@ -26,6 +26,9 @@ pub struct DevArgs {
 
     #[arg(long, default_value_t = false)]
     pub launch: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub fallback_packaged: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -47,6 +50,9 @@ pub struct BundleArgs {
 
     #[arg(long)]
     pub executable: Option<PathBuf>,
+
+    #[arg(long, default_value_t = false)]
+    pub build_executable: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -74,4 +80,12 @@ pub struct NewArgs {
 
     #[arg(long)]
     pub path: Option<PathBuf>,
+
+    #[arg(long, value_enum, default_value_t = NewTemplate::Vanilla)]
+    pub template: NewTemplate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum NewTemplate {
+    Vanilla,
 }

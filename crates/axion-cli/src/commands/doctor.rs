@@ -357,6 +357,61 @@ mod tests {
     }
 
     #[test]
+    fn runtime_diagnostics_report_multi_window_capabilities() {
+        let root = temp_dir();
+        let frontend = root.join("frontend");
+        let entry = frontend.join("index.html");
+        fs::create_dir_all(&frontend).unwrap();
+        fs::write(&entry, "<html></html>").unwrap();
+
+        let config = AppConfig {
+            identity: AppIdentity::new("doctor-multi-window"),
+            windows: vec![
+                WindowConfig::main("Main"),
+                WindowConfig::new(WindowId::new("settings"), "Settings", 520, 420),
+            ],
+            dev: None,
+            build: BuildConfig::new(&frontend, &entry),
+            capabilities: std::collections::BTreeMap::from([
+                (
+                    "main".to_owned(),
+                    CapabilityConfig {
+                        commands: vec!["app.ping".to_owned(), "app.info".to_owned()],
+                        events: vec!["app.log".to_owned()],
+                        protocols: vec!["axion".to_owned()],
+                        allowed_navigation_origins: Vec::new(),
+                        allow_remote_navigation: false,
+                    },
+                ),
+                (
+                    "settings".to_owned(),
+                    CapabilityConfig {
+                        commands: vec!["window.info".to_owned()],
+                        events: vec!["app.log".to_owned()],
+                        protocols: vec!["axion".to_owned()],
+                        allowed_navigation_origins: vec!["https://docs.example".to_owned()],
+                        allow_remote_navigation: false,
+                    },
+                ),
+            ]),
+        };
+
+        let lines = runtime_diagnostic_lines(&config);
+
+        assert!(lines.iter().any(|line| line.starts_with(
+            "runtime: app=doctor-multi-window, mode=production, windows=2, errors=false"
+        )));
+        assert!(lines.iter().any(|line| {
+            line.starts_with("runtime.window.main: bridge=enabled, commands=2")
+                && line.contains("frontend_events=app.log")
+        }));
+        assert!(lines.iter().any(|line| {
+            line.starts_with("runtime.window.settings: bridge=enabled, commands=1")
+                && line.contains("navigation_origins=https://docs.example")
+        }));
+    }
+
+    #[test]
     fn build_asset_diagnostics_report_missing_and_outside_entry() {
         let root = temp_dir();
         let frontend = root.join("frontend");
