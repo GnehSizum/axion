@@ -173,6 +173,48 @@ protocols = ["axion"]
         manifest
     }
 
+    fn write_multi_window_project(root: &Path) -> PathBuf {
+        let frontend = root.join("frontend");
+        fs::create_dir_all(&frontend).unwrap();
+        fs::write(frontend.join("index.html"), "<!doctype html><html></html>").unwrap();
+        fs::write(frontend.join("app.js"), "console.log('axion');").unwrap();
+        let manifest = root.join("axion.toml");
+        fs::write(
+            &manifest,
+            r#"
+[app]
+name = "self-test-multi-window"
+
+[[windows]]
+id = "main"
+title = "Main"
+
+[[windows]]
+id = "settings"
+title = "Settings"
+width = 520
+height = 420
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[capabilities.main]
+commands = ["app.ping", "app.info"]
+events = ["app.log"]
+protocols = ["axion"]
+
+[capabilities.settings]
+commands = ["window.info"]
+events = ["app.log"]
+protocols = ["axion"]
+allowed_navigation_origins = ["https://docs.example"]
+"#,
+        )
+        .unwrap();
+        manifest
+    }
+
     #[test]
     fn default_output_dir_is_unique_and_workspace_local() {
         let first = default_output_dir(Path::new("/tmp/demo/axion.toml"), "hello-axion");
@@ -219,5 +261,30 @@ protocols = ["axion"]
         assert!(!report.artifacts_removed);
         assert!(report.staged_app_dir.exists());
         assert!(report.asset_manifest_path.exists());
+    }
+
+    #[test]
+    fn self_test_reports_multi_window_manifests() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        let manifest = write_multi_window_project(&root);
+        let output_dir = root.join("multi-window-output");
+
+        let report = run_self_test(&SelfTestArgs {
+            manifest_path: manifest,
+            output_dir: Some(output_dir.clone()),
+            keep_artifacts: false,
+        })
+        .expect("multi-window self-test should pass");
+
+        assert_eq!(report.app_name, "self-test-multi-window");
+        assert_eq!(report.window_count, 2);
+        assert!(report.host_events.contains(&"app.ready".to_owned()));
+        assert!(
+            report
+                .host_events
+                .contains(&"window.close_requested".to_owned())
+        );
+        assert!(report.artifacts_removed);
     }
 }

@@ -28,14 +28,20 @@ window.addEventListener('DOMContentLoaded', async () => {
     const pluginReady = new Promise((resolve) => {
       window.__AXION__.listen('demo.ready', resolve);
     });
-    const [ping, appInfo, appEcho, windowInfo, greeting, pluginEvent] = await Promise.all([
+    const [ping, appInfo, appVersion, appEcho, windowInfo, greeting, pluginEvent] = await Promise.all([
       window.__AXION__.invoke('app.ping', { from: 'hello-axion' }),
       window.__AXION__.invoke('app.info', null),
+      window.__AXION__.invoke('app.version', null),
       window.__AXION__.invoke('app.echo', { from: 'hello-axion', async: true }),
       window.__AXION__.invoke('window.info', null),
       window.__AXION__.invoke('demo.greet', { from: 'hello-axion-plugin-demo' }),
       pluginReady,
     ]);
+    const fsWrite = await window.__AXION__.invoke('fs.write_text', {
+      path: 'notes/hello.txt',
+      contents: 'hello-axion wrote this through the Axion bridge',
+    });
+    const fsRead = await window.__AXION__.invoke('fs.read_text', { path: 'notes/hello.txt' });
     const hostLog = window.__AXION__.events.includes('app.log')
       ? await window.__AXION__.emit('app.log', {
           message: 'hello-axion frontend is ready',
@@ -46,7 +52,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     status.textContent = `Axion bridge ready: ${ping.message} from ${ping.appName}; plugin=${greeting.appName}`;
     if (details) {
       details.textContent = JSON.stringify(
-        { appInfo, appEcho, windowInfo, greeting, pluginEvent, hostLog, lifecycleEvents },
+        { appInfo, appVersion, appEcho, windowInfo, greeting, pluginEvent, fsWrite, fsRead, hostLog, lifecycleEvents },
         null,
         2,
       );

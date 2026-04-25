@@ -18,7 +18,7 @@ frontend_dist = "frontend"
 entry = "frontend/index.html"
 
 [capabilities.main]
-commands = ["app.ping", "app.info", "app.echo", "window.info", "demo.greet"]
+commands = ["app.ping", "app.info", "app.version", "app.echo", "window.info", "fs.write_text", "fs.read_text", "demo.greet"]
 events = ["app.log"]
 protocols = ["axion"]
 allowed_navigation_origins = ["https://docs.example"]

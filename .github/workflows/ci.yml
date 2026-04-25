@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.86.0
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Run workspace tests
+        run: cargo test --workspace
+      - name: Validate hello example
+        run: cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
+      - name: Validate multi-window example
+        run: cargo run -p axion-cli -- self-test --manifest-path examples/multi-window/axion.toml
