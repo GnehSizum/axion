@@ -59,6 +59,10 @@ pub fn run(args: SelfTestArgs) -> Result<(), AxionCliError> {
     }
     println!("frontend_dist: {}", report.frontend_dist.display());
     println!("entry: {}", report.entry.display());
+    match &report.icon {
+        Some(icon) => println!("bundle_icon: {}", icon.display()),
+        None => println!("bundle_icon: not configured"),
+    }
     println!("runtime_errors: false");
     println!("host_events: {}", list_or_none(&report.host_events));
     println!("staged_app_dir: {}", report.staged_app_dir.display());
@@ -86,6 +90,7 @@ struct SelfTestReport {
     windows: Vec<SelfTestWindowReport>,
     frontend_dist: PathBuf,
     entry: PathBuf,
+    icon: Option<PathBuf>,
     host_events: Vec<String>,
     staged_app_dir: PathBuf,
     asset_manifest_path: PathBuf,
@@ -135,6 +140,7 @@ fn run_self_test(args: &SelfTestArgs) -> Result<SelfTestReport, AxionCliError> {
         launch_config.packaged_entry.clone(),
         &output_dir,
     )?;
+    let icon = axion_packager::validate_bundle_icon(config.bundle.icon.as_deref())?;
     let host_events = diagnostics
         .windows
         .iter()
@@ -213,6 +219,7 @@ fn run_self_test(args: &SelfTestArgs) -> Result<SelfTestReport, AxionCliError> {
         windows,
         frontend_dist: launch_config.frontend_dist.clone(),
         entry: launch_config.packaged_entry.clone(),
+        icon,
         host_events,
         staged_app_dir,
         asset_manifest_path,
@@ -268,9 +275,12 @@ mod tests {
 
     fn write_project(root: &Path) -> PathBuf {
         let frontend = root.join("frontend");
+        let icons = root.join("icons");
         fs::create_dir_all(&frontend).unwrap();
+        fs::create_dir_all(&icons).unwrap();
         fs::write(frontend.join("index.html"), "<!doctype html><html></html>").unwrap();
         fs::write(frontend.join("app.js"), "console.log('axion');").unwrap();
+        fs::write(icons.join("app.icns"), "icon").unwrap();
         let manifest = root.join("axion.toml");
         fs::write(
             &manifest,
@@ -290,6 +300,9 @@ title = "Self Test"
 [build]
 frontend_dist = "frontend"
 entry = "frontend/index.html"
+
+[bundle]
+icon = "icons/app.icns"
 
 [capabilities.main]
 commands = ["app.ping"]
@@ -375,6 +388,10 @@ allowed_navigation_origins = ["https://docs.example"]
             report.homepage.as_deref(),
             Some("https://example.dev/self-test")
         );
+        assert!(report.icon.as_ref().is_some_and(|icon| {
+            icon.file_name()
+                .is_some_and(|file_name| file_name == "app.icns")
+        }));
         assert_eq!(report.windows.len(), 1);
         assert_eq!(report.windows[0].id, "main");
         assert!(report.windows[0].bridge_enabled);

@@ -12,7 +12,7 @@ pub use axion_bridge::{
     BridgeEmitRequest, BridgeEvent as RuntimeBridgeEvent, BridgeRequest, CommandRegistryError,
 };
 
-const AXION_RELEASE_VERSION: &str = "v0.1.2.0";
+const AXION_RELEASE_VERSION: &str = "v0.1.3.0";
 
 pub trait RuntimePlugin: Send + Sync {
     fn register(&self, builder: &mut RuntimeBridgeBindingsBuilder);
@@ -1294,7 +1294,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.2.0\""));
+        assert!(version.contains("\"release\":\"v0.1.3.0\""));
     }
 
     #[test]

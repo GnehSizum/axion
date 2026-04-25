@@ -64,6 +64,7 @@ Generated projects contain:
 - `.gitignore`: ignores `target/` build output, runtime data, bundles, and crash reports
 - `README.md`: generated app usage notes
 - `axion.toml`: app, window, build, and capability configuration
+- `icons/app.icns`: default bundle icon referenced by `[bundle]`
 - `src/main.rs`: Rust entrypoint with panic reporting and a `demo.greet` custom command plugin
 - `frontend/index.html`: packaged HTML entry
 - `frontend/style.css`: CSP-compatible external styles
@@ -71,7 +72,7 @@ Generated projects contain:
 
 The generated `demo.greet` command is registered in Rust, allowed in `[capabilities.main]`, and invoked from frontend JavaScript. See `custom-commands.md` for the pattern.
 
-Generated manifests also include optional app metadata (`version`, `description`, `authors`, and `homepage`). These values appear in `app.info`, `axion doctor`, and bundle metadata scaffolds.
+Generated manifests also include optional app metadata (`version`, `description`, `authors`, and `homepage`) plus `[bundle] icon = "icons/app.icns"`. These values appear in `app.info`, `axion doctor`, and bundle metadata scaffolds.
 
 Generated apps install Axion panic reporting by default. Crash reports are written under `target/axion/crash-reports/`, which is ignored by the generated `.gitignore`.
 
@@ -87,5 +88,7 @@ cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml
 ```
 
 `self-test` prints app metadata, each window's configured commands/events/protocols, runtime command/event counts, host events, navigation origins, and staged asset paths.
+
+To customize an application icon in bundle scaffolds, update `[bundle] icon = "icons/app.icns"` in `axion.toml` and keep the icon file inside the project directory. Bundle output includes `axion-bundle-manifest.json`, which records the generated entry, metadata, icon, executable, file sizes, and `fnv1a64` fingerprints. The `bundle` command prints `verification: ok` after checking those references against the generated files.
 
 `build` and `bundle` produce staging output, not signed production installers. To include an app executable, build it first or pass `--build-executable` to `bundle`.

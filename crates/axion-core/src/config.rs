@@ -74,6 +74,22 @@ impl BuildConfig {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BundleConfig {
+    pub icon: Option<PathBuf>,
+}
+
+impl BundleConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_icon(mut self, icon: impl Into<PathBuf>) -> Self {
+        self.icon = Some(icon.into());
+        self
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CapabilityConfig {
     pub commands: Vec<String>,
     pub events: Vec<String>,
@@ -88,6 +104,7 @@ pub struct AppConfig {
     pub windows: Vec<WindowConfig>,
     pub dev: Option<DevServerConfig>,
     pub build: BuildConfig,
+    pub bundle: BundleConfig,
     pub capabilities: BTreeMap<String, CapabilityConfig>,
 }
 

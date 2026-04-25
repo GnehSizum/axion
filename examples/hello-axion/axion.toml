@@ -21,6 +21,9 @@ url = "http://127.0.0.1:3000"
 frontend_dist = "frontend"
 entry = "frontend/index.html"
 
+[bundle]
+icon = "icons/app.icns"
+
 [capabilities.main]
 commands = ["app.ping", "app.info", "app.version", "app.echo", "window.info", "fs.write_text", "fs.read_text", "demo.greet"]
 events = ["app.log"]

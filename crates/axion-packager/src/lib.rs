@@ -1,9 +1,11 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 pub const AXION_ASSET_MANIFEST_FILE_NAME: &str = "axion-assets.json";
+pub const AXION_BUNDLE_MANIFEST_FILE_NAME: &str = "axion-bundle-manifest.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BundleTarget {
@@ -27,6 +29,7 @@ pub struct BundleMetadata {
     pub description: Option<String>,
     pub authors: Vec<String>,
     pub homepage: Option<String>,
+    pub icon: Option<PathBuf>,
 }
 
 impl BundleMetadata {
@@ -38,6 +41,7 @@ impl BundleMetadata {
             description: None,
             authors: Vec::new(),
             homepage: None,
+            icon: None,
         }
     }
 }
@@ -65,6 +69,15 @@ pub struct BundleArtifact {
     pub entry_path: PathBuf,
     pub asset_manifest_path: PathBuf,
     pub metadata_path: PathBuf,
+    pub bundle_manifest_path: PathBuf,
+    pub icon_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleVerificationReport {
+    pub bundle_dir: PathBuf,
+    pub checked_paths: Vec<PathBuf>,
+    pub bundle_file_count: usize,
 }
 
 #[derive(Debug, Error)]
@@ -91,6 +104,12 @@ pub enum PackagerError {
     ReservedAssetPath { path: PathBuf },
     #[error("bundle executable '{path}' must exist and be a file")]
     MissingExecutable { path: PathBuf },
+    #[error("bundle icon '{path}' must exist and be a file")]
+    MissingIcon { path: PathBuf },
+    #[error("bundle path '{path}' is missing or has an unexpected type")]
+    MissingBundlePath { path: PathBuf },
+    #[error("bundle manifest '{path}' is invalid: {message}")]
+    InvalidBundleManifest { path: PathBuf, message: String },
     #[error("failed to prepare build artifact: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -160,6 +179,7 @@ pub fn stage_bundle_from_web_assets_with_metadata(
     let entry = entry.into();
     let validation = validate_web_assets(&frontend_dist, &entry)?;
     let executable_path = validate_bundle_executable(bundle_plan.executable_path.as_deref())?;
+    let icon_path = validate_bundle_icon(metadata.icon.as_deref())?;
 
     let bundle_dir = bundle_root_dir(
         &bundle_plan.output_dir,
@@ -183,11 +203,25 @@ pub fn stage_bundle_from_web_assets_with_metadata(
         bundle_plan.target,
         &metadata.app_name,
     )?;
+    let copied_icon_path = copy_bundle_icon(icon_path.as_deref(), &bundle_dir, bundle_plan.target)?;
     let metadata_path = write_bundle_metadata(
         &bundle_dir,
         bundle_plan.target,
         metadata,
         copied_executable_path.as_deref(),
+        copied_icon_path.as_deref(),
+    )?;
+    let entry_path = resources_app_dir.join(validation.relative_entry);
+    let bundle_manifest_path = write_bundle_manifest(
+        &bundle_dir,
+        bundle_plan.target,
+        metadata,
+        &resources_app_dir,
+        &entry_path,
+        &asset_manifest_path,
+        &metadata_path,
+        copied_executable_path.as_deref(),
+        copied_icon_path.as_deref(),
     )?;
 
     Ok(BundleArtifact {
@@ -196,9 +230,39 @@ pub fn stage_bundle_from_web_assets_with_metadata(
         bundle_dir,
         resources_app_dir: resources_app_dir.clone(),
         executable_path: copied_executable_path,
-        entry_path: resources_app_dir.join(validation.relative_entry),
+        entry_path,
         asset_manifest_path,
         metadata_path,
+        bundle_manifest_path,
+        icon_path: copied_icon_path,
+    })
+}
+
+pub fn verify_bundle_artifact(
+    artifact: &BundleArtifact,
+) -> Result<BundleVerificationReport, PackagerError> {
+    let mut checked_paths = Vec::new();
+    require_bundle_dir(&artifact.bundle_dir, &mut checked_paths)?;
+    require_bundle_dir(&artifact.resources_app_dir, &mut checked_paths)?;
+    require_bundle_file(&artifact.entry_path, &mut checked_paths)?;
+    require_bundle_file(&artifact.asset_manifest_path, &mut checked_paths)?;
+    require_bundle_file(&artifact.metadata_path, &mut checked_paths)?;
+    require_bundle_file(&artifact.bundle_manifest_path, &mut checked_paths)?;
+
+    if let Some(path) = &artifact.executable_path {
+        require_bundle_file(path, &mut checked_paths)?;
+    }
+    if let Some(path) = &artifact.icon_path {
+        require_bundle_file(path, &mut checked_paths)?;
+    }
+
+    verify_bundle_manifest_references(artifact)?;
+    let bundle_file_count = collect_bundle_manifest_files(&artifact.bundle_dir)?.len();
+
+    Ok(BundleVerificationReport {
+        bundle_dir: artifact.bundle_dir.clone(),
+        checked_paths,
+        bundle_file_count,
     })
 }
 
@@ -232,6 +296,140 @@ fn validate_bundle_executable(path: Option<&Path>) -> Result<Option<PathBuf>, Pa
     Ok(Some(path.to_path_buf()))
 }
 
+pub fn validate_bundle_icon(path: Option<&Path>) -> Result<Option<PathBuf>, PackagerError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let metadata = fs::symlink_metadata(path).map_err(|_| PackagerError::MissingIcon {
+        path: path.to_path_buf(),
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(PackagerError::SymlinkNotAllowed {
+            path: path.to_path_buf(),
+        });
+    }
+    if !metadata.is_file() {
+        return Err(PackagerError::MissingIcon {
+            path: path.to_path_buf(),
+        });
+    }
+
+    Ok(Some(path.to_path_buf()))
+}
+
+fn require_bundle_dir(path: &Path, checked_paths: &mut Vec<PathBuf>) -> Result<(), PackagerError> {
+    if !path.is_dir() {
+        return Err(PackagerError::MissingBundlePath {
+            path: path.to_path_buf(),
+        });
+    }
+    checked_paths.push(path.to_path_buf());
+    Ok(())
+}
+
+fn require_bundle_file(path: &Path, checked_paths: &mut Vec<PathBuf>) -> Result<(), PackagerError> {
+    if !path.is_file() {
+        return Err(PackagerError::MissingBundlePath {
+            path: path.to_path_buf(),
+        });
+    }
+    checked_paths.push(path.to_path_buf());
+    Ok(())
+}
+
+fn verify_bundle_manifest_references(artifact: &BundleArtifact) -> Result<(), PackagerError> {
+    let manifest = fs::read_to_string(&artifact.bundle_manifest_path)?;
+    require_bundle_manifest_field(
+        artifact,
+        &manifest,
+        "entry",
+        &bundle_relative_path(&artifact.bundle_dir, &artifact.entry_path),
+    )?;
+    require_bundle_manifest_field(
+        artifact,
+        &manifest,
+        "asset_manifest",
+        &bundle_relative_path(&artifact.bundle_dir, &artifact.asset_manifest_path),
+    )?;
+    require_bundle_manifest_field(
+        artifact,
+        &manifest,
+        "metadata",
+        &bundle_relative_path(&artifact.bundle_dir, &artifact.metadata_path),
+    )?;
+
+    match &artifact.executable_path {
+        Some(path) => require_bundle_manifest_field(
+            artifact,
+            &manifest,
+            "executable",
+            &bundle_relative_path(&artifact.bundle_dir, path),
+        )?,
+        None => require_bundle_manifest_null_field(artifact, &manifest, "executable")?,
+    }
+    match &artifact.icon_path {
+        Some(path) => require_bundle_manifest_field(
+            artifact,
+            &manifest,
+            "icon",
+            &bundle_relative_path(&artifact.bundle_dir, path),
+        )?,
+        None => require_bundle_manifest_null_field(artifact, &manifest, "icon")?,
+    }
+
+    let files = collect_bundle_manifest_files(&artifact.bundle_dir)?;
+    for file in files
+        .into_iter()
+        .filter(|file| file.path != AXION_BUNDLE_MANIFEST_FILE_NAME)
+    {
+        let expected = format!(
+            "{{ \"path\": {}, \"bytes\": {}, \"fnv1a64\": {} }}",
+            json_string_literal(&file.path),
+            file.bytes,
+            json_string_literal(&file.fnv1a64)
+        );
+        if !manifest.contains(&expected) {
+            return Err(PackagerError::InvalidBundleManifest {
+                path: artifact.bundle_manifest_path.clone(),
+                message: format!("missing file entry for '{}'", file.path),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn require_bundle_manifest_field(
+    artifact: &BundleArtifact,
+    manifest: &str,
+    field: &str,
+    value: &str,
+) -> Result<(), PackagerError> {
+    let expected = format!("\"{field}\": {}", json_string_literal(value));
+    if !manifest.contains(&expected) {
+        return Err(PackagerError::InvalidBundleManifest {
+            path: artifact.bundle_manifest_path.clone(),
+            message: format!("missing {field} reference '{}'", value),
+        });
+    }
+    Ok(())
+}
+
+fn require_bundle_manifest_null_field(
+    artifact: &BundleArtifact,
+    manifest: &str,
+    field: &str,
+) -> Result<(), PackagerError> {
+    let expected = format!("\"{field}\": null");
+    if !manifest.contains(&expected) {
+        return Err(PackagerError::InvalidBundleManifest {
+            path: artifact.bundle_manifest_path.clone(),
+            message: format!("missing null {field} reference"),
+        });
+    }
+    Ok(())
+}
+
 fn copy_bundle_executable(
     source: Option<&Path>,
     bundle_dir: &Path,
@@ -260,6 +458,43 @@ fn copy_bundle_executable(
     Ok(Some(destination))
 }
 
+fn copy_bundle_icon(
+    source: Option<&Path>,
+    bundle_dir: &Path,
+    target: BundleTarget,
+) -> Result<Option<PathBuf>, PackagerError> {
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    let Some(file_name) = source.file_name() else {
+        return Err(PackagerError::MissingIcon {
+            path: source.to_path_buf(),
+        });
+    };
+    let destination = bundle_icon_path(bundle_dir, target, file_name);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(source, &destination)?;
+    Ok(Some(destination))
+}
+
+fn bundle_icon_path(
+    bundle_dir: &Path,
+    target: BundleTarget,
+    file_name: &std::ffi::OsStr,
+) -> PathBuf {
+    match target {
+        BundleTarget::MacOsApp => bundle_dir
+            .join("Contents")
+            .join("Resources")
+            .join(file_name),
+        BundleTarget::LinuxDir | BundleTarget::WindowsDir => {
+            bundle_dir.join("resources").join(file_name)
+        }
+    }
+}
+
 fn bundle_executable_path(bundle_dir: &Path, target: BundleTarget, app_name: &str) -> PathBuf {
     match target {
         BundleTarget::MacOsApp => bundle_dir.join("Contents").join("MacOS").join(app_name),
@@ -273,12 +508,19 @@ fn write_bundle_metadata(
     target: BundleTarget,
     metadata: &BundleMetadata,
     executable_path: Option<&Path>,
+    icon_path: Option<&Path>,
 ) -> Result<PathBuf, PackagerError> {
     match target {
-        BundleTarget::MacOsApp => write_macos_metadata(bundle_dir, metadata, executable_path),
-        BundleTarget::LinuxDir | BundleTarget::WindowsDir => {
-            write_directory_bundle_metadata(bundle_dir, target, metadata, executable_path)
+        BundleTarget::MacOsApp => {
+            write_macos_metadata(bundle_dir, metadata, executable_path, icon_path)
         }
+        BundleTarget::LinuxDir | BundleTarget::WindowsDir => write_directory_bundle_metadata(
+            bundle_dir,
+            target,
+            metadata,
+            executable_path,
+            icon_path,
+        ),
     }
 }
 
@@ -286,6 +528,7 @@ fn write_macos_metadata(
     bundle_dir: &Path,
     metadata: &BundleMetadata,
     executable_path: Option<&Path>,
+    icon_path: Option<&Path>,
 ) -> Result<PathBuf, PackagerError> {
     let contents_dir = bundle_dir.join("Contents");
     fs::create_dir_all(&contents_dir)?;
@@ -310,6 +553,15 @@ fn write_macos_metadata(
         .iter()
         .map(|author| format!("    <string>{}</string>\n", xml_escape(author)))
         .collect::<String>();
+    let icon_key = icon_path
+        .and_then(Path::file_name)
+        .map(|file_name| {
+            format!(
+                "  <key>CFBundleIconFile</key>\n  <string>{}</string>\n",
+                xml_escape(&file_name.to_string_lossy())
+            )
+        })
+        .unwrap_or_default();
     let info_plist = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
@@ -325,6 +577,7 @@ fn write_macos_metadata(
   <string>APPL</string>\n\
   <key>CFBundleShortVersionString</key>\n\
   <string>{}</string>\n\
+{}\
   <key>AxionDescription</key>\n\
   <string>{}</string>\n\
   <key>AxionHomepage</key>\n\
@@ -338,6 +591,7 @@ fn write_macos_metadata(
         xml_escape(&identifier),
         xml_escape(&metadata.app_name),
         xml_escape(version),
+        icon_key,
         xml_escape(description),
         xml_escape(homepage),
         authors,
@@ -352,16 +606,20 @@ fn write_directory_bundle_metadata(
     target: BundleTarget,
     metadata: &BundleMetadata,
     executable_path: Option<&Path>,
+    icon_path: Option<&Path>,
 ) -> Result<PathBuf, PackagerError> {
     fs::create_dir_all(bundle_dir)?;
     let executable = executable_path
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "none".to_owned());
     let metadata_path = bundle_dir.join("axion-bundle.txt");
+    let icon = icon_path
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "none".to_owned());
     fs::write(
         &metadata_path,
         format!(
-            "app={}\nidentifier={}\nversion={}\ndescription={}\nauthors={}\nhomepage={}\ntarget={target:?}\nexecutable={executable}\nresources=resources/app\n",
+            "app={}\nidentifier={}\nversion={}\ndescription={}\nauthors={}\nhomepage={}\ntarget={target:?}\nexecutable={executable}\nicon={icon}\nresources=resources/app\n",
             metadata.app_name,
             metadata.identifier.as_deref().unwrap_or(""),
             metadata
@@ -374,6 +632,132 @@ fn write_directory_bundle_metadata(
         ),
     )?;
     Ok(metadata_path)
+}
+
+fn write_bundle_manifest(
+    bundle_dir: &Path,
+    target: BundleTarget,
+    metadata: &BundleMetadata,
+    resources_app_dir: &Path,
+    entry_path: &Path,
+    asset_manifest_path: &Path,
+    metadata_path: &Path,
+    executable_path: Option<&Path>,
+    icon_path: Option<&Path>,
+) -> Result<PathBuf, PackagerError> {
+    let manifest_path = bundle_dir.join(AXION_BUNDLE_MANIFEST_FILE_NAME);
+    let files = collect_bundle_manifest_files(bundle_dir)?
+        .into_iter()
+        .map(|file| {
+            format!(
+                "    {{ \"path\": {}, \"bytes\": {}, \"fnv1a64\": {} }}",
+                json_string_literal(&file.path),
+                file.bytes,
+                json_string_literal(&file.fnv1a64)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let source = format!(
+        "{{\n  \"version\": 1,\n  \"target\": {},\n  \"app\": {},\n  \"identifier\": {},\n  \"app_version\": {},\n  \"resources\": {},\n  \"entry\": {},\n  \"asset_manifest\": {},\n  \"metadata\": {},\n  \"executable\": {},\n  \"icon\": {},\n  \"files\": [\n{}\n  ]\n}}\n",
+        json_string_literal(bundle_target_name(target)),
+        json_string_literal(&metadata.app_name),
+        json_optional_string_literal(metadata.identifier.as_deref()),
+        json_optional_string_literal(metadata.version.as_deref()),
+        json_string_literal(&bundle_relative_path(bundle_dir, resources_app_dir)),
+        json_string_literal(&bundle_relative_path(bundle_dir, entry_path)),
+        json_string_literal(&bundle_relative_path(bundle_dir, asset_manifest_path)),
+        json_string_literal(&bundle_relative_path(bundle_dir, metadata_path)),
+        json_optional_string_literal(
+            executable_path
+                .map(|path| bundle_relative_path(bundle_dir, path))
+                .as_deref(),
+        ),
+        json_optional_string_literal(
+            icon_path
+                .map(|path| bundle_relative_path(bundle_dir, path))
+                .as_deref(),
+        ),
+        files
+    );
+    fs::write(&manifest_path, source)?;
+    Ok(manifest_path)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BundleManifestFile {
+    path: String,
+    bytes: u64,
+    fnv1a64: String,
+}
+
+fn collect_bundle_manifest_files(
+    bundle_dir: &Path,
+) -> Result<Vec<BundleManifestFile>, PackagerError> {
+    let mut files = Vec::new();
+    collect_bundle_manifest_files_recursive(bundle_dir, bundle_dir, &mut files)?;
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
+}
+
+fn collect_bundle_manifest_files_recursive(
+    bundle_dir: &Path,
+    current: &Path,
+    files: &mut Vec<BundleManifestFile>,
+) -> Result<(), PackagerError> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+
+        if file_type.is_dir() {
+            collect_bundle_manifest_files_recursive(bundle_dir, &path, files)?;
+        } else if file_type.is_file() {
+            files.push(BundleManifestFile {
+                path: bundle_relative_path(bundle_dir, &path),
+                bytes: entry.metadata()?.len(),
+                fnv1a64: fnv1a64_file_hex(&path)?,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn fnv1a64_file_hex(path: &Path) -> Result<String, PackagerError> {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut file = fs::File::open(path)?;
+    let mut hash = FNV_OFFSET_BASIS;
+    let mut buffer = [0_u8; 8192];
+
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        for byte in &buffer[..read] {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+
+    Ok(format!("{hash:016x}"))
+}
+
+fn bundle_target_name(target: BundleTarget) -> &'static str {
+    match target {
+        BundleTarget::MacOsApp => "macos-app",
+        BundleTarget::LinuxDir => "linux-dir",
+        BundleTarget::WindowsDir => "windows-dir",
+    }
+}
+
+fn bundle_relative_path(bundle_dir: &Path, path: &Path) -> String {
+    path.strip_prefix(bundle_dir)
+        .map(relative_path_string)
+        .unwrap_or_else(|_| path.display().to_string())
 }
 
 pub fn validate_web_assets(
@@ -576,6 +960,12 @@ fn json_string_literal(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+fn json_optional_string_literal(value: Option<&str>) -> String {
+    value
+        .map(json_string_literal)
+        .unwrap_or_else(|| "null".to_owned())
+}
+
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -610,9 +1000,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        AXION_ASSET_MANIFEST_FILE_NAME, BundleMetadata, BundlePlan, BundleTarget, PackagerError,
-        current_bundle_target, stage_bundle_from_web_assets,
-        stage_bundle_from_web_assets_with_metadata, stage_web_assets, validate_web_assets,
+        AXION_ASSET_MANIFEST_FILE_NAME, AXION_BUNDLE_MANIFEST_FILE_NAME, BundleMetadata,
+        BundlePlan, BundleTarget, PackagerError, current_bundle_target,
+        stage_bundle_from_web_assets, stage_bundle_from_web_assets_with_metadata, stage_web_assets,
+        validate_web_assets, verify_bundle_artifact,
     };
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -816,6 +1207,7 @@ mod tests {
         assert!(artifact.entry_path.exists());
         assert!(artifact.asset_manifest_path.exists());
         assert!(artifact.metadata_path.exists());
+        assert!(artifact.bundle_manifest_path.exists());
         assert_eq!(
             artifact.asset_manifest_path,
             artifact.resources_app_dir.join("axion-assets.json")
@@ -823,6 +1215,29 @@ mod tests {
         assert_eq!(
             artifact.metadata_path,
             output.join("hello-axion").join("axion-bundle.txt")
+        );
+        assert_eq!(
+            artifact.bundle_manifest_path,
+            output
+                .join("hello-axion")
+                .join(AXION_BUNDLE_MANIFEST_FILE_NAME)
+        );
+        let bundle_manifest = fs::read_to_string(&artifact.bundle_manifest_path).unwrap();
+        assert!(bundle_manifest.contains("\"target\": \"linux-dir\""));
+        assert!(bundle_manifest.contains("\"resources\": \"resources/app\""));
+        assert!(bundle_manifest.contains("\"entry\": \"resources/app/index.html\""));
+        assert!(bundle_manifest.contains("\"metadata\": \"axion-bundle.txt\""));
+        assert!(bundle_manifest.contains("\"icon\": null"));
+        assert!(bundle_manifest.contains("\"path\": \"resources/app/index.html\""));
+        assert!(bundle_manifest.contains("\"fnv1a64\":"));
+
+        let verification = verify_bundle_artifact(&artifact).unwrap();
+        assert_eq!(verification.bundle_dir, artifact.bundle_dir);
+        assert!(verification.bundle_file_count >= 3);
+        assert!(
+            verification
+                .checked_paths
+                .contains(&artifact.bundle_manifest_path)
         );
     }
 
@@ -955,6 +1370,7 @@ mod tests {
                 description: Some("Hello metadata".to_owned()),
                 authors: vec!["Axion Maintainers".to_owned()],
                 homepage: Some("https://example.dev/hello".to_owned()),
+                icon: None,
             },
         )
         .unwrap();
@@ -966,6 +1382,126 @@ mod tests {
         assert!(metadata.contains("description=Hello metadata"));
         assert!(metadata.contains("authors=Axion Maintainers"));
         assert!(metadata.contains("homepage=https://example.dev/hello"));
+    }
+
+    #[test]
+    fn stage_bundle_from_web_assets_copies_icon_and_writes_metadata() {
+        let source = temp_dir("bundle-icon-source");
+        let output = temp_dir("bundle-icon-output");
+        let icon = temp_dir("bundle-icon-file").join("app.icns");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(icon.parent().unwrap()).unwrap();
+        fs::write(source.join("index.html"), "<html>Hello</html>").unwrap();
+        fs::write(&icon, "icon").unwrap();
+
+        let artifact = stage_bundle_from_web_assets_with_metadata(
+            source.clone(),
+            source.join("index.html"),
+            BundlePlan {
+                target: BundleTarget::MacOsApp,
+                output_dir: output,
+                executable_path: None,
+            },
+            &BundleMetadata {
+                app_name: "hello-axion".to_owned(),
+                identifier: Some("dev.axion.hello".to_owned()),
+                version: Some("1.2.3".to_owned()),
+                description: None,
+                authors: Vec::new(),
+                homepage: None,
+                icon: Some(icon),
+            },
+        )
+        .unwrap();
+
+        let copied_icon = artifact.icon_path.as_ref().expect("icon should be copied");
+        assert_eq!(copied_icon.file_name().unwrap(), "app.icns");
+        assert!(copied_icon.exists());
+        let metadata = fs::read_to_string(&artifact.metadata_path).unwrap();
+        assert!(metadata.contains("<key>CFBundleIconFile</key>"));
+        assert!(metadata.contains("<string>app.icns</string>"));
+        let bundle_manifest = fs::read_to_string(&artifact.bundle_manifest_path).unwrap();
+        assert!(bundle_manifest.contains("\"target\": \"macos-app\""));
+        assert!(bundle_manifest.contains("\"icon\": \"Contents/Resources/app.icns\""));
+        assert!(bundle_manifest.contains("\"metadata\": \"Contents/Info.plist\""));
+        assert!(bundle_manifest.contains("\"path\": \"Contents/Resources/app.icns\""));
+        let verification = verify_bundle_artifact(&artifact).unwrap();
+        assert!(verification.bundle_file_count >= 4);
+    }
+
+    #[test]
+    fn verify_bundle_artifact_rejects_missing_manifest_references() {
+        let source = temp_dir("bundle-verify-source");
+        let output = temp_dir("bundle-verify-output");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("index.html"), "<html>Hello</html>").unwrap();
+
+        let artifact = stage_bundle_from_web_assets(
+            source.clone(),
+            source.join("index.html"),
+            BundlePlan {
+                target: BundleTarget::LinuxDir,
+                output_dir: output,
+                executable_path: None,
+            },
+            "hello-axion",
+        )
+        .unwrap();
+        fs::write(&artifact.bundle_manifest_path, "{}").unwrap();
+
+        let error = verify_bundle_artifact(&artifact).expect_err("invalid manifest should fail");
+
+        assert!(matches!(error, PackagerError::InvalidBundleManifest { .. }));
+    }
+
+    #[test]
+    fn verify_bundle_artifact_rejects_missing_files() {
+        let source = temp_dir("bundle-verify-missing-source");
+        let output = temp_dir("bundle-verify-missing-output");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("index.html"), "<html>Hello</html>").unwrap();
+
+        let artifact = stage_bundle_from_web_assets(
+            source.clone(),
+            source.join("index.html"),
+            BundlePlan {
+                target: BundleTarget::LinuxDir,
+                output_dir: output,
+                executable_path: None,
+            },
+            "hello-axion",
+        )
+        .unwrap();
+        fs::remove_file(&artifact.entry_path).unwrap();
+
+        let error = verify_bundle_artifact(&artifact).expect_err("missing entry should fail");
+
+        assert!(matches!(error, PackagerError::MissingBundlePath { .. }));
+    }
+
+    #[test]
+    fn verify_bundle_artifact_rejects_tampered_same_size_files() {
+        let source = temp_dir("bundle-verify-tamper-source");
+        let output = temp_dir("bundle-verify-tamper-output");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("index.html"), "aaaa").unwrap();
+
+        let artifact = stage_bundle_from_web_assets(
+            source.clone(),
+            source.join("index.html"),
+            BundlePlan {
+                target: BundleTarget::LinuxDir,
+                output_dir: output,
+                executable_path: None,
+            },
+            "hello-axion",
+        )
+        .unwrap();
+        fs::write(&artifact.entry_path, "bbbb").unwrap();
+
+        let error = verify_bundle_artifact(&artifact).expect_err("tampered entry should fail");
+
+        assert!(matches!(error, PackagerError::InvalidBundleManifest { .. }));
     }
 
     #[test]

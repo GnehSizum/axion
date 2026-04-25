@@ -86,6 +86,17 @@ protocols = ["axion"]
 - `frontend_dist`: directory containing frontend assets.
 - `entry`: HTML entry file. It must stay inside `frontend_dist`.
 
+## Bundle
+
+```toml
+[bundle]
+icon = "icons/app.icns"
+```
+
+- `icon`: optional project-relative icon file copied into bundle resources.
+
+Icon paths must be relative to the manifest directory and must not contain `..`. `axion doctor`, `axion self-test`, and `axion bundle` validate that the configured icon exists, is a file, and is not a symlink. On macOS, the copied icon is referenced from `Info.plist` using `CFBundleIconFile`.
+
 ## Dev
 
 - `url`: frontend dev server URL used by `axion dev --launch`.

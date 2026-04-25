@@ -4,6 +4,7 @@ use std::process::Command;
 use axion_core::{Builder, RunMode};
 use axion_packager::{
     BundleMetadata, BundlePlan, current_bundle_target, stage_bundle_from_web_assets_with_metadata,
+    verify_bundle_artifact,
 };
 
 use crate::cli::BundleArgs;
@@ -39,8 +40,10 @@ pub fn run(args: BundleArgs) -> Result<(), AxionCliError> {
             description: launch_config.description.clone(),
             authors: launch_config.authors.clone(),
             homepage: launch_config.homepage.clone(),
+            icon: app.config().bundle.icon.clone(),
         },
     )?;
+    let verification = verify_bundle_artifact(&artifact)?;
 
     println!("Axion bundle");
     println!("manifest: {}", args.manifest_path.display());
@@ -61,6 +64,17 @@ pub fn run(args: BundleArgs) -> Result<(), AxionCliError> {
     println!("entry_path: {}", artifact.entry_path.display());
     println!("asset_manifest: {}", artifact.asset_manifest_path.display());
     println!("metadata: {}", artifact.metadata_path.display());
+    println!(
+        "bundle_manifest: {}",
+        artifact.bundle_manifest_path.display()
+    );
+    println!("verification: ok");
+    println!("bundle_files: {}", verification.bundle_file_count);
+    println!("checked_paths: {}", verification.checked_paths.len());
+    match &artifact.icon_path {
+        Some(path) => println!("icon: {}", path.display()),
+        None => println!("icon: not configured"),
+    }
     match &artifact.executable_path {
         Some(path) => println!("executable: {}", path.display()),
         None => println!(

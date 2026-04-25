@@ -334,6 +334,7 @@ mod tests {
                 url: Url::parse(value).expect("test URL must parse"),
             }),
             build: BuildConfig::new("frontend", "frontend/index.html"),
+            bundle: Default::default(),
             capabilities: Default::default(),
         }
     }
@@ -362,6 +363,7 @@ mod tests {
                     url: Url::parse(value).expect("test URL must parse"),
                 }),
                 build: BuildConfig::new(&frontend, &entry),
+                bundle: Default::default(),
                 capabilities: Default::default(),
             })
             .build()

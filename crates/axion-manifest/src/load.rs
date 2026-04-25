@@ -3,7 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use axion_core::{
-    AppConfig, AppIdentity, BuildConfig, CapabilityConfig, DevServerConfig, WindowConfig, WindowId,
+    AppConfig, AppIdentity, BuildConfig, BundleConfig, CapabilityConfig, DevServerConfig,
+    WindowConfig, WindowId,
 };
 use url::Url;
 
@@ -84,6 +85,8 @@ pub enum ManifestError {
     BridgeRequiresAxionProtocol { path: PathBuf, window_id: String },
     #[error("manifest at {path} defines capabilities for unknown window id '{window_id}'")]
     UnknownCapabilityWindow { path: PathBuf, window_id: String },
+    #[error("manifest at {path} defines an invalid bundle.icon path '{value}'")]
+    InvalidBundleIconPath { path: PathBuf, value: PathBuf },
 }
 
 pub fn load_from_path(path: impl AsRef<Path>) -> Result<ManifestDocument, ManifestError> {
@@ -145,6 +148,7 @@ pub fn load_app_config_from_path(path: impl AsRef<Path>) -> Result<AppConfig, Ma
         resolve_path(&manifest_dir, manifest.build.frontend_dist),
         resolve_path(&manifest_dir, manifest.build.entry),
     );
+    let bundle = bundle_config_from_manifest(&path, &manifest_dir, manifest.bundle)?;
 
     let windows = manifest_windows(manifest.window, manifest.windows)
         .into_iter()
@@ -169,8 +173,46 @@ pub fn load_app_config_from_path(path: impl AsRef<Path>) -> Result<AppConfig, Ma
         windows,
         dev,
         build,
+        bundle,
         capabilities,
     })
+}
+
+fn bundle_config_from_manifest(
+    path: &Path,
+    manifest_dir: &Path,
+    bundle: Option<crate::model::BundleSection>,
+) -> Result<BundleConfig, ManifestError> {
+    let Some(bundle) = bundle else {
+        return Ok(BundleConfig::new());
+    };
+    let Some(icon) = bundle.icon else {
+        return Ok(BundleConfig::new());
+    };
+
+    reject_invalid_project_relative_path(path, &icon)?;
+    Ok(BundleConfig::new().with_icon(resolve_path(manifest_dir, icon)))
+}
+
+fn reject_invalid_project_relative_path(path: &Path, value: &Path) -> Result<(), ManifestError> {
+    if value.as_os_str().is_empty()
+        || value.is_absolute()
+        || value.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(ManifestError::InvalidBundleIconPath {
+            path: path.to_path_buf(),
+            value: value.to_path_buf(),
+        });
+    }
+
+    Ok(())
 }
 
 fn reject_invalid_app_name(path: &Path, app_name: &str) -> Result<(), ManifestError> {
@@ -548,6 +590,9 @@ url = "http://127.0.0.1:3000"
 frontend_dist = "frontend"
 entry = "frontend/index.html"
 
+[bundle]
+icon = "icons/app.icns"
+
 [capabilities.main]
 commands = ["app.ping"]
 events = ["app.log"]
@@ -577,12 +622,39 @@ allow_remote_navigation = false
         assert_eq!(config.windows[0].title, "Hello");
         assert!(config.build.frontend_dist.is_absolute());
         assert!(config.build.entry.is_absolute());
+        assert_eq!(
+            config.bundle.icon,
+            Some(manifest_path.parent().unwrap().join("icons/app.icns"))
+        );
         assert_eq!(config.capabilities["main"].commands, vec!["app.ping"]);
         assert_eq!(config.capabilities["main"].events, vec!["app.log"]);
         assert_eq!(
             config.capabilities["main"].allowed_navigation_origins,
             vec!["https://docs.example"]
         );
+    }
+
+    #[test]
+    fn manifest_loader_rejects_invalid_bundle_icon_paths() {
+        for icon in ["", "/tmp/app.icns", "../app.icns"] {
+            let manifest_path = write_manifest(&format!(
+                r#"
+[app]
+name = "hello"
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[bundle]
+icon = {icon:?}
+"#
+            ));
+
+            let error =
+                load_app_config_from_path(&manifest_path).expect_err("manifest should fail");
+            assert!(matches!(error, ManifestError::InvalidBundleIconPath { .. }));
+        }
     }
 
     #[test]
