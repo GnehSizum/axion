@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/axion-bridge",
+    "crates/axion-cli",
+    "crates/axion-core",
+    "crates/axion-manifest",
+    "crates/axion-packager",
+    "crates/axion-protocol",
+    "crates/axion-runtime",
+    "crates/axion-security",
+    "crates/axion-window-winit",
+    "examples/hello-axion",
+    "examples/multi-window",
+]
+exclude = ["servo"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86.0"
+
+[workspace.dependencies]
+axion-bridge = { path = "crates/axion-bridge" }
+axion-core = { path = "crates/axion-core" }
+axion-manifest = { path = "crates/axion-manifest" }
+axion-packager = { path = "crates/axion-packager" }
+axion-protocol = { path = "crates/axion-protocol" }
+axion-runtime = { path = "crates/axion-runtime" }
+axion-security = { path = "crates/axion-security" }
+axion-window-winit = { path = "crates/axion-window-winit" }
+clap = { version = "4.5.38", features = ["derive"] }
+euclid = "0.22.11"
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.12"
+toml = "0.8.23"
+url = { version = "2.5.4", features = ["serde"] }
+uuid = { version = "1.18.1", features = ["v4"] }
+winit = "0.30.13"
+
+[workspace.metadata.axion]
+engine_path = "servo"
+milestone = "v0.1.0"

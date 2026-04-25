@@ -1,0 +1,25 @@
+[app]
+name = "hello-axion"
+identifier = "dev.axion.hello"
+
+[window]
+id = "main"
+title = "Hello Axion"
+width = 960
+height = 720
+resizable = true
+visible = true
+
+[dev]
+url = "http://127.0.0.1:3000"
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[capabilities.main]
+commands = ["app.ping", "app.info", "app.echo", "window.info", "demo.greet"]
+events = ["app.log"]
+protocols = ["axion"]
+allowed_navigation_origins = ["https://docs.example"]
+allow_remote_navigation = false

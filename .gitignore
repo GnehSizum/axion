@@ -1,0 +1,51 @@
+# OS and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+/.idea/
+/.vscode/
+
+# Rust build output for this workspace
+/target/
+/examples/*/target/
+
+# Local Cargo configuration
+/.cargo/config.toml
+/.cargo/config.local.toml
+!/.cargo/config.example.toml
+
+# Internal development notes
+/dev_docs/
+/AGENTS.md
+
+# Local assistant and IDE metadata
+/.claude/
+/.cursor/
+/.windsurf/
+
+# Axion generated artifacts
+/target/axion/
+/target/axion-crash-reports/
+/examples/*/target/axion/
+/examples/*/target/axion-crash-reports/
+/examples/*/crash-reports/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.pid
+*.profraw
+*.profdata
+
+# Coverage output
+/coverage/
+/tarpaulin-report.html
+/lcov.info
+
+# Local environment files
+.env
+.env.*
+!.env.example

@@ -1,0 +1,12 @@
+[package]
+name = "axion-manifest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axion-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+url.workspace = true

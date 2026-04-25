@@ -1,0 +1,36 @@
+[package]
+name = "axion-window-winit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+servo-runtime = [
+    "dep:axion-bridge",
+    "dep:axion-protocol",
+    "dep:axion-security",
+    "dep:embedder_traits",
+    "dep:euclid",
+    "dep:http",
+    "dep:net_traits",
+    "dep:servo",
+    "dep:tokio",
+    "dep:url",
+    "dep:winit",
+]
+
+[dependencies]
+axion-core.workspace = true
+axion-bridge = { workspace = true, optional = true }
+axion-protocol = { workspace = true, optional = true }
+axion-security = { workspace = true, optional = true }
+embedder_traits = { package = "servo-embedder-traits", path = "../../servo/components/shared/embedder", optional = true }
+euclid = { workspace = true, optional = true }
+http = { version = "1.4", optional = true }
+net_traits = { package = "servo-net-traits", path = "../../servo/components/shared/net", optional = true }
+servo = { path = "../../servo/components/servo", default-features = false, features = ["baked-in-resources"], optional = true }
+thiserror.workspace = true
+tokio = { version = "1", features = ["sync"], optional = true }
+url = { workspace = true, optional = true }
+winit = { workspace = true, optional = true }

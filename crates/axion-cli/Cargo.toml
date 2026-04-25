@@ -1,0 +1,18 @@
+[package]
+name = "axion-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+servo-runtime = ["axion-runtime/servo-runtime"]
+
+[dependencies]
+axion-core.workspace = true
+axion-manifest.workspace = true
+axion-packager.workspace = true
+axion-runtime.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+url.workspace = true

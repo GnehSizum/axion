@@ -1,0 +1,19 @@
+[package]
+name = "axion-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+servo-runtime = ["axion-window-winit/servo-runtime"]
+
+[dependencies]
+axion-bridge.workspace = true
+axion-core.workspace = true
+axion-protocol.workspace = true
+axion-security.workspace = true
+axion-window-winit.workspace = true
+thiserror.workspace = true
+url.workspace = true
+uuid.workspace = true

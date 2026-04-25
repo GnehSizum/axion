@@ -1,0 +1,207 @@
+pub mod build;
+pub mod bundle;
+pub mod dev;
+pub mod doctor;
+pub mod self_test;
+
+use std::path::{Path, PathBuf};
+
+use crate::cli::NewArgs;
+use crate::error::AxionCliError;
+
+pub fn run_new(args: NewArgs) -> Result<(), AxionCliError> {
+    let project = NewProject::new(args)?;
+    project.write()?;
+
+    println!("Axion application created");
+    println!("name: {}", project.name);
+    println!("path: {}", project.root.display());
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct NewProject {
+    name: String,
+    root: PathBuf,
+    axion_root: PathBuf,
+}
+
+impl NewProject {
+    fn new(args: NewArgs) -> Result<Self, AxionCliError> {
+        let name = normalize_project_name(&args.name);
+        let axion_root = axion_root_for_templates()?;
+        let current_dir = std::env::current_dir()?;
+        let root = args.path.unwrap_or_else(|| current_dir.join(&name));
+
+        Ok(Self {
+            name,
+            root,
+            axion_root,
+        })
+    }
+
+    fn write(&self) -> Result<(), AxionCliError> {
+        if self.root.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("project path already exists: {}", self.root.display()),
+            )
+            .into());
+        }
+
+        std::fs::create_dir_all(self.root.join("src"))?;
+        std::fs::create_dir_all(self.root.join("frontend"))?;
+        std::fs::write(self.root.join("Cargo.toml"), self.cargo_toml())?;
+        std::fs::write(self.root.join("axion.toml"), self.manifest())?;
+        std::fs::write(self.root.join("src").join("main.rs"), self.main_rs())?;
+        std::fs::write(
+            self.root.join("frontend").join("index.html"),
+            self.index_html(),
+        )?;
+        std::fs::write(self.root.join("frontend").join("app.js"), self.app_js())?;
+        Ok(())
+    }
+
+    fn cargo_toml(&self) -> String {
+        format!(
+            "[package]\nname = {name:?}\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            name = self.name,
+            core = self
+                .axion_root
+                .join("crates")
+                .join("axion-core")
+                .display()
+                .to_string(),
+            manifest = self
+                .axion_root
+                .join("crates")
+                .join("axion-manifest")
+                .display()
+                .to_string(),
+            runtime = self
+                .axion_root
+                .join("crates")
+                .join("axion-runtime")
+                .display()
+                .to_string(),
+        )
+    }
+
+    fn manifest(&self) -> String {
+        format!(
+            "[app]\nname = {name:?}\nidentifier = \"dev.axion.{identifier}\"\n\n[window]\nid = \"main\"\ntitle = {title:?}\nwidth = 960\nheight = 720\nresizable = true\nvisible = true\n\n[build]\nfrontend_dist = \"frontend\"\nentry = \"frontend/index.html\"\n\n[capabilities.main]\ncommands = [\"app.ping\", \"app.info\", \"app.echo\", \"window.info\"]\nevents = [\"app.log\"]\nprotocols = [\"axion\"]\nallowed_navigation_origins = []\nallow_remote_navigation = false\n",
+            name = self.name,
+            identifier = self.name.replace('-', "."),
+            title = title_case(&self.name),
+        )
+    }
+
+    fn main_rs(&self) -> String {
+        "use std::path::Path;\n\nuse axion_core::{Builder, RunMode};\n\nfn main() -> Result<(), Box<dyn std::error::Error>> {\n    let manifest_path = Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"axion.toml\");\n    let config = axion_manifest::load_app_config_from_path(&manifest_path)?;\n    let app = Builder::new().apply_config(config).build()?;\n\n    if std::env::args().skip(1).any(|arg| arg == \"--plan\") {\n        println!(\"{plan}\", plan = app.runtime_plan(RunMode::Production));\n        return Ok(());\n    }\n\n    #[cfg(not(feature = \"servo-runtime\"))]\n    {\n        Err(std::io::Error::other(\n            \"Servo runtime is disabled; rebuild with `--features servo-runtime` or run with `--plan`\",\n        )\n        .into())\n    }\n\n    #[cfg(feature = \"servo-runtime\")]\n    {\n        axion_runtime::run(app, RunMode::Production)?;\n        Ok(())\n    }\n}\n"
+            .to_owned()
+    }
+
+    fn index_html(&self) -> String {
+        format!(
+            "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n    <title>{title}</title>\n  </head>\n  <body>\n    <main>\n      <h1>{title}</h1>\n      <p id=\"bridge-status\">Waiting for Axion bridge...</p>\n      <pre id=\"bridge-details\">Loading Axion metadata...</pre>\n    </main>\n    <script src=\"app.js\"></script>\n  </body>\n</html>\n",
+            title = title_case(&self.name),
+        )
+    }
+
+    fn app_js(&self) -> String {
+        format!(
+            "window.addEventListener('DOMContentLoaded', async () => {{\n  const status = document.getElementById('bridge-status');\n  const details = document.getElementById('bridge-details');\n  if (!window.__AXION__) {{\n    status.textContent = 'Axion bootstrap was not injected.';\n    details.textContent = 'Bridge unavailable';\n    return;\n  }}\n\n  try {{\n    const [ping, appInfo, appEcho, windowInfo] = await Promise.all([\n      window.__AXION__.invoke('app.ping', {{ from: '{name}' }}),\n      window.__AXION__.invoke('app.info', null),\n      window.__AXION__.invoke('app.echo', {{ from: '{name}', async: true }}),\n      window.__AXION__.invoke('window.info', null),\n    ]);\n    const hostLog = window.__AXION__.events.includes('app.log')\n      ? await window.__AXION__.emit('app.log', {{ message: '{name} frontend is ready', windowId: windowInfo.id }})\n      : false;\n    status.textContent = `Axion bridge ready: ${{ping.message}} from ${{ping.appName}}`;\n    details.textContent = JSON.stringify({{ appInfo, appEcho, windowInfo, hostLog }}, null, 2);\n  }} catch (error) {{\n    status.textContent = `Axion invoke failed: ${{error instanceof Error ? error.message : String(error)}}`;\n    details.textContent = status.textContent;\n  }}\n}});\n",
+            name = self.name,
+        )
+    }
+}
+
+fn axion_root_for_templates() -> Result<PathBuf, AxionCliError> {
+    let cli_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if let Some(axion_root) = cli_manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .filter(|path| path.join("crates").join("axion-core").exists())
+    {
+        return Ok(axion_root.to_path_buf());
+    }
+
+    Ok(std::env::current_dir()?)
+}
+
+fn normalize_project_name(name: &str) -> String {
+    let normalized = name
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned();
+
+    if normalized.is_empty() {
+        "axion-app".to_owned()
+    } else {
+        normalized
+    }
+}
+
+fn title_case(name: &str) -> String {
+    name.split('-')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NewProject, axion_root_for_templates, normalize_project_name, title_case};
+
+    #[test]
+    fn project_name_is_normalized_for_package_use() {
+        assert_eq!(normalize_project_name("Hello Axion!"), "hello-axion");
+        assert_eq!(normalize_project_name("  "), "axion-app");
+    }
+
+    #[test]
+    fn title_case_expands_kebab_name() {
+        assert_eq!(title_case("hello-axion"), "Hello Axion");
+    }
+
+    #[test]
+    fn template_axion_root_points_at_checkout_root() {
+        let root = axion_root_for_templates().expect("template root should resolve");
+        assert!(root.join("crates").join("axion-core").exists());
+    }
+
+    #[test]
+    fn generated_frontend_uses_external_script_for_csp() {
+        let root = axion_root_for_templates().expect("template root should resolve");
+        let project = NewProject {
+            name: "hello-axion".to_owned(),
+            root: std::path::PathBuf::from("unused"),
+            axion_root: root,
+        };
+
+        assert!(
+            project
+                .index_html()
+                .contains("<script src=\"app.js\"></script>")
+        );
+        assert!(!project.index_html().contains("window.addEventListener"));
+        assert!(project.app_js().contains("window.addEventListener"));
+        assert!(project.app_js().contains("window.__AXION__.emit('app.log'"));
+    }
+}
