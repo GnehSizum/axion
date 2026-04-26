@@ -18,7 +18,7 @@ This directory contains public, user-facing documentation for Axion.
 
 ## Current Version
 
-Axion is at **v0.1.7.0 developer preview**. The current preview focuses on the core desktop framework loop:
+Axion is at **v0.1.8.0 developer preview**. The current preview focuses on the core desktop framework loop:
 
 1. load an app manifest
 2. build a runtime plan
@@ -32,6 +32,7 @@ Axion is at **v0.1.7.0 developer preview**. The current preview focuses on the c
 10. inspect bridge snapshots and run frontend diagnostics through `examples/bridge-diagnostics-demo`
 11. export machine-readable diagnostics through GUI examples and `axion self-test --json`
 12. validate release gates through MSRV-aware `axion doctor`, CI example self-tests, and diagnostics artifacts
-13. reuse a shared diagnostics report model and run local GUI smoke checks through `AXION_GUI_SMOKE=1`
+13. reuse a shared diagnostics report model and run GUI smoke checks for examples and generated apps through `axion-cli gui-smoke`
+14. optionally run Servo-backed GUI smoke in GitHub Actions through `workflow_dispatch`
 
 Project-internal milestone plans and release notes are intentionally not part of the public documentation set.

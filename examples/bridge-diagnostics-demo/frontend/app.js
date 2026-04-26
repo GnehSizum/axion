@@ -444,9 +444,12 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   const runSmokeChecklist = async () => {
     const checks = [];
-    const pushCheck = (label, statusValue, detail) => {
-      checks.push({ label, status: statusValue, detail });
+    const pushCheck = (id, label, statusValue, detail) => {
+      checks.push({ id, label, status: statusValue, detail });
     };
+    const expectFailure = new URLSearchParams(window.location.search).has(
+      'axion_smoke_expect_fail',
+    );
 
     const bridgeInfo =
       typeof diagnostics?.describeBridge === 'function'
@@ -454,18 +457,21 @@ window.addEventListener('DOMContentLoaded', async () => {
         : null;
 
     pushCheck(
+      'bridge.bootstrap',
       'Bridge bootstrap available',
       bridge.ready === true ? 'pass' : 'fail',
       bridge.ready === true ? bridge.version : 'window.__AXION__.ready is false',
     );
 
     pushCheck(
+      'bridge.diagnostics',
       'Bridge diagnostics available',
       diagnostics ? 'pass' : 'fail',
       diagnostics ? 'describeBridge/snapshotTextControl/toPrettyJson present' : 'diagnostics missing',
     );
 
     pushCheck(
+      'bridge.compat.text_input',
       'Input compat helper available',
       typeof compat?.installTextInputSelectionPatch === 'function' ? 'pass' : 'fail',
       typeof compat?.installTextInputSelectionPatch === 'function'
@@ -475,6 +481,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     if (bridgeInfo) {
       pushCheck(
+        'security.current_origin',
         'Current origin trusted',
         bridgeInfo.trustedOrigins.includes(bridgeInfo.currentOrigin) ? 'pass' : 'fail',
         bridgeInfo.currentOrigin,
@@ -487,11 +494,13 @@ window.addEventListener('DOMContentLoaded', async () => {
         state.windowList = windowList;
         pushCheck(
           'window.list',
+          'window.list',
           Array.isArray(windowList?.windows) ? 'pass' : 'fail',
           `${windowList?.windows?.length ?? 0} window(s)`,
         );
       } catch (error) {
         pushCheck(
+          'window.list',
           'window.list',
           'fail',
           error instanceof Error ? error.message : String(error),
@@ -501,9 +510,10 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     try {
       const ping = await bridge.invoke('app.ping', { from: 'bridge-diagnostics-smoke' });
-      pushCheck('app.ping', 'pass', ping.message);
+      pushCheck('app.ping', 'app.ping', 'pass', ping.message);
     } catch (error) {
       pushCheck(
+        'app.ping',
         'app.ping',
         'fail',
         error instanceof Error ? error.message : String(error),
@@ -512,9 +522,10 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     try {
       const echo = await bridge.invoke('app.echo', { from: 'bridge-diagnostics-smoke', async: true });
-      pushCheck('app.echo', 'pass', echo?.payload?.from ?? 'echo returned');
+      pushCheck('app.echo', 'app.echo', 'pass', echo?.payload?.from ?? 'echo returned');
     } catch (error) {
       pushCheck(
+        'app.echo',
         'app.echo',
         'fail',
         error instanceof Error ? error.message : String(error),
@@ -529,12 +540,14 @@ window.addEventListener('DOMContentLoaded', async () => {
       });
       const fsRead = await bridge.invoke('fs.read_text', { path: fsPath });
       pushCheck(
+        'fs.roundtrip',
         'fs roundtrip',
         typeof fsRead?.contents === 'string' ? 'pass' : 'fail',
         fsPath,
       );
     } catch (error) {
       pushCheck(
+        'fs.roundtrip',
         'fs roundtrip',
         'fail',
         error instanceof Error ? error.message : String(error),
@@ -559,12 +572,14 @@ window.addEventListener('DOMContentLoaded', async () => {
         dialogSave,
       };
       pushCheck(
+        'dialog.preview',
         'dialog preview',
         'pass',
         `open=${dialogOpen.backend}, save=${dialogSave.backend}`,
       );
     } catch (error) {
       pushCheck(
+        'dialog.preview',
         'dialog preview',
         'fail',
         error instanceof Error ? error.message : String(error),
@@ -577,26 +592,41 @@ window.addEventListener('DOMContentLoaded', async () => {
           message: 'bridge-diagnostics smoke checklist emitted app.log',
           source: 'bridge-diagnostics-demo',
         });
-        pushCheck('app.log emit', 'pass', 'event emitted');
+        pushCheck('event.app_log_emit', 'app.log emit', 'pass', 'event emitted');
       } catch (error) {
         pushCheck(
+          'event.app_log_emit',
           'app.log emit',
           'fail',
           error instanceof Error ? error.message : String(error),
         );
       }
     } else {
-      pushCheck('app.log emit', 'skip', 'event not allowed in this window');
+      pushCheck(
+        'event.app_log_emit',
+        'app.log emit',
+        'skip',
+        'event not allowed in this window',
+      );
     }
 
     const inputSnapshot = snapshotControl(compatInput, {
       source: 'smoke-checklist',
     });
     pushCheck(
+      'input.snapshot',
       'Text control snapshot',
       inputSnapshot && inputSnapshot.targetId === compatInput.id ? 'pass' : 'fail',
       inputSnapshot ? inputSnapshot.targetId : 'snapshotTextControl unavailable',
     );
+    if (expectFailure) {
+      pushCheck(
+        'diagnostics.expected_failure',
+        'Expected failure injection',
+        'fail',
+        'axion_smoke_expect_fail query parameter is set',
+      );
+    }
 
     state.smokeChecks = checks;
     renderSmokeChecklist();

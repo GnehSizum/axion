@@ -87,6 +87,47 @@ cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.t
 Use `--json` to print a machine-readable `axion.diagnostics-report.v1` report. Use `--report-path <path>` to write the same report to disk while keeping the default human-readable output.
 Use `--quiet` with `--report-path` in CI when only the exit code and report artifact are needed.
 
+## `gui-smoke`
+
+Run a Servo-backed local GUI smoke check for an application manifest. The command finds `Cargo.toml` next to `axion.toml`, launches `cargo run --features servo-runtime` with `AXION_GUI_SMOKE=1`, captures the returned diagnostics report, and can write it to disk.
+
+```sh
+cargo run -p axion-cli -- gui-smoke \
+  --manifest-path examples/bridge-diagnostics-demo/axion.toml \
+  --report-path target/axion/reports/bridge-diagnostics-gui-smoke.json \
+  --timeout-ms 30000
+cargo run -p axion-cli -- gui-smoke \
+  --manifest-path examples/hello-axion/axion.toml \
+  --report-path target/axion/reports/hello-gui-smoke.json \
+  --timeout-ms 30000
+```
+
+Useful options:
+
+- `--quiet`: suppress child stdout/stderr after capturing the report.
+- `--cargo-target-dir <path>`: set `CARGO_TARGET_DIR` for the launched app. This is useful for generated apps because they can reuse the Axion checkout `target/` cache.
+- `--serial-build`: set `CARGO_BUILD_JOBS=1` and `MAKEFLAGS=-j1` for lower-resource Servo builds.
+- `--build-env KEY=VALUE`: pass an extra build environment variable to the launched Cargo process. Repeat for multiple variables.
+
+Recommended generated-app validation from the Axion checkout:
+
+```sh
+cargo run -p axion-cli -- gui-smoke \
+  --manifest-path /tmp/demo-app/axion.toml \
+  --report-path target/axion/reports/demo-app-gui-smoke.json \
+  --timeout-ms 30000 \
+  --cargo-target-dir target \
+  --serial-build
+```
+
+GUI smoke requires the app frontend to define `window.__AXION_GUI_SMOKE__()`. The CLI validates both the report schema and `result: "ok"` before returning success. Failure reports include `failure_phase`, `help`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr` under `diagnostics`.
+
+Troubleshooting:
+
+- `failure_phase = "build"` means Cargo or Servo failed before the window smoke hook ran. Check `stderr` for Rust MSRV, Python >=3.11 or `uv`, LLVM/lld, macOS SDK, and native dependency build errors.
+- `failure_phase = "runtime"` means the app started but exited before returning a valid report. Check bridge capabilities, frontend exceptions, and the hook implementation.
+- `failure_phase = "report"` means the process exited successfully but did not print a valid `axion.diagnostics-report.v1` report.
+
 ## `build`
 
 Stage frontend assets into an Axion app directory.

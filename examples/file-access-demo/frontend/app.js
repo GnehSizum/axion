@@ -261,6 +261,166 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  window.__AXION_GUI_SMOKE__ = async () => {
+    const exportedAt = new Date();
+    const checks = [];
+    const pushCheck = (id, label, statusValue, detail) => {
+      checks.push({ id, label, status: statusValue, detail });
+    };
+    const bridgeInfo =
+      typeof diagnostics?.describeBridge === 'function' ? diagnostics.describeBridge() : null;
+
+    pushCheck(
+      'bridge.bootstrap',
+      'Bridge bootstrap available',
+      bridge.ready === true ? 'pass' : 'fail',
+      bridge.ready === true ? bridge.version : 'window.__AXION__.ready is false',
+    );
+    pushCheck(
+      'bridge.diagnostics',
+      'Bridge diagnostics available',
+      diagnostics ? 'pass' : 'fail',
+      diagnostics ? 'describeBridge/snapshotTextControl/toPrettyJson present' : 'diagnostics missing',
+    );
+    pushCheck(
+      'bridge.compat.text_input',
+      'Input compat helper available',
+      typeof installTextInputSelectionPatch === 'function' ? 'pass' : 'fail',
+      typeof installTextInputSelectionPatch === 'function'
+        ? 'installTextInputSelectionPatch'
+        : 'compat helper missing',
+    );
+
+    let ping = null;
+    let appInfo = null;
+    let windowInfo = null;
+    let dialogOpen = null;
+    let dialogSave = null;
+
+    try {
+      ping = await bridge.invoke('app.ping', { from: 'file-access-demo-gui-smoke' });
+      pushCheck('app.ping', 'app.ping', ping?.message === 'pong' ? 'pass' : 'fail', ping?.message ?? 'missing pong');
+    } catch (error) {
+      pushCheck('app.ping', 'app.ping', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      appInfo = await bridge.invoke('app.info', null);
+      pushCheck('app.info', 'app.info', appInfo?.appName === 'file-access-demo' ? 'pass' : 'fail', appInfo?.appName ?? 'missing appName');
+    } catch (error) {
+      pushCheck('app.info', 'app.info', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      windowInfo = await bridge.invoke('window.info', null);
+      pushCheck('window.info', 'window.info', windowInfo?.id === 'main' ? 'pass' : 'fail', windowInfo?.id ?? 'missing window id');
+    } catch (error) {
+      pushCheck('window.info', 'window.info', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      const path = `notes/gui-smoke-${Date.now().toString(36)}.txt`;
+      await bridge.invoke('fs.write_text', {
+        path,
+        contents: `gui-smoke:${new Date().toISOString()}`,
+      });
+      const fsRead = await bridge.invoke('fs.read_text', { path });
+      pushCheck(
+        'fs.roundtrip',
+        'fs roundtrip',
+        typeof fsRead?.contents === 'string' ? 'pass' : 'fail',
+        path,
+      );
+    } catch (error) {
+      pushCheck('fs.roundtrip', 'fs roundtrip', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      dialogOpen = await bridge.invoke('dialog.open', {
+        title: 'File demo GUI smoke open',
+        multiple: true,
+        filters: [{ name: 'Text', extensions: ['txt', 'md'] }],
+      });
+      dialogSave = await bridge.invoke('dialog.save', {
+        title: 'File demo GUI smoke save',
+        defaultPath: 'notes/gui-smoke-save.txt',
+      });
+      pushCheck(
+        'dialog.preview',
+        'dialog preview',
+        dialogOpen?.backend && dialogSave?.backend ? 'pass' : 'fail',
+        `open=${dialogOpen?.backend ?? 'missing'}, save=${dialogSave?.backend ?? 'missing'}`,
+      );
+    } catch (error) {
+      pushCheck('dialog.preview', 'dialog preview', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    const inputSnapshot =
+      typeof diagnostics?.snapshotTextControl === 'function'
+        ? diagnostics.snapshotTextControl(fileContents, { source: 'gui-smoke' })
+        : null;
+    pushCheck(
+      'input.snapshot',
+      'Text control snapshot',
+      inputSnapshot && inputSnapshot.targetId === 'file-contents' ? 'pass' : 'fail',
+      inputSnapshot ? inputSnapshot.targetId : 'snapshotTextControl unavailable',
+    );
+
+    const result = checks.some((check) => check.status === 'fail') ? 'failed' : 'ok';
+    return {
+      schema: diagnostics?.reportSchema ?? bridgeInfo?.diagnosticsReportSchema ?? 'axion.diagnostics-report.v1',
+      source: 'file-access-demo',
+      exported_at: exportedAt.toISOString(),
+      exported_at_unix_seconds: Math.floor(exportedAt.getTime() / 1000),
+      manifest_path: null,
+      app_name: appInfo?.appName ?? bridge.appName,
+      identifier: appInfo?.identifier ?? null,
+      version: appInfo?.version ?? null,
+      description: appInfo?.description ?? null,
+      authors: Array.isArray(appInfo?.authors) ? appInfo.authors : [],
+      homepage: appInfo?.homepage ?? null,
+      mode: appInfo?.mode ?? 'production',
+      window_count: windowInfo ? 1 : 0,
+      windows: windowInfo
+        ? [{
+            id: windowInfo.id,
+            title: windowInfo.title,
+            bridge_enabled: true,
+            configured_commands: [...bridge.commands],
+            configured_events: [...bridge.events],
+            configured_protocols: [bridge.protocol ?? 'axion'],
+            runtime_command_count: bridge.commands.length,
+            runtime_event_count: bridge.events.length,
+            host_events: [...bridge.hostEvents],
+            trusted_origins: [...bridge.trustedOrigins],
+            allowed_navigation_origins: [],
+            allow_remote_navigation: false,
+            width: windowInfo.width,
+            height: windowInfo.height,
+            resizable: windowInfo.resizable,
+            visible: windowInfo.visible,
+            focused: windowInfo.focused,
+          }]
+        : [],
+      frontend_dist: null,
+      entry: bridgeInfo?.locationHref ?? window.location.href,
+      configured_dialog_backend: dialogOpen?.backend ?? dialogSave?.backend ?? null,
+      dialog_backend: dialogOpen?.backend ?? dialogSave?.backend ?? null,
+      icon: null,
+      host_events: [...bridge.hostEvents],
+      staged_app_dir: null,
+      asset_manifest_path: null,
+      artifacts_removed: null,
+      result,
+      diagnostics: {
+        bridge: bridgeInfo,
+        dialog_preview: { dialogOpen, dialogSave },
+        smoke_checks: checks,
+        compat_textarea: inputSnapshot,
+      },
+    };
+  };
+
   registerAction('write-text', async (event) => {
     const result = await invokeAndTrack(
       'fs.write_text',
