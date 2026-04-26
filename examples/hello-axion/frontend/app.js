@@ -100,6 +100,12 @@ window.addEventListener('DOMContentLoaded', async () => {
         ? 'installTextInputSelectionPatch'
         : 'compat helper missing',
     );
+    pushCheck(
+      'window.lifecycle.ready',
+      'window.ready host event exposed',
+      bridge.hostEvents.includes('window.ready') ? 'pass' : 'fail',
+      bridge.hostEvents.includes('window.ready') ? 'window.ready' : 'missing window.ready',
+    );
 
     let ping = null;
     let appInfo = null;
@@ -217,13 +223,9 @@ window.addEventListener('DOMContentLoaded', async () => {
         details.textContent = formatPretty({ lifecycleEvents });
       }
     };
-    [
-      'window.created',
-      'window.resized',
-      'window.close_requested',
-      'window.closed',
-      'window.redraw_failed',
-    ].forEach((name) => window.__AXION__.listen(name, recordLifecycleEvent(name)));
+    bridge.hostEvents
+      .filter((name) => name === 'app.ready' || name.startsWith('window.'))
+      .forEach((name) => bridge.listen(name, recordLifecycleEvent(name)));
 
     const pluginReady = new Promise((resolve) => {
       bridge.listen('demo.ready', resolve);

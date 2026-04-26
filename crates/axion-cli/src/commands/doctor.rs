@@ -362,7 +362,7 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.1.9.0"));
+        assert!(line.contains("release=v0.1.10.0"));
         assert!(line.contains("msrv="));
     }
 
@@ -556,10 +556,10 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("events=1, frontend_events=app.log, host_events=app.ready,window.created,window.close_requested,window.closed,window.resized,window.focused,window.blurred,window.moved,window.redraw_failed"))
+                .any(|line| line.contains("events=1, frontend_events=app.log, host_events=app.ready,window.created,window.ready,window.close_requested,window.closed,window.resized,window.focused,window.blurred,window.moved,window.redraw_failed"))
         );
         assert!(lines.iter().any(|line| line.contains(
-            "lifecycle_events=window.created,window.close_requested,window.closed,window.resized,window.focused,window.blurred,window.moved,window.redraw_failed"
+            "lifecycle_events=window.created,window.ready,window.close_requested,window.closed,window.resized,window.focused,window.blurred,window.moved,window.redraw_failed"
         )));
     }
 

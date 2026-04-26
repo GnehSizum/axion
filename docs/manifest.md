@@ -32,7 +32,7 @@ url = "http://127.0.0.1:3000"
 backend = "headless"
 
 [capabilities.main]
-commands = ["app.ping", "app.info", "app.version", "app.echo", "window.info", "window.set_title", "window.set_size"]
+commands = ["app.ping", "app.info", "app.version", "app.echo", "window.info", "window.reload", "window.set_title", "window.set_size"]
 events = ["app.log"]
 protocols = ["axion"]
 allowed_navigation_origins = []
@@ -145,7 +145,7 @@ Capabilities are scoped by window id:
 
 ```toml
 [capabilities.main]
-commands = ["app.ping", "app.version", "window.list", "window.info", "window.focus", "window.set_title", "window.set_size", "fs.read_text", "fs.write_text", "dialog.open", "dialog.save"]
+commands = ["app.ping", "app.version", "window.list", "window.info", "window.reload", "window.focus", "window.set_title", "window.set_size", "fs.read_text", "fs.write_text", "dialog.open", "dialog.save"]
 events = ["app.log"]
 protocols = ["axion"]
 allowed_navigation_origins = ["https://docs.example"]

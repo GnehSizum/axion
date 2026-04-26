@@ -82,7 +82,9 @@ cargo run -p axion-cli --features servo-runtime -- dev \
   --fallback-packaged
 ```
 
-The preview flags `--watch` and `--reload` are available for frontend development diagnostics. `--watch` polls `[build].frontend_dist` and reports created, modified, and deleted files. `--reload` reports `reload_requested` when watched files change; Servo window hot reload is still not wired, so restart the window when you need the page to refresh. `--open-devtools` is accepted for diagnostics, but the current Servo backend does not open devtools yet.
+The preview flags `--watch` and `--reload` are available for frontend development. `--watch` polls `[build].frontend_dist`, ignores common temporary files and cache directories, debounces editor save bursts, and reports created, modified, and deleted files. `--reload` reports `reload_requested`; with `--launch`, Axion asks each live window to reload and prints `reload_applied`, `reload_deferred`, or `restart_required`. Without `--launch`, reload remains diagnostic-only because there is no live window target. `--open-devtools` is accepted for diagnostics, but the current Servo backend does not open devtools yet.
+
+To test live reload, launch with `--features servo-runtime --launch --fallback-packaged --watch --reload`, then edit a file in the app's `frontend/` directory. `hello-axion` should report `reload_applied: window=main`; `multi-window` reports one reload result for each live window.
 
 To let Axion start a simple local frontend server, run:
 

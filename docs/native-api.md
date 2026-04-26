@@ -97,7 +97,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.9", release: "v0.1.9.0", framework: "axion" }
+// { version: "0.1.10", release: "v0.1.10.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -180,11 +180,21 @@ await window.__AXION__.invoke("window.set_size", {
 });
 ```
 
+### `window.reload`
+
+Requests a reload of the target WebView and returns the current window state. This is the same control path used by `axion dev --watch --reload` when a live window is running.
+
+```js
+await window.__AXION__.invoke("window.reload", null);
+await window.__AXION__.invoke("window.reload", { target: "settings" });
+```
+
 ### Host Lifecycle Events
 
 Axion host events are listen-only and come from the native runtime. Window lifecycle events currently include:
 
 - `window.created`
+- `window.ready`
 - `window.close_requested`
 - `window.closed`
 - `window.resized`
@@ -290,6 +300,7 @@ commands = [
   "app.echo",
   "window.list",
   "window.info",
+  "window.reload",
   "window.focus",
   "window.set_title",
   "fs.write_text",
