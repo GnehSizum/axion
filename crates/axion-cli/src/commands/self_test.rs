@@ -305,10 +305,10 @@ impl SelfTestWindowReport {
 }
 
 fn write_report_json(path: &Path, report: &SelfTestReport) -> Result<(), AxionCliError> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
     }
 
     std::fs::write(path, report.to_diagnostics_json())?;

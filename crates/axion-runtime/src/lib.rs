@@ -1041,6 +1041,7 @@ impl DialogResponse {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn selected(path: impl Into<std::path::PathBuf>, backend: DialogBackendKind) -> Self {
         let path = path.into();
         Self {
@@ -1051,6 +1052,7 @@ impl DialogResponse {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn selected_multiple(paths: Vec<std::path::PathBuf>, backend: DialogBackendKind) -> Self {
         let path = paths.first().cloned();
         Self {
