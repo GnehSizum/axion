@@ -64,11 +64,13 @@ cargo run -p axion-cli --features servo-runtime -- dev \
 
 ## `doctor`
 
-Validate local tooling, manifest configuration, app metadata, native dialog backend configuration, effective runtime dialog backend, frontend assets, runtime diagnostics, and Servo path availability.
+Validate Axion version metadata, local tooling, manifest configuration, app metadata, native dialog backend configuration, effective runtime dialog backend, frontend assets, runtime diagnostics, and Servo path availability.
 
 ```sh
 cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml
 ```
+
+`doctor` prints `axion: cli_version=..., release=..., msrv=...` and `rustc.msrv: ok|failed` so CI and local environments can quickly confirm the active compiler satisfies the workspace `rust-version`.
 
 ## `self-test`
 
@@ -79,9 +81,11 @@ cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.t
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml --keep-artifacts
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml --json
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-self-test.json
+cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-self-test.json --quiet
 ```
 
 Use `--json` to print a machine-readable `axion.diagnostics-report.v1` report. Use `--report-path <path>` to write the same report to disk while keeping the default human-readable output.
+Use `--quiet` with `--report-path` in CI when only the exit code and report artifact are needed.
 
 ## `build`
 

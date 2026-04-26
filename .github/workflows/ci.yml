@@ -20,7 +20,28 @@ jobs:
         run: cargo fmt --all --check
       - name: Run workspace tests
         run: cargo test --workspace
+      - name: Check doctor version metadata
+        run: |
+          cargo run -p axion-cli -- doctor --manifest-path examples/bridge-diagnostics-demo/axion.toml > target/axion-doctor.txt
+          grep -q 'axion: cli_version=' target/axion-doctor.txt
+          grep -q 'rustc.msrv: ok' target/axion-doctor.txt
       - name: Validate hello example
         run: cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
       - name: Validate multi-window example
         run: cargo run -p axion-cli -- self-test --manifest-path examples/multi-window/axion.toml
+      - name: Validate file access example
+        run: cargo run -p axion-cli -- self-test --manifest-path examples/file-access-demo/axion.toml
+      - name: Validate diagnostics report example
+        run: cargo run -p axion-cli -- self-test --manifest-path examples/bridge-diagnostics-demo/axion.toml --report-path target/axion/reports/bridge-diagnostics-self-test.json --quiet
+      - name: Check diagnostics report artifact
+        run: test -s target/axion/reports/bridge-diagnostics-self-test.json
+      - name: Check diagnostics report schema
+        run: grep -q '"schema":"axion.diagnostics-report.v1"' target/axion/reports/bridge-diagnostics-self-test.json
+      - name: Upload diagnostics artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: axion-diagnostics
+          path: |
+            target/axion-doctor.txt
+            target/axion/reports/*.json
+          if-no-files-found: error

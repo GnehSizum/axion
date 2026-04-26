@@ -8,6 +8,7 @@ This directory contains public, user-facing documentation for Axion.
 - `cli.md`: command reference for `axion-cli`.
 - `manifest.md`: `axion.toml` configuration guide.
 - `native-api.md`: built-in bridge command reference.
+- `diagnostics-report.md`: machine-readable diagnostics report schema.
 - `custom-commands.md`: Rust command registration and frontend invocation.
 - `versioning.md`: public release and Cargo version mapping.
 - `architecture.md`: high-level runtime architecture.
@@ -17,7 +18,7 @@ This directory contains public, user-facing documentation for Axion.
 
 ## Current Version
 
-Axion is at **v0.1.5.0 developer preview**. The current preview focuses on the core desktop framework loop:
+Axion is at **v0.1.6.0 developer preview**. The current preview focuses on the core desktop framework loop:
 
 1. load an app manifest
 2. build a runtime plan
@@ -30,5 +31,6 @@ Axion is at **v0.1.5.0 developer preview**. The current preview focuses on the c
 9. reuse bridge-provided text-input compatibility helpers in examples and generated apps
 10. inspect bridge snapshots and run frontend diagnostics through `examples/bridge-diagnostics-demo`
 11. export machine-readable diagnostics through GUI examples and `axion self-test --json`
+12. validate release gates through MSRV-aware `axion doctor`, CI example self-tests, and diagnostics artifacts
 
 Project-internal milestone plans and release notes are intentionally not part of the public documentation set.
