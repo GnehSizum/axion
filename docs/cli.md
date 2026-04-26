@@ -23,7 +23,7 @@ Options:
 
 ## `dev`
 
-Print development diagnostics from an `axion.toml` manifest: launch mode, dev server reachability, packaged fallback status, per-window entry URLs, and the runtime plan.
+Print development diagnostics from an `axion.toml` manifest: launch mode, dev server reachability, packaged fallback status, per-window entry URLs, next steps, frontend watch/reload diagnostics, and the runtime plan.
 
 ```sh
 cargo run -p axion-cli -- dev --manifest-path examples/hello-axion/axion.toml
@@ -34,11 +34,13 @@ Typical output when the configured dev server is not running:
 ```text
 Axion development diagnostics
 manifest: examples/hello-axion/axion.toml
-launch_mode: blocked (dev server is not reachable at http://127.0.0.1:3000/; start the frontend dev server or pass --fallback-packaged)
+launch_mode: blocked (dev server is not reachable at http://127.0.0.1:3000/; start the frontend dev server, check [dev].url, or pass --fallback-packaged to launch packaged assets)
 dev_server: unreachable (http://127.0.0.1:3000/)
 packaged_fallback: disabled; available with --fallback-packaged (axion://app/index.html)
 window_entries:
 - main: unavailable (launch blocked)
+next_steps: start the frontend dev server at http://127.0.0.1:3000/, check [dev].url, or pass --fallback-packaged.
+frontend_command: not configured
 runtime_plan:
 ...
 ```
@@ -53,6 +55,18 @@ cargo run -p axion-cli --features servo-runtime -- dev \
   --launch
 ```
 
+To let Axion start an external frontend command and wait for `[dev].url` to become reachable:
+
+```sh
+cargo run -p axion-cli -- dev \
+  --manifest-path examples/hello-axion/axion.toml \
+  --frontend-command "python3 -m http.server 3000 --bind 127.0.0.1 --directory frontend" \
+  --frontend-cwd examples/hello-axion \
+  --dev-server-timeout-ms 5000
+```
+
+When combined with `--launch`, the frontend process stays alive while the Axion window runs and is terminated when the CLI exits. CLI options override `[dev] command`, `cwd`, and `timeout_ms` values from the manifest.
+
 If the dev server is not configured or unreachable, `--launch` fails with a diagnostic. Pass `--fallback-packaged` only when you intentionally want to launch packaged assets instead; the CLI validates that the packaged entry is available before selecting production mode:
 
 ```sh
@@ -60,6 +74,23 @@ cargo run -p axion-cli --features servo-runtime -- dev \
   --manifest-path examples/hello-axion/axion.toml \
   --launch \
   --fallback-packaged
+```
+
+`--launch` prints a `launch_summary` before opening windows. The summary includes the selected mode, packaged fallback status, window ids, and final entry URLs.
+
+Watch and reload preview:
+
+- `--watch`: polls `[build].frontend_dist` for created, modified, and deleted files. With `--launch`, polling runs while the app window is open. Without `--launch`, the command prints the runtime plan and keeps watching until interrupted.
+- `--reload`: when combined with `--watch`, prints `reload_requested` when watched files change. The current Servo backend does not hot-reload windows yet, so this is a report-only preview.
+- `--open-devtools`: accepted as an explicit reserved option and reports that the current Servo backend does not open devtools.
+
+Example:
+
+```sh
+cargo run -p axion-cli -- dev \
+  --manifest-path examples/hello-axion/axion.toml \
+  --watch \
+  --reload
 ```
 
 ## `doctor`

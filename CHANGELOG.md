@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.1.9.0 - Preview
+
+Axion v0.1.9.0 completes the development-server diagnostics milestone on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.9`.
+- Axion public release metadata is `v0.1.9.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added explicit `axion dev` preview flags: `--watch`, `--reload`, and `--open-devtools`. `--watch` now polls frontend assets, `--reload` reports reload requests when watched files change, and `--open-devtools` reports current unsupported status.
+- Added `axion dev` next-step diagnostics for unconfigured, invalid, unreachable, reachable, and packaged-fallback launch states.
+- Added `axion dev --launch` launch summaries showing selected mode, packaged fallback status, window ids, and final entry URLs.
+- Added frontend process management through `--frontend-command`, `--frontend-cwd`, and `--dev-server-timeout-ms`, with dev server wait diagnostics and early-exit stderr summaries.
+- Added optional `[dev] command`, `cwd`, and `timeout_ms` manifest fields; CLI options take precedence.
+- Added generated-template documentation for frontend development and commented `[dev]` manifest configuration.
+- Added no-dependency frontend asset polling for `axion dev --watch`, including created, modified, and deleted file diagnostics.
+
+### Changed
+
+- `axion dev` launch errors now point to starting the frontend server, checking `[dev].url`, using `--frontend-command`, or using `--fallback-packaged`.
+- Manifest and getting-started docs now describe dev-server URL requirements, managed frontend commands, multi-window behavior, packaged fallback, watch/reload diagnostics, and reserved devtools behavior.
+
+### Deferred
+
+- Backend hot reload that refreshes Servo windows automatically.
+- Servo devtools integration.
+- Installer generation, signing, notarization, auto-updates, and platform store packaging.
+
 ## v0.1.8.0 - Preview
 
 Axion v0.1.8.0 completes the GUI smoke command and optional CI artifact milestone on the current Servo `0.1` baseline.

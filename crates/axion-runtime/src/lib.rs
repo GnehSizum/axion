@@ -13,7 +13,7 @@ pub use axion_bridge::{
     WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-pub const AXION_RELEASE_VERSION: &str = "v0.1.8.0";
+pub const AXION_RELEASE_VERSION: &str = "v0.1.9.0";
 pub const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 pub trait RuntimePlugin: Send + Sync {
@@ -1559,6 +1559,9 @@ mod tests {
         if let Some(value) = dev {
             builder = builder.with_dev_server(DevServerConfig {
                 url: Url::parse(value).expect("test URL must parse"),
+                command: None,
+                cwd: None,
+                timeout_ms: None,
             });
         }
 
@@ -1800,6 +1803,9 @@ mod tests {
         if let Some(value) = dev {
             builder = builder.with_dev_server(DevServerConfig {
                 url: Url::parse(value).expect("test URL must parse"),
+                command: None,
+                cwd: None,
+                timeout_ms: None,
             });
         }
 
@@ -2093,7 +2099,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.8.0\""));
+        assert!(version.contains("\"release\":\"v0.1.9.0\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,

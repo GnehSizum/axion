@@ -292,6 +292,9 @@ mod tests {
             windows: vec![WindowConfig::main("Axion Test")],
             dev: dev_url.map(|url| DevServerConfig {
                 url: Url::parse(url).expect("test URL must parse"),
+                command: None,
+                cwd: None,
+                timeout_ms: None,
             }),
             build: BuildConfig::new("frontend", "frontend/index.html"),
             bundle: Default::default(),

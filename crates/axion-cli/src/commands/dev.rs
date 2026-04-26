@@ -1,14 +1,39 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStderr, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime};
 
 use axion_core::{App, AppConfig, Builder, RunMode};
 
 use crate::cli::DevArgs;
 use crate::error::AxionCliError;
 
+const DEFAULT_DEV_SERVER_TIMEOUT_MS: u64 = 15_000;
+const DEV_SERVER_POLL_INTERVAL_MS: u64 = 100;
+const WATCH_POLL_INTERVAL_MS: u64 = 500;
+
 pub fn run(args: DevArgs) -> Result<(), AxionCliError> {
     let config = axion_manifest::load_app_config_from_path(&args.manifest_path)?;
     let app = Builder::new().apply_config(config).build()?;
+    let frontend_command = frontend_command_plan(&args, app.config(), &args.manifest_path)?;
+    let mut frontend_process = None;
+    let mut frontend_command_lines = Vec::new();
+    let mut frontend_wait_result = None;
+
+    if let Some(plan) = frontend_command {
+        let mut process = FrontendProcess::spawn(&plan)?;
+        let wait_result = wait_for_dev_server(app.config(), &mut process, plan.timeout_ms);
+        frontend_command_lines.extend(process.diagnostic_lines(&wait_result));
+        frontend_process = Some(process);
+        frontend_wait_result = Some(wait_result);
+    }
+
     let dev_server_status = dev_server_status(app.config());
     let packaged_fallback_status = packaged_fallback_status(&app);
     let launch_mode = select_launch_mode_with_packaged_fallback(
@@ -27,20 +52,40 @@ pub fn run(args: DevArgs) -> Result<(), AxionCliError> {
     ) {
         println!("{line}");
     }
+    if frontend_command_lines.is_empty() {
+        println!("frontend_command: not configured");
+    } else {
+        for line in frontend_command_lines {
+            println!("{line}");
+        }
+    }
+    for line in dev_option_lines(&args) {
+        println!("{line}");
+    }
+
+    if let Some(wait_result) = &frontend_wait_result {
+        if !args.fallback_packaged && !matches!(wait_result, DevServerWaitResult::Reachable) {
+            let _ = std::io::stdout().flush();
+            return Err(frontend_wait_error(wait_result).into());
+        }
+    }
 
     if args.launch {
         let launch_mode = launch_mode?;
-        match (&dev_server_status, launch_mode) {
-            (DevServerStatus::Reachable { url }, RunMode::Development) => {
-                println!("Axion dev launch: using reachable dev server at {url}");
-            }
-            (_, RunMode::Production) => {
-                println!("Axion dev launch fallback: launching packaged app.");
-            }
-            _ => {}
+        println!("launch_summary:");
+        for line in launch_summary_lines(
+            &app,
+            &dev_server_status,
+            &packaged_fallback_status,
+            launch_mode,
+        ) {
+            println!("{line}");
         }
 
+        let watch_guard = DevWatchGuard::spawn(&args, app.config())?;
         axion_runtime::run(app, launch_mode)?;
+        drop(watch_guard);
+        drop(frontend_process);
         return Ok(());
     }
 
@@ -53,6 +98,9 @@ pub fn run(args: DevArgs) -> Result<(), AxionCliError> {
     println!("runtime_plan:");
     println!("{plan}");
 
+    run_foreground_watch_if_requested(&args, app.config())?;
+
+    drop(frontend_process);
     Ok(())
 }
 
@@ -77,16 +125,16 @@ impl DevServerStatus {
     fn launch_error(&self) -> std::io::Error {
         let message = match self {
             Self::Unconfigured => {
-                "dev server is not configured; add [dev] url = \"http://127.0.0.1:3000\" or pass --fallback-packaged".to_owned()
+                "dev server is not configured; add [dev] url = \"http://127.0.0.1:3000\", start your frontend server, or pass --fallback-packaged to launch packaged assets".to_owned()
             }
             Self::InvalidEndpoint { url } => {
                 format!(
-                    "dev server URL does not include a usable host and port: {url}; fix [dev].url or pass --fallback-packaged"
+                    "dev server URL does not include a usable host and port: {url}; fix [dev].url, or pass --fallback-packaged to launch packaged assets"
                 )
             }
             Self::Unreachable { url } => {
                 format!(
-                    "dev server is not reachable at {url}; start the frontend dev server or pass --fallback-packaged"
+                    "dev server is not reachable at {url}; start the frontend dev server, check [dev].url, or pass --fallback-packaged to launch packaged assets"
                 )
             }
             Self::Reachable { .. } => "dev server is reachable".to_owned(),
@@ -138,6 +186,14 @@ impl PackagedFallbackStatus {
         match self {
             Self::Available { url } => Some(url),
             Self::Unavailable { .. } => None,
+        }
+    }
+
+    fn selected_summary(&self, selected: bool) -> String {
+        match self {
+            Self::Available { url } if selected => format!("selected ({url})"),
+            Self::Available { url } => format!("available ({url})"),
+            Self::Unavailable { reason } => format!("unavailable ({reason})"),
         }
     }
 }
@@ -233,6 +289,480 @@ pub(crate) fn dev_server_is_reachable(config: &AppConfig) -> bool {
     matches!(dev_server_status(config), DevServerStatus::Reachable { .. })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FrontendCommandPlan {
+    command: String,
+    cwd: PathBuf,
+    timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DevServerWaitResult {
+    Reachable,
+    Timeout,
+    ExitedEarly {
+        status: Option<i32>,
+        stderr_summary: String,
+    },
+}
+
+struct FrontendProcess {
+    child: Child,
+    stderr: StderrCollector,
+    command: String,
+    cwd: PathBuf,
+}
+
+#[derive(Debug, Default)]
+struct StderrCollector {
+    last_line: Arc<Mutex<String>>,
+}
+
+impl StderrCollector {
+    fn spawn(stderr: Option<ChildStderr>) -> Self {
+        let collector = Self::default();
+        let Some(stderr) = stderr else {
+            return collector;
+        };
+
+        let last_line = Arc::clone(&collector.last_line);
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(mut summary) = last_line.lock() {
+                    *summary = line.chars().take(240).collect();
+                }
+            }
+        });
+
+        collector
+    }
+
+    fn summary(&self) -> String {
+        self.last_line
+            .lock()
+            .map(|summary| summary.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl FrontendProcess {
+    fn spawn(plan: &FrontendCommandPlan) -> Result<Self, AxionCliError> {
+        let mut command = shell_command(&plan.command);
+        command
+            .current_dir(&plan.cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|source| {
+            std::io::Error::new(
+                source.kind(),
+                format!(
+                    "failed to start frontend command {:?} in {}: {source}",
+                    plan.command,
+                    plan.cwd.display()
+                ),
+            )
+        })?;
+        let stderr = StderrCollector::spawn(child.stderr.take());
+
+        Ok(Self {
+            child,
+            stderr,
+            command: plan.command.clone(),
+            cwd: plan.cwd.clone(),
+        })
+    }
+
+    fn diagnostic_lines(&self, wait_result: &DevServerWaitResult) -> Vec<String> {
+        frontend_diagnostic_lines(&self.command, &self.cwd, wait_result)
+    }
+}
+
+impl Drop for FrontendProcess {
+    fn drop(&mut self) {
+        if let Ok(Some(_status)) = self.child.try_wait() {
+            return;
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn frontend_command_plan(
+    args: &DevArgs,
+    config: &AppConfig,
+    manifest_path: &Path,
+) -> Result<Option<FrontendCommandPlan>, AxionCliError> {
+    let Some(command) = args
+        .frontend_command
+        .clone()
+        .or_else(|| config.dev.as_ref().and_then(|dev| dev.command.clone()))
+    else {
+        return Ok(None);
+    };
+
+    if config.dev.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--frontend-command requires [dev] url in axion.toml",
+        )
+        .into());
+    }
+
+    let command = command.trim().to_owned();
+    if command.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "frontend command must not be empty",
+        )
+        .into());
+    }
+
+    let cwd = args
+        .frontend_cwd
+        .clone()
+        .or_else(|| config.dev.as_ref().and_then(|dev| dev.cwd.clone()))
+        .unwrap_or_else(|| {
+            manifest_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf()
+        });
+    let timeout_ms = args
+        .dev_server_timeout_ms
+        .or_else(|| config.dev.as_ref().and_then(|dev| dev.timeout_ms))
+        .unwrap_or(DEFAULT_DEV_SERVER_TIMEOUT_MS);
+
+    Ok(Some(FrontendCommandPlan {
+        command,
+        cwd,
+        timeout_ms,
+    }))
+}
+
+fn frontend_diagnostic_lines(
+    command: &str,
+    cwd: &Path,
+    wait_result: &DevServerWaitResult,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!("frontend_command: started ({command})"),
+        format!("frontend_cwd: {}", cwd.display()),
+    ];
+
+    match wait_result {
+        DevServerWaitResult::Reachable => {
+            lines.push("dev_server_wait: reachable".to_owned());
+        }
+        DevServerWaitResult::Timeout => {
+            lines.push("dev_server_wait: timeout".to_owned());
+        }
+        DevServerWaitResult::ExitedEarly {
+            status,
+            stderr_summary,
+        } => {
+            lines.push(format!(
+                "dev_server_wait: exited early (status={})",
+                status
+                    .map(|status| status.to_string())
+                    .unwrap_or_else(|| "unknown".to_owned())
+            ));
+            if !stderr_summary.is_empty() {
+                lines.push(format!("frontend_stderr: {stderr_summary}"));
+            }
+        }
+    }
+
+    lines
+}
+
+fn frontend_wait_error(wait_result: &DevServerWaitResult) -> std::io::Error {
+    let message = match wait_result {
+        DevServerWaitResult::Reachable => "frontend dev server is reachable".to_owned(),
+        DevServerWaitResult::Timeout => {
+            "frontend command started but dev server did not become reachable before timeout"
+                .to_owned()
+        }
+        DevServerWaitResult::ExitedEarly {
+            status,
+            stderr_summary,
+        } => {
+            let status = status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| "unknown".to_owned());
+            if stderr_summary.is_empty() {
+                format!(
+                    "frontend command exited before dev server became reachable (status={status})"
+                )
+            } else {
+                format!(
+                    "frontend command exited before dev server became reachable (status={status}): {stderr_summary}"
+                )
+            }
+        }
+    };
+
+    std::io::Error::other(message)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WatchedFile {
+    modified_millis: u128,
+    len: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WatchSnapshot {
+    files: BTreeMap<PathBuf, WatchedFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WatchChangeKind {
+    Created,
+    Modified,
+    Deleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WatchChange {
+    path: PathBuf,
+    kind: WatchChangeKind,
+}
+
+struct DevWatchGuard {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl DevWatchGuard {
+    fn spawn(args: &DevArgs, config: &AppConfig) -> Result<Option<Self>, AxionCliError> {
+        if !args.watch {
+            return Ok(None);
+        }
+
+        let root = config.build.frontend_dist.clone();
+        let mut snapshot = scan_watch_root(&root)?;
+        let reload = args.reload;
+        println!(
+            "watch: watching {} (poll={}ms, files={})",
+            root.display(),
+            WATCH_POLL_INTERVAL_MS,
+            snapshot.files.len()
+        );
+        println!("{}", reload_mode_line(reload));
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS));
+                if thread_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                match scan_watch_root(&root) {
+                    Ok(next_snapshot) => {
+                        let changes = watch_changes(&snapshot, &next_snapshot);
+                        if !changes.is_empty() {
+                            for line in watch_change_lines(&changes, reload) {
+                                println!("{line}");
+                            }
+                        }
+                        snapshot = next_snapshot;
+                    }
+                    Err(error) => {
+                        println!("watch_error: {error}");
+                    }
+                }
+            }
+        });
+
+        Ok(Some(Self {
+            stop,
+            handle: Some(handle),
+        }))
+    }
+}
+
+impl Drop for DevWatchGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn run_foreground_watch_if_requested(
+    args: &DevArgs,
+    config: &AppConfig,
+) -> Result<(), AxionCliError> {
+    let Some(_watch_guard) = DevWatchGuard::spawn(args, config)? else {
+        return Ok(());
+    };
+
+    println!("watch: press Ctrl+C to stop.");
+    loop {
+        thread::sleep(Duration::from_secs(60));
+    }
+}
+
+fn scan_watch_root(root: &Path) -> std::io::Result<WatchSnapshot> {
+    let mut files = BTreeMap::new();
+    scan_watch_dir(root, root, &mut files)?;
+    Ok(WatchSnapshot { files })
+}
+
+fn scan_watch_dir(
+    root: &Path,
+    dir: &Path,
+    files: &mut BTreeMap<PathBuf, WatchedFile>,
+) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+
+        if metadata.is_dir() {
+            scan_watch_dir(root, &path, files)?;
+        } else if metadata.is_file() {
+            let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+            files.insert(
+                relative,
+                WatchedFile {
+                    modified_millis: modified_millis(metadata.modified().ok()),
+                    len: metadata.len(),
+                },
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn modified_millis(modified: Option<SystemTime>) -> u128 {
+    modified
+        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
+fn watch_changes(previous: &WatchSnapshot, next: &WatchSnapshot) -> Vec<WatchChange> {
+    let mut changes = Vec::new();
+
+    for (path, next_file) in &next.files {
+        match previous.files.get(path) {
+            Some(previous_file) if previous_file == next_file => {}
+            Some(_) => changes.push(WatchChange {
+                path: path.clone(),
+                kind: WatchChangeKind::Modified,
+            }),
+            None => changes.push(WatchChange {
+                path: path.clone(),
+                kind: WatchChangeKind::Created,
+            }),
+        }
+    }
+
+    for path in previous.files.keys() {
+        if !next.files.contains_key(path) {
+            changes.push(WatchChange {
+                path: path.clone(),
+                kind: WatchChangeKind::Deleted,
+            });
+        }
+    }
+
+    changes
+}
+
+fn watch_change_lines(changes: &[WatchChange], reload: bool) -> Vec<String> {
+    let mut lines = Vec::new();
+    for change in changes {
+        lines.push(format!(
+            "watch_change: {} {}",
+            watch_change_kind_label(&change.kind),
+            change.path.display()
+        ));
+    }
+    if reload {
+        lines.push(
+            "reload_requested: frontend assets changed; current Servo backend reports the request but does not hot-reload yet.".to_owned(),
+        );
+    }
+    lines
+}
+
+fn watch_change_kind_label(kind: &WatchChangeKind) -> &'static str {
+    match kind {
+        WatchChangeKind::Created => "created",
+        WatchChangeKind::Modified => "modified",
+        WatchChangeKind::Deleted => "deleted",
+    }
+}
+
+fn reload_mode_line(reload: bool) -> String {
+    if reload {
+        "reload: enabled for watch diagnostics; hot reload is reported as reload_requested until the Servo backend exposes a safe reload hook.".to_owned()
+    } else {
+        "reload: disabled; use --reload to request reload diagnostics when watched files change."
+            .to_owned()
+    }
+}
+
+fn wait_for_dev_server(
+    config: &AppConfig,
+    process: &mut FrontendProcess,
+    timeout_ms: u64,
+) -> DevServerWaitResult {
+    let timeout = Duration::from_millis(timeout_ms);
+    let started = Instant::now();
+
+    while started.elapsed() <= timeout {
+        if dev_server_is_reachable(config) {
+            return DevServerWaitResult::Reachable;
+        }
+
+        match process.child.try_wait() {
+            Ok(Some(status)) => {
+                return DevServerWaitResult::ExitedEarly {
+                    status: status.code(),
+                    stderr_summary: process.stderr.summary(),
+                };
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return DevServerWaitResult::ExitedEarly {
+                    status: None,
+                    stderr_summary: error.to_string(),
+                };
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(DEV_SERVER_POLL_INTERVAL_MS));
+    }
+
+    DevServerWaitResult::Timeout
+}
+
+#[cfg(unix)]
+fn shell_command(command: &str) -> Command {
+    let mut shell = Command::new("sh");
+    shell.arg("-c").arg(format!("exec {command}"));
+    shell
+}
+
+#[cfg(windows)]
+fn shell_command(command: &str) -> Command {
+    let mut shell = Command::new("cmd");
+    shell.arg("/C").arg(command);
+    shell
+}
+
 fn dev_diagnostic_lines(
     app: &App,
     manifest_path: &std::path::Path,
@@ -270,6 +800,11 @@ fn dev_diagnostic_lines(
         packaged_fallback_status,
         launch_mode.ok(),
     ));
+    lines.extend(next_step_lines(
+        dev_server_status,
+        packaged_fallback_status,
+        fallback_packaged,
+    ));
     lines
 }
 
@@ -300,6 +835,83 @@ fn window_entry_lines(
         .collect()
 }
 
+fn next_step_lines(
+    dev_server_status: &DevServerStatus,
+    packaged_fallback_status: &PackagedFallbackStatus,
+    fallback_packaged: bool,
+) -> Vec<String> {
+    match (dev_server_status, fallback_packaged, packaged_fallback_status) {
+        (DevServerStatus::Reachable { .. }, _, _) => {
+            vec!["next_steps: run with --launch to open the reachable dev server.".to_owned()]
+        }
+        (_, true, PackagedFallbackStatus::Available { .. }) => vec![
+            "next_steps: packaged fallback is selected; start the dev server and remove --fallback-packaged to use live frontend assets.".to_owned(),
+        ],
+        (_, true, PackagedFallbackStatus::Unavailable { reason }) => vec![format!(
+            "next_steps: packaged fallback was requested but is unavailable ({reason}); fix [build].frontend_dist and [build].entry."
+        )],
+        (DevServerStatus::Unconfigured, false, _) => vec![
+            "next_steps: add [dev] url = \"http://127.0.0.1:3000\" or pass --fallback-packaged.".to_owned(),
+        ],
+        (DevServerStatus::InvalidEndpoint { .. }, false, _) => {
+            vec!["next_steps: fix [dev].url so it includes a host and port, or pass --fallback-packaged.".to_owned()]
+        }
+        (DevServerStatus::Unreachable { url }, false, _) => vec![format!(
+            "next_steps: start the frontend dev server at {url}, check [dev].url, or pass --fallback-packaged."
+        )],
+    }
+}
+
+fn dev_option_lines(args: &DevArgs) -> Vec<String> {
+    let mut lines = Vec::new();
+    if args.watch {
+        lines.push("watch: enabled for frontend asset polling.".to_owned());
+    }
+    if args.reload {
+        if args.watch {
+            lines.push(
+                "reload: enabled for watch diagnostics; backend hot reload is still reported-only."
+                    .to_owned(),
+            );
+        } else {
+            lines.push(
+                "reload: requested without --watch; no file changes will be observed.".to_owned(),
+            );
+        }
+    }
+    if args.open_devtools {
+        lines.push(
+            "devtools: requested but unsupported by the current Servo backend; continuing without opening devtools.".to_owned(),
+        );
+    }
+    lines
+}
+
+fn launch_summary_lines(
+    app: &App,
+    dev_server_status: &DevServerStatus,
+    packaged_fallback_status: &PackagedFallbackStatus,
+    launch_mode: RunMode,
+) -> Vec<String> {
+    let selected_packaged_fallback = matches!(launch_mode, RunMode::Production);
+    let entry_lines = window_entry_lines(
+        app,
+        dev_server_status,
+        packaged_fallback_status,
+        Some(launch_mode),
+    );
+    let mut lines = vec![
+        format!("- mode: {launch_mode}"),
+        format!(
+            "- packaged_fallback: {}",
+            packaged_fallback_status.selected_summary(selected_packaged_fallback)
+        ),
+        "- windows:".to_owned(),
+    ];
+    lines.extend(entry_lines.into_iter().map(|line| format!("  {line}")));
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -310,10 +922,14 @@ mod tests {
     use url::Url;
 
     use super::{
-        DevServerStatus, PackagedFallbackStatus, dev_diagnostic_lines, dev_server_status,
-        dev_server_status_with, packaged_fallback_status, select_launch_mode,
-        select_launch_mode_with_packaged_fallback,
+        DevServerStatus, DevServerWaitResult, FrontendCommandPlan, PackagedFallbackStatus,
+        dev_diagnostic_lines, dev_option_lines, dev_server_status, dev_server_status_with,
+        frontend_command_plan, frontend_diagnostic_lines, frontend_wait_error,
+        launch_summary_lines, packaged_fallback_status, reload_mode_line, scan_watch_root,
+        select_launch_mode, select_launch_mode_with_packaged_fallback, watch_change_lines,
+        watch_changes,
     };
+    use crate::cli::DevArgs;
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -332,11 +948,28 @@ mod tests {
             windows: vec![WindowConfig::main("CLI Test")],
             dev: dev_url.map(|value| axion_core::DevServerConfig {
                 url: Url::parse(value).expect("test URL must parse"),
+                command: None,
+                cwd: None,
+                timeout_ms: None,
             }),
             build: BuildConfig::new("frontend", "frontend/index.html"),
             bundle: Default::default(),
             native: Default::default(),
             capabilities: Default::default(),
+        }
+    }
+
+    fn dev_args() -> DevArgs {
+        DevArgs {
+            manifest_path: "axion.toml".into(),
+            launch: false,
+            fallback_packaged: false,
+            watch: false,
+            reload: false,
+            open_devtools: false,
+            frontend_command: None,
+            frontend_cwd: None,
+            dev_server_timeout_ms: None,
         }
     }
 
@@ -362,6 +995,9 @@ mod tests {
                 windows,
                 dev: dev_url.map(|value| axion_core::DevServerConfig {
                     url: Url::parse(value).expect("test URL must parse"),
+                    command: None,
+                    cwd: None,
+                    timeout_ms: None,
                 }),
                 build: BuildConfig::new(&frontend, &entry),
                 bundle: Default::default(),
@@ -467,6 +1103,7 @@ mod tests {
                 .iter()
                 .any(|line| line == "- settings: http://127.0.0.1:3000/ (development)")
         );
+        assert!(lines.iter().any(|line| line.contains("run with --launch")));
     }
 
     #[test]
@@ -494,6 +1131,11 @@ mod tests {
             lines
                 .iter()
                 .any(|line| line == "- main: unavailable (launch blocked)")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("start the frontend dev server"))
         );
     }
 
@@ -524,5 +1166,224 @@ mod tests {
                 .iter()
                 .any(|line| line == "- main: axion://app/index.html (packaged fallback)")
         );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("packaged fallback is selected"))
+        );
+    }
+
+    #[test]
+    fn dev_option_lines_report_reserved_flags() {
+        let lines = dev_option_lines(&DevArgs {
+            watch: true,
+            reload: true,
+            open_devtools: true,
+            ..dev_args()
+        });
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "watch: enabled for frontend asset polling.")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("reload: enabled for watch diagnostics"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("devtools: requested"))
+        );
+    }
+
+    #[test]
+    fn dev_option_lines_report_reload_without_watch() {
+        let lines = dev_option_lines(&DevArgs {
+            reload: true,
+            ..dev_args()
+        });
+
+        assert!(
+            lines.iter().any(|line| line
+                == "reload: requested without --watch; no file changes will be observed.")
+        );
+    }
+
+    #[test]
+    fn watch_snapshot_reports_created_modified_and_deleted_files() {
+        let root = temp_dir();
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(root.join("index.html"), "one").unwrap();
+        fs::write(root.join("nested").join("app.js"), "one").unwrap();
+        let first = scan_watch_root(&root).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        fs::write(root.join("index.html"), "two").unwrap();
+        fs::write(root.join("style.css"), "body{}").unwrap();
+        fs::remove_file(root.join("nested").join("app.js")).unwrap();
+        let second = scan_watch_root(&root).unwrap();
+        let changes = watch_changes(&first, &second);
+        let lines = watch_change_lines(&changes, true);
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "watch_change: modified index.html")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "watch_change: created style.css")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "watch_change: deleted nested/app.js")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("reload_requested: frontend assets changed"))
+        );
+    }
+
+    #[test]
+    fn reload_mode_lines_describe_report_only_backend() {
+        assert!(reload_mode_line(true).contains("hot reload is reported"));
+        assert!(reload_mode_line(false).contains("use --reload"));
+    }
+
+    #[test]
+    fn launch_summary_reports_final_window_entries() {
+        let app = app_with_frontend(Some("http://127.0.0.1:3000"), 2);
+        let dev_status = DevServerStatus::Reachable {
+            url: "http://127.0.0.1:3000/".to_owned(),
+        };
+        let fallback_status = packaged_fallback_status(&app);
+
+        let lines = launch_summary_lines(&app, &dev_status, &fallback_status, RunMode::Development);
+
+        assert!(lines.iter().any(|line| line == "- mode: development"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "  - main: http://127.0.0.1:3000/ (development)")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "  - settings: http://127.0.0.1:3000/ (development)")
+        );
+    }
+
+    #[test]
+    fn frontend_command_plan_uses_cli_over_manifest() {
+        let mut config = config_with_dev_url(Some("http://127.0.0.1:3000"));
+        let manifest_cwd = temp_dir();
+        config.dev.as_mut().unwrap().command = Some("manifest command".to_owned());
+        config.dev.as_mut().unwrap().cwd = Some(manifest_cwd);
+        config.dev.as_mut().unwrap().timeout_ms = Some(1000);
+
+        let cli_cwd = temp_dir();
+        let plan = frontend_command_plan(
+            &DevArgs {
+                frontend_command: Some("cli command".to_owned()),
+                frontend_cwd: Some(cli_cwd.clone()),
+                dev_server_timeout_ms: Some(42),
+                ..dev_args()
+            },
+            &config,
+            std::path::Path::new("axion.toml"),
+        )
+        .expect("frontend command should plan")
+        .expect("plan should exist");
+
+        assert_eq!(
+            plan,
+            FrontendCommandPlan {
+                command: "cli command".to_owned(),
+                cwd: cli_cwd,
+                timeout_ms: 42,
+            }
+        );
+    }
+
+    #[test]
+    fn frontend_command_plan_uses_manifest_defaults() {
+        let mut config = config_with_dev_url(Some("http://127.0.0.1:3000"));
+        let manifest_cwd = temp_dir();
+        config.dev.as_mut().unwrap().command = Some("manifest command".to_owned());
+        config.dev.as_mut().unwrap().cwd = Some(manifest_cwd.clone());
+        config.dev.as_mut().unwrap().timeout_ms = Some(1000);
+
+        let plan = frontend_command_plan(&dev_args(), &config, std::path::Path::new("axion.toml"))
+            .expect("frontend command should plan")
+            .expect("plan should exist");
+
+        assert_eq!(
+            plan,
+            FrontendCommandPlan {
+                command: "manifest command".to_owned(),
+                cwd: manifest_cwd,
+                timeout_ms: 1000,
+            }
+        );
+    }
+
+    #[test]
+    fn frontend_command_plan_requires_dev_url() {
+        let mut args = dev_args();
+        args.frontend_command = Some("echo test".to_owned());
+
+        assert!(
+            frontend_command_plan(
+                &args,
+                &config_with_dev_url(None),
+                std::path::Path::new("axion.toml")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn frontend_process_diagnostics_report_wait_results() {
+        let lines = frontend_diagnostic_lines(
+            "test server",
+            std::path::Path::new("/tmp"),
+            &DevServerWaitResult::ExitedEarly {
+                status: Some(2),
+                stderr_summary: "failed to bind".to_owned(),
+            },
+        );
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "frontend_command: started (test server)")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "dev_server_wait: exited early (status=2)")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "frontend_stderr: failed to bind")
+        );
+    }
+
+    #[test]
+    fn frontend_wait_error_reports_early_exit() {
+        let error = frontend_wait_error(&DevServerWaitResult::ExitedEarly {
+            status: Some(7),
+            stderr_summary: "frontend boom".to_owned(),
+        });
+
+        assert!(error.to_string().contains("status=7"));
+        assert!(error.to_string().contains("frontend boom"));
     }
 }
