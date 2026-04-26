@@ -76,6 +76,9 @@ pub struct SelfTestArgs {
     pub json: bool,
 
     #[arg(long, default_value_t = false)]
+    pub quiet: bool,
+
+    #[arg(long, default_value_t = false)]
     pub keep_artifacts: bool,
 }
 

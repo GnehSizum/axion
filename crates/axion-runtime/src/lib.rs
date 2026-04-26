@@ -13,7 +13,7 @@ pub use axion_bridge::{
     WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-const AXION_RELEASE_VERSION: &str = "v0.1.5.0";
+pub const AXION_RELEASE_VERSION: &str = "v0.1.6.0";
 
 pub trait RuntimePlugin: Send + Sync {
     fn register(&self, builder: &mut RuntimeBridgeBindingsBuilder);
@@ -1984,7 +1984,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.5.0\""));
+        assert!(version.contains("\"release\":\"v0.1.6.0\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,

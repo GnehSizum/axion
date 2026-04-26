@@ -18,12 +18,14 @@ pub fn run(args: SelfTestArgs) -> Result<(), AxionCliError> {
         return Ok(());
     }
 
-    print_human_report(&report);
+    if !args.quiet {
+        print_human_report(&report, args.report_path.as_deref());
+    }
 
     Ok(())
 }
 
-fn print_human_report(report: &SelfTestReport) {
+fn print_human_report(report: &SelfTestReport, report_path: Option<&Path>) {
     println!("Axion self-test");
     println!("manifest: {}", report.manifest_path.display());
     println!("app: {}", report.app_name);
@@ -86,6 +88,9 @@ fn print_human_report(report: &SelfTestReport) {
     println!("host_events: {}", list_or_none(&report.host_events));
     println!("staged_app_dir: {}", report.staged_app_dir.display());
     println!("asset_manifest: {}", report.asset_manifest_path.display());
+    if let Some(path) = report_path {
+        println!("diagnostics_report: {}", path.display());
+    }
     if report.artifacts_removed {
         println!("artifacts: removed");
     } else {
@@ -515,6 +520,7 @@ allowed_navigation_origins = ["https://docs.example"]
             output_dir: Some(output_dir.clone()),
             report_path: None,
             json: false,
+            quiet: false,
             keep_artifacts: false,
         })
         .expect("self-test should pass");
@@ -573,6 +579,7 @@ allowed_navigation_origins = ["https://docs.example"]
             output_dir: Some(output_dir.clone()),
             report_path: None,
             json: false,
+            quiet: false,
             keep_artifacts: true,
         })
         .expect("self-test should pass");
@@ -594,6 +601,7 @@ allowed_navigation_origins = ["https://docs.example"]
             output_dir: Some(output_dir.clone()),
             report_path: None,
             json: false,
+            quiet: false,
             keep_artifacts: false,
         })
         .expect("multi-window self-test should pass");
@@ -643,6 +651,7 @@ allowed_navigation_origins = ["https://docs.example"]
             output_dir: Some(output_dir),
             report_path: None,
             json: false,
+            quiet: false,
             keep_artifacts: false,
         })
         .expect("self-test should pass");
@@ -674,6 +683,7 @@ allowed_navigation_origins = ["https://docs.example"]
             output_dir: Some(output_dir),
             report_path: None,
             json: false,
+            quiet: false,
             keep_artifacts: false,
         })
         .expect("self-test should pass");

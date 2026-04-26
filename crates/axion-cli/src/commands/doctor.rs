@@ -9,11 +9,21 @@ use crate::error::AxionCliError;
 
 pub fn run(args: DoctorArgs) -> Result<(), AxionCliError> {
     println!("Axion doctor");
+    println!("{}", framework_diagnostic_line());
     print_tool_status("cargo", &["--version"]);
-    print_tool_status("rustc", &["--version"]);
+    print_rustc_status();
     print_manifest_status(&args.manifest_path)?;
     print_servo_status(servo_path_for_manifest(&args.manifest_path).as_deref());
     Ok(())
+}
+
+fn framework_diagnostic_line() -> String {
+    format!(
+        "axion: cli_version={}, release={}, msrv={}",
+        env!("CARGO_PKG_VERSION"),
+        axion_runtime::AXION_RELEASE_VERSION,
+        option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("unknown"),
+    )
 }
 
 fn print_tool_status(program: &str, args: &[&str]) {
@@ -30,6 +40,64 @@ fn print_tool_status(program: &str, args: &[&str]) {
             println!("{program}: missing ({error})");
         }
     }
+}
+
+fn print_rustc_status() {
+    match Command::new("rustc").arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            let version = version.trim();
+            println!("rustc: ok ({version})");
+            println!("{}", rustc_msrv_diagnostic_line(version));
+        }
+        Ok(output) => {
+            let error = String::from_utf8_lossy(&output.stderr);
+            println!("rustc: failed ({})", error.trim());
+        }
+        Err(error) => {
+            println!("rustc: missing ({error})");
+        }
+    }
+}
+
+fn rustc_msrv_diagnostic_line(rustc_version_output: &str) -> String {
+    let required = option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("unknown");
+    let Some(active) = parse_rustc_semver(rustc_version_output) else {
+        return format!("rustc.msrv: unknown (active=unknown, required={required})");
+    };
+    let Some(required_version) = parse_semver(required) else {
+        return format!(
+            "rustc.msrv: unknown (active={}.{}.{}, required={required})",
+            active.0, active.1, active.2
+        );
+    };
+    let status = if active >= required_version {
+        "ok"
+    } else {
+        "failed"
+    };
+
+    format!(
+        "rustc.msrv: {status} (active={}.{}.{}, required={}.{}.{})",
+        active.0, active.1, active.2, required_version.0, required_version.1, required_version.2
+    )
+}
+
+fn parse_rustc_semver(output: &str) -> Option<(u64, u64, u64)> {
+    let version = output.strip_prefix("rustc ")?.split_whitespace().next()?;
+    parse_semver(version)
+}
+
+fn parse_semver(value: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = value.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts
+        .next()
+        .and_then(|part| part.split('-').next())
+        .and_then(|part| part.parse().ok())?;
+
+    Some((major, minor, patch))
 }
 
 fn print_manifest_status(manifest_path: &Path) -> Result<(), AxionCliError> {
@@ -260,7 +328,8 @@ mod tests {
 
     use super::{
         build_asset_diagnostic_lines, bundle_diagnostic_lines, dev_server_diagnostic_line,
-        dev_server_diagnostic_line_with, manifest_diagnostic_lines, runtime_diagnostic_lines,
+        dev_server_diagnostic_line_with, framework_diagnostic_line, manifest_diagnostic_lines,
+        parse_rustc_semver, parse_semver, runtime_diagnostic_lines, rustc_msrv_diagnostic_line,
         servo_path_for_manifest,
     };
 
@@ -285,6 +354,36 @@ mod tests {
         assert_eq!(
             servo_path_for_manifest(&app_dir.join("axion.toml")),
             Some(root.join("servo"))
+        );
+    }
+
+    #[test]
+    fn framework_diagnostics_include_version_release_and_msrv() {
+        let line = framework_diagnostic_line();
+
+        assert!(line.contains("axion: cli_version="));
+        assert!(line.contains("release=v0.1.6.0"));
+        assert!(line.contains("msrv="));
+    }
+
+    #[test]
+    fn rustc_msrv_diagnostics_compare_versions() {
+        assert_eq!(parse_semver("1.86.0"), Some((1, 86, 0)));
+        assert_eq!(
+            parse_rustc_semver("rustc 1.94.0 (4a4ef493e 2026-03-02)"),
+            Some((1, 94, 0))
+        );
+        assert_eq!(
+            rustc_msrv_diagnostic_line("rustc 1.86.0 (abc 2025-01-01)"),
+            "rustc.msrv: ok (active=1.86.0, required=1.86.0)"
+        );
+        assert_eq!(
+            rustc_msrv_diagnostic_line("rustc 1.85.0 (abc 2025-01-01)"),
+            "rustc.msrv: failed (active=1.85.0, required=1.86.0)"
+        );
+        assert_eq!(
+            rustc_msrv_diagnostic_line("not rustc"),
+            "rustc.msrv: unknown (active=unknown, required=1.86.0)"
         );
     }
 

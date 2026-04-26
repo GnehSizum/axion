@@ -18,7 +18,7 @@ members = [
 exclude = ["servo"]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.86.0"
 
@@ -42,8 +42,8 @@ winit = "0.30.13"
 
 [workspace.metadata.axion]
 engine_path = "servo"
-milestone = "v0.1.5.0"
-release = "v0.1.5.0"
+milestone = "v0.1.6.0"
+release = "v0.1.6.0"
 servo_baseline = "0.1"
-feature_version = 5
+feature_version = 6
 bugfix_version = 0

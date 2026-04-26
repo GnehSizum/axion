@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.1.6.0 - Preview
+
+Axion v0.1.6.0 completes the CI and diagnostics stabilization milestone on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.6`.
+- Axion public release metadata is `v0.1.6.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- `axion doctor` now reports Axion CLI version, public release, MSRV, and whether the active `rustc` satisfies the workspace `rust-version`.
+- `axion self-test --quiet` supports CI usage with `--report-path` when only the exit code and diagnostics report artifact are needed.
+- Public diagnostics report documentation now describes `axion.diagnostics-report.v1` producers, top-level fields, window fields, and CI usage.
+- CI now validates every checked-in example manifest, writes a diagnostics JSON report, checks the report schema, and uploads doctor/report artifacts.
+
+### Changed
+
+- CI release gates are aligned with Rust `1.86.0`, the workspace MSRV.
+- `axion self-test --report-path` now prints the report path in human-readable output.
+- `axion-runtime` exposes the public Axion release constant for CLI diagnostics.
+
+### Deferred
+
+- Automated GUI CI across platforms.
+- A typed Rust JSON model shared between GUI-exported diagnostics and CLI `self-test` reports.
+- Installer generation, signing, notarization, auto-updates, and platform store packaging.
+
 ## v0.1.5.0 - Preview
 
 Axion v0.1.5.0 completes the frontend diagnostics and compatibility milestone on the current Servo `0.1` baseline.
