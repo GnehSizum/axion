@@ -32,7 +32,7 @@ url = "http://127.0.0.1:3000"
 backend = "headless"
 
 [capabilities.main]
-commands = ["app.ping", "app.info", "app.version", "app.echo", "window.info"]
+commands = ["app.ping", "app.info", "app.version", "app.echo", "window.info", "window.set_title", "window.set_size"]
 events = ["app.log"]
 protocols = ["axion"]
 allowed_navigation_origins = []
@@ -74,15 +74,17 @@ title = "Settings"
 visible = true
 
 [capabilities.main]
-commands = ["app.ping", "app.info"]
+commands = ["app.ping", "app.info", "window.list", "window.info", "window.focus", "window.set_title"]
 events = ["app.log"]
 protocols = ["axion"]
 
 [capabilities.settings]
-commands = ["window.info"]
+commands = ["window.info", "window.focus", "window.set_title"]
 events = ["app.log"]
 protocols = ["axion"]
 ```
+
+When a window has permission for a window command, frontend code can optionally pass `{ target: "<window-id>" }` in the command payload to operate on another runtime window.
 
 ## Build
 
@@ -126,7 +128,7 @@ Capabilities are scoped by window id:
 
 ```toml
 [capabilities.main]
-commands = ["app.ping", "app.version", "fs.read_text", "fs.write_text", "dialog.open", "dialog.save"]
+commands = ["app.ping", "app.version", "window.list", "window.info", "window.focus", "window.set_title", "window.set_size", "fs.read_text", "fs.write_text", "dialog.open", "dialog.save"]
 events = ["app.log"]
 protocols = ["axion"]
 allowed_navigation_origins = ["https://docs.example"]

@@ -4,6 +4,66 @@ Axion exposes built-in native APIs as bridge commands. Every command must be lis
 
 For application-defined Rust commands, see `custom-commands.md`.
 
+## Bridge Compatibility Helpers
+
+The injected `window.__AXION__` bootstrap also exposes small frontend compatibility helpers under `window.__AXION__.compat`.
+
+### `installTextInputSelectionPatch`
+
+Installs a targeted text-selection workaround for Servo-backed `input` and `textarea` controls. This is useful when a page needs more stable caret placement or drag-selection behavior during development.
+
+```js
+const dispose = window.__AXION__.compat.installTextInputSelectionPatch(
+  document.getElementById("file-contents"),
+  {
+    manualPointerSelection: true,
+    onStatus(message) {
+      console.log(message);
+    },
+    onUpdate(snapshot) {
+      console.log(snapshot.detail);
+    }
+  }
+);
+```
+
+Options:
+
+- `manualPointerSelection: boolean` — fully manages pointer drag selection for the target control
+- `onStatus(message)` — receives short status strings when the helper corrects selection
+- `onUpdate(snapshot)` — receives selection and metric snapshots after corrections
+
+## Bridge Diagnostics Helpers
+
+The bootstrap also exposes lightweight diagnostics under `window.__AXION__.diagnostics`.
+
+### `describeBridge`
+
+Returns a frontend-friendly snapshot of the injected bridge surface.
+
+```js
+const bridgeSnapshot = window.__AXION__.diagnostics.describeBridge();
+```
+
+### `snapshotTextControl`
+
+Returns a structured snapshot for an `input` or `textarea`, including selection, scrolling, active-element state, and custom detail payload.
+
+```js
+const textarea = document.getElementById("file-contents");
+const snapshot = window.__AXION__.diagnostics.snapshotTextControl(textarea, {
+  source: "manual-check"
+});
+```
+
+### `toPrettyJson`
+
+Formats a value using the same pretty JSON layout used by the examples.
+
+```js
+pre.textContent = window.__AXION__.diagnostics.toPrettyJson(snapshot);
+```
+
 ## App Commands
 
 ### `app.ping`
@@ -37,7 +97,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.4", release: "v0.1.4.0", framework: "axion" }
+// { version: "0.1.5", release: "v0.1.5.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -50,12 +110,93 @@ await window.__AXION__.invoke("app.echo", { value: 1 });
 
 ## Window Commands
 
+Most window commands operate on the current window by default. Pass `{ target: "settings" }` to address another window by id.
+
+### `window.list`
+
+Returns every native window currently managed by the runtime.
+
+```js
+await window.__AXION__.invoke("window.list", null);
+// { windows: [{ id: "main", ... }, { id: "settings", ... }] }
+```
+
 ### `window.info`
 
-Returns the current window id, title, size, and native flags.
+Returns the target window id, title, size, and native flags.
 
 ```js
 await window.__AXION__.invoke("window.info", null);
+await window.__AXION__.invoke("window.info", { target: "settings" });
+```
+
+### `window.show`
+
+Shows the target native window and returns the updated window state.
+
+```js
+await window.__AXION__.invoke("window.show", null);
+```
+
+### `window.hide`
+
+Hides the target native window and returns the updated window state.
+
+```js
+await window.__AXION__.invoke("window.hide", null);
+```
+
+### `window.focus`
+
+Requests focus for the target native window and returns the updated window state.
+
+```js
+await window.__AXION__.invoke("window.focus", null);
+await window.__AXION__.invoke("window.focus", { target: "settings" });
+```
+
+### `window.set_title`
+
+Updates the target native window title and returns the updated window state.
+
+```js
+await window.__AXION__.invoke("window.set_title", {
+  title: "Hello Axion · Preview",
+});
+await window.__AXION__.invoke("window.set_title", {
+  target: "settings",
+  title: "Settings · Controlled",
+});
+```
+
+### `window.set_size`
+
+Updates the target native window size and returns the updated window state.
+
+```js
+await window.__AXION__.invoke("window.set_size", {
+  width: 960,
+  height: 720,
+});
+```
+
+### Host Lifecycle Events
+
+Axion host events are listen-only and come from the native runtime. Window lifecycle events currently include:
+
+- `window.created`
+- `window.close_requested`
+- `window.closed`
+- `window.resized`
+- `window.focused`
+- `window.blurred`
+- `window.moved`
+- `window.redraw_failed`
+
+```js
+window.__AXION__.listen("window.focused", (payload) => {
+  console.log("focused", payload);
+});
 ```
 
 ## File Commands
@@ -147,7 +288,10 @@ commands = [
   "app.info",
   "app.version",
   "app.echo",
+  "window.list",
   "window.info",
+  "window.focus",
+  "window.set_title",
   "fs.write_text",
   "fs.read_text",
   "dialog.open",

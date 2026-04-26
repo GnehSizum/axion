@@ -1,0 +1,32 @@
+[app]
+name = "bridge-diagnostics-demo"
+identifier = "dev.axion.bridge-diagnostics"
+version = "0.1.0"
+description = "Axion bridge and input diagnostics demo"
+authors = ["Axion Maintainers"]
+homepage = "https://example.dev/bridge-diagnostics-demo"
+
+[window]
+id = "main"
+title = "Bridge Diagnostics Demo"
+width = 1120
+height = 920
+resizable = true
+visible = true
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[bundle]
+icon = "icons/app.icns"
+
+[native.dialog]
+backend = "headless"
+
+[capabilities.main]
+commands = ["app.ping", "app.info", "app.version", "app.echo", "window.list", "window.info", "fs.write_text", "fs.read_text", "dialog.open", "dialog.save"]
+events = ["app.log"]
+protocols = ["axion"]
+allowed_navigation_origins = []
+allow_remote_navigation = false

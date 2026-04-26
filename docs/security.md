@@ -8,7 +8,7 @@ Capabilities are scoped to a window id:
 
 ```toml
 [capabilities.main]
-commands = ["app.ping", "window.info", "fs.read_text", "fs.write_text", "dialog.open"]
+commands = ["app.ping", "window.list", "window.info", "window.set_title", "fs.read_text", "fs.write_text", "dialog.open"]
 events = ["app.log"]
 protocols = ["axion"]
 allowed_navigation_origins = []
@@ -16,6 +16,7 @@ allow_remote_navigation = false
 ```
 
 If a command or event is not declared for the active window, the bridge does not expose it as an allowed operation.
+Window commands default to the current window, but payloads may include `target` to operate on another runtime window id. Only grant those commands to windows that are allowed to coordinate other windows.
 
 ## Bridge Commands
 

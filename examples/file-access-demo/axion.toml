@@ -1,0 +1,32 @@
+[app]
+name = "file-access-demo"
+identifier = "dev.axion.file-access-demo"
+version = "0.1.0"
+description = "Axion controlled file and dialog capability demo"
+authors = ["Axion Maintainers"]
+homepage = "https://example.dev/file-access-demo"
+
+[window]
+id = "main"
+title = "File Access Demo"
+width = 960
+height = 900
+resizable = true
+visible = true
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[bundle]
+icon = "icons/app.icns"
+
+[native.dialog]
+backend = "headless"
+
+[capabilities.main]
+commands = ["app.ping", "app.info", "window.info", "fs.write_text", "fs.read_text", "dialog.open", "dialog.save"]
+events = ["app.log"]
+protocols = ["axion"]
+allowed_navigation_origins = []
+allow_remote_navigation = false

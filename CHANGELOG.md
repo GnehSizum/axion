@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.1.5.0 - Preview
+
+Axion v0.1.5.0 completes the frontend diagnostics and compatibility milestone on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.5`.
+- Axion public release metadata is `v0.1.5.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added shared bridge compatibility helpers under `window.__AXION__.compat`, including `installTextInputSelectionPatch` for Servo-backed text controls.
+- Added bridge diagnostics helpers under `window.__AXION__.diagnostics`: `describeBridge`, `snapshotTextControl`, and `toPrettyJson`.
+- Added `examples/file-access-demo` as a focused app-data filesystem and dialog capability demo.
+- Added `examples/bridge-diagnostics-demo` for bridge snapshots, host events, text-input diagnostics, visual smoke checks, and export/reload of diagnostics reports.
+- `axion self-test` can now emit machine-readable `axion.diagnostics-report.v1` JSON with `--json` or write it with `--report-path`.
+- Generated vanilla apps and examples now reuse the shared bridge helpers instead of carrying local compatibility code.
+
+### Changed
+
+- Frontend examples have clearer external style loading and more complete input, file, dialog, event, and diagnostics flows.
+- Documentation now covers bridge compatibility helpers, diagnostics helpers, report export, and the v0.1.5.0 version baseline.
+
+### Deferred
+
+- Automated GUI CI across platforms.
+- A typed Rust JSON model shared between GUI-exported diagnostics and CLI `self-test` reports.
+- Deeper engine-level text control fixes inside the vendored Servo subtree.
+
 ## v0.1.4.0 - Preview
 
 Axion v0.1.4.0 completes the native dialog preview milestone on the current Servo `0.1` baseline.

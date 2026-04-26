@@ -69,6 +69,12 @@ pub struct SelfTestArgs {
     #[arg(long)]
     pub output_dir: Option<PathBuf>,
 
+    #[arg(long)]
+    pub report_path: Option<PathBuf>,
+
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+
     #[arg(long, default_value_t = false)]
     pub keep_artifacts: bool,
 }

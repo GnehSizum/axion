@@ -42,7 +42,7 @@ Each manifest window receives its own native window, bridge token, command regis
 - `axion-core` does not expose Servo internals.
 - `axion-runtime` orchestrates framework behavior and delegates desktop details.
 - `axion-window-winit` owns Servo/winit integration.
-- `axion-bridge` owns JavaScript bridge naming, payload validation, and dispatch contracts.
+- `axion-bridge` owns JavaScript bridge naming, payload validation, dispatch contracts, and small frontend compatibility helpers exposed by the bootstrap.
 - `axion-cli` provides developer workflows without becoming part of the runtime API.
 
 ## Native Preview Layer
@@ -51,4 +51,4 @@ Each manifest window receives its own native window, bridge token, command regis
 
 ## Version Scope
 
-v0.1.4.0 completes the native dialog preview milestone on top of the generated-app workflow, capability-gated native command surface, strict dev-server launch checks, executable-aware bundling, multi-window diagnostics, and packaging quality completed through v0.1.3.0. The release adds manifest-driven dialog backend selection, headless-safe dialog responses, macOS system dialog preview behavior, and diagnostic reporting. Axion public versions use four components to separate Servo baseline, Axion feature milestones, and bugfix releases; Cargo crates keep SemVer-compatible three-component versions. Installer generation, signing, auto-updates, broader native API coverage, and CI GUI integration tests remain later milestones.
+v0.1.5.0 completes the frontend diagnostics and compatibility milestone on top of the generated-app workflow, capability-gated native command surface, native dialog preview, executable-aware bundling, and multi-window diagnostics completed through v0.1.4.0. The release adds shared bridge compatibility helpers, structured bridge diagnostics helpers, richer file-access and bridge-diagnostics examples, and machine-readable `axion self-test` reports. Axion public versions use four components to separate Servo baseline, Axion feature milestones, and bugfix releases; Cargo crates keep SemVer-compatible three-component versions. Installer generation, signing, auto-updates, broader native API coverage, and CI GUI integration tests remain later milestones.

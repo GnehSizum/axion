@@ -51,17 +51,20 @@ pub enum WinitRunError {
 #[cfg(feature = "servo-runtime")]
 mod enabled {
     use std::cell::RefCell;
+    use std::collections::BTreeMap;
     use std::fs::File;
     use std::future::Future;
     use std::io::BufReader;
     use std::path::PathBuf;
     use std::pin::Pin;
     use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     use axion_bridge::{
         BootstrapConfig, BridgeBindings, BridgeEmitRequest, BridgeEvent, BridgePayloadError,
         BridgeRequest, BridgeRequestIdError, CommandContext, CommandDispatchError,
-        EventDispatchError, is_valid_command_name, is_valid_event_name,
+        EventDispatchError, WindowControlHandle, WindowControlRequest, WindowControlResponse,
+        WindowStateSnapshot, is_valid_command_name, is_valid_event_name,
     };
     use axion_core::WindowLaunchConfig;
     use axion_protocol::{AXION_SCHEME, AppAssetResolver, ResourcePolicy};
@@ -78,15 +81,24 @@ mod enabled {
         ProtocolRegistry, RelativePos, Request, ResourceFetchTiming, Response, ResponseBody,
     };
     use servo::{
-        RenderingContext, Servo, ServoBuilder, UserContentManager, WebView, WebViewBuilder,
-        WindowRenderingContext,
+        Code, DevicePoint, InputEvent, Key, KeyState, KeyboardEvent, Location, Modifiers,
+        MouseButton as ServoMouseButton, MouseButtonAction, MouseButtonEvent,
+        MouseLeftViewportEvent, MouseMoveEvent, NamedKey, RenderingContext, Servo, ServoBuilder,
+        TouchEvent, TouchEventType, TouchId, UserContentManager, WebView, WebViewBuilder,
+        WheelDelta, WheelEvent, WheelMode, WindowRenderingContext,
     };
     use tokio::sync::mpsc::unbounded_channel;
     use url::Url;
     use winit::application::ApplicationHandler;
     use winit::dpi::LogicalSize;
-    use winit::event::WindowEvent;
+    use winit::event::{
+        ElementState, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+    };
     use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+    use winit::keyboard::{
+        Key as WinitKey, KeyCode, KeyLocation as WinitKeyLocation, ModifiersState,
+        NamedKey as WinitNamedKey, PhysicalKey,
+    };
     use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
     use winit::window::{Window, WindowAttributes};
 
@@ -95,6 +107,9 @@ mod enabled {
     const WINDOW_CLOSE_REQUESTED_EVENT: &str = "window.close_requested";
     const WINDOW_CLOSED_EVENT: &str = "window.closed";
     const WINDOW_RESIZED_EVENT: &str = "window.resized";
+    const WINDOW_FOCUSED_EVENT: &str = "window.focused";
+    const WINDOW_BLURRED_EVENT: &str = "window.blurred";
+    const WINDOW_MOVED_EVENT: &str = "window.moved";
     const WINDOW_REDRAW_FAILED_EVENT: &str = "window.redraw_failed";
 
     pub fn run_dev_server(
@@ -167,6 +182,7 @@ mod enabled {
         pub command_context: CommandContext,
         pub bridge_bindings: BridgeBindings,
         pub security_policy: SecurityPolicy,
+        pub window_control: WindowControlHandle,
     }
 
     #[derive(Clone, Debug)]
@@ -244,6 +260,11 @@ mod enabled {
         security_policy: SecurityPolicy,
         startup_events: Vec<BridgeEvent>,
         startup_events_dispatched: std::cell::Cell<bool>,
+        title: RefCell<String>,
+        resizable: bool,
+        visible: std::cell::Cell<bool>,
+        focused: std::cell::Cell<bool>,
+        cursor_position: std::cell::Cell<DevicePoint>,
         window: Window,
         rendering_context: Rc<WindowRenderingContext>,
         webview: WebView,
@@ -256,6 +277,8 @@ mod enabled {
         self_test_finished: std::cell::Cell<bool>,
         self_test_poll_in_flight: std::cell::Cell<bool>,
         self_test_started: std::cell::Cell<bool>,
+        modifiers_state: std::cell::Cell<ModifiersState>,
+        window_registry: Arc<Mutex<BTreeMap<String, winit::window::WindowId>>>,
         windows: RefCell<Vec<RuntimeWindow>>,
     }
 
@@ -381,14 +404,25 @@ mod enabled {
 
         fn remove_window(&self, window_id: winit::window::WindowId) -> bool {
             let mut windows = self.windows.borrow_mut();
-            if let Some(position) = windows
+            let removed_window_id = if let Some(position) = windows
                 .iter()
                 .position(|runtime_window| runtime_window.window.id() == window_id)
             {
-                windows.remove(position);
+                Some(windows.remove(position).window_id)
+            } else {
+                None
+            };
+
+            let is_empty = windows.is_empty();
+            drop(windows);
+
+            if let Some(window_id) = removed_window_id {
+                if let Ok(mut registry) = self.window_registry.lock() {
+                    registry.remove(&window_id);
+                }
             }
 
-            windows.is_empty()
+            is_empty
         }
 
         fn redraw_window(&self, window_id: winit::window::WindowId) -> Result<(), WinitRunError> {
@@ -449,6 +483,260 @@ mod enabled {
                     &payload_json,
                 );
             }
+        }
+
+        fn focus_window_event(&self, window_id: winit::window::WindowId, focused: bool) {
+            if let Some(runtime_window) = self
+                .windows
+                .borrow()
+                .iter()
+                .find(|runtime_window| runtime_window.window.id() == window_id)
+            {
+                runtime_window.focused.set(focused);
+                let event_name = if focused {
+                    WINDOW_FOCUSED_EVENT
+                } else {
+                    WINDOW_BLURRED_EVENT
+                };
+                dispatch_to_webview(
+                    &runtime_window.webview,
+                    &runtime_window.bridge_token,
+                    event_name,
+                    &window_payload(runtime_window),
+                );
+            }
+        }
+
+        fn move_window_event(
+            &self,
+            window_id: winit::window::WindowId,
+            position: winit::dpi::PhysicalPosition<i32>,
+        ) {
+            if let Some(runtime_window) = self
+                .windows
+                .borrow()
+                .iter()
+                .find(|runtime_window| runtime_window.window.id() == window_id)
+            {
+                let payload_json = format!(
+                    "{{\"windowId\":{},\"x\":{},\"y\":{},\"scaleFactor\":{}}}",
+                    json_string_literal(&runtime_window.window_id),
+                    position.x,
+                    position.y,
+                    runtime_window.window.scale_factor(),
+                );
+                dispatch_to_webview(
+                    &runtime_window.webview,
+                    &runtime_window.bridge_token,
+                    WINDOW_MOVED_EVENT,
+                    &payload_json,
+                );
+            }
+        }
+
+        fn cursor_moved(
+            &self,
+            window_id: winit::window::WindowId,
+            position: winit::dpi::PhysicalPosition<f64>,
+        ) {
+            if let Some(runtime_window) = self
+                .windows
+                .borrow()
+                .iter()
+                .find(|runtime_window| runtime_window.window.id() == window_id)
+            {
+                let point = DevicePoint::new(position.x as f32, position.y as f32);
+                runtime_window.cursor_position.set(point);
+                runtime_window
+                    .webview
+                    .notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(point.into())));
+            }
+        }
+
+        fn cursor_left(&self, window_id: winit::window::WindowId) {
+            if let Some(runtime_window) = self
+                .windows
+                .borrow()
+                .iter()
+                .find(|runtime_window| runtime_window.window.id() == window_id)
+            {
+                runtime_window
+                    .webview
+                    .notify_input_event(InputEvent::MouseLeftViewport(
+                        MouseLeftViewportEvent::default(),
+                    ));
+            }
+        }
+
+        fn mouse_input(
+            &self,
+            window_id: winit::window::WindowId,
+            state: ElementState,
+            button: MouseButton,
+        ) {
+            if let Some(runtime_window) = self
+                .windows
+                .borrow()
+                .iter()
+                .find(|runtime_window| runtime_window.window.id() == window_id)
+            {
+                let button = match button {
+                    MouseButton::Left => ServoMouseButton::Left,
+                    MouseButton::Right => ServoMouseButton::Right,
+                    MouseButton::Middle => ServoMouseButton::Middle,
+                    MouseButton::Back => ServoMouseButton::Back,
+                    MouseButton::Forward => ServoMouseButton::Forward,
+                    MouseButton::Other(value) => ServoMouseButton::Other(value),
+                };
+                let action = match state {
+                    ElementState::Pressed => MouseButtonAction::Down,
+                    ElementState::Released => MouseButtonAction::Up,
+                };
+                runtime_window
+                    .webview
+                    .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                        action,
+                        button,
+                        runtime_window.cursor_position.get().into(),
+                    )));
+            }
+        }
+
+        fn mouse_wheel(&self, window_id: winit::window::WindowId, delta: MouseScrollDelta) {
+            if let Some(runtime_window) = self
+                .windows
+                .borrow()
+                .iter()
+                .find(|runtime_window| runtime_window.window.id() == window_id)
+            {
+                let (x, y, mode) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => {
+                        ((x * 76.0) as f64, (y * 76.0) as f64, WheelMode::DeltaLine)
+                    }
+                    MouseScrollDelta::PixelDelta(delta) => {
+                        (delta.x, delta.y, WheelMode::DeltaPixel)
+                    }
+                };
+                runtime_window
+                    .webview
+                    .notify_input_event(InputEvent::Wheel(WheelEvent::new(
+                        WheelDelta { x, y, z: 0.0, mode },
+                        runtime_window.cursor_position.get().into(),
+                    )));
+            }
+        }
+
+        fn touch_event(&self, window_id: winit::window::WindowId, touch: winit::event::Touch) {
+            if let Some(runtime_window) = self
+                .windows
+                .borrow()
+                .iter()
+                .find(|runtime_window| runtime_window.window.id() == window_id)
+            {
+                let event_type = match touch.phase {
+                    TouchPhase::Started => TouchEventType::Down,
+                    TouchPhase::Moved => TouchEventType::Move,
+                    TouchPhase::Ended => TouchEventType::Up,
+                    TouchPhase::Cancelled => TouchEventType::Cancel,
+                };
+                let point = DevicePoint::new(touch.location.x as f32, touch.location.y as f32);
+                runtime_window.cursor_position.set(point);
+                runtime_window
+                    .webview
+                    .notify_input_event(InputEvent::Touch(TouchEvent::new(
+                        event_type,
+                        TouchId(touch.id as i32),
+                        point.into(),
+                    )));
+            }
+        }
+
+        fn set_modifiers(&self, modifiers: ModifiersState) {
+            self.modifiers_state.set(modifiers);
+        }
+
+        fn keyboard_input(&self, window_id: winit::window::WindowId, event: KeyEvent) {
+            if let Some(runtime_window) = self
+                .windows
+                .borrow()
+                .iter()
+                .find(|runtime_window| runtime_window.window.id() == window_id)
+            {
+                let keyboard_event = keyboard_event_from_winit(&event, self.modifiers_state.get());
+                runtime_window
+                    .webview
+                    .notify_input_event(InputEvent::Keyboard(keyboard_event));
+            }
+        }
+
+        fn apply_window_control(
+            &self,
+            window_id: Option<winit::window::WindowId>,
+            request: WindowControlRequest,
+        ) -> Result<WindowControlResponse, String> {
+            if matches!(request, WindowControlRequest::ListStates) {
+                let states = self
+                    .windows
+                    .borrow()
+                    .iter()
+                    .map(window_state_snapshot)
+                    .collect();
+                return Ok(WindowControlResponse::List(states));
+            }
+
+            let window_id =
+                window_id.ok_or_else(|| "window control target is unavailable".to_owned())?;
+            let mut should_close = false;
+            let response = {
+                let windows = self.windows.borrow();
+                let runtime_window = windows
+                    .iter()
+                    .find(|runtime_window| runtime_window.window.id() == window_id)
+                    .ok_or_else(|| "window control target is unavailable".to_owned())?;
+
+                match request {
+                    WindowControlRequest::ListStates => WindowControlResponse::List(Vec::new()),
+                    WindowControlRequest::GetState => {
+                        WindowControlResponse::State(window_state_snapshot(runtime_window))
+                    }
+                    WindowControlRequest::Show => {
+                        runtime_window.window.set_visible(true);
+                        runtime_window.visible.set(true);
+                        WindowControlResponse::State(window_state_snapshot(runtime_window))
+                    }
+                    WindowControlRequest::Hide => {
+                        runtime_window.window.set_visible(false);
+                        runtime_window.visible.set(false);
+                        WindowControlResponse::State(window_state_snapshot(runtime_window))
+                    }
+                    WindowControlRequest::Close => {
+                        should_close = true;
+                        WindowControlResponse::State(window_state_snapshot(runtime_window))
+                    }
+                    WindowControlRequest::Focus => {
+                        runtime_window.window.focus_window();
+                        runtime_window.focused.set(true);
+                        WindowControlResponse::State(window_state_snapshot(runtime_window))
+                    }
+                    WindowControlRequest::SetTitle { title } => {
+                        runtime_window.window.set_title(&title);
+                        *runtime_window.title.borrow_mut() = title;
+                        WindowControlResponse::State(window_state_snapshot(runtime_window))
+                    }
+                    WindowControlRequest::SetSize { width, height } => {
+                        let _ = runtime_window
+                            .window
+                            .request_inner_size(LogicalSize::new(width as f64, height as f64));
+                        WindowControlResponse::State(window_state_snapshot(runtime_window))
+                    }
+                }
+            };
+
+            if should_close {
+                let _ = self.close_window(window_id);
+            }
+
+            Ok(response)
         }
 
         fn queue_startup_events(&self, webview: &WebView) {
@@ -618,6 +906,16 @@ mod enabled {
                             );
                         }
                     }
+                    WakerEvent::WindowControl(control) => {
+                        let is_close = matches!(control.request, WindowControlRequest::Close);
+                        let result =
+                            state.apply_window_control(control.window_id, control.request.clone());
+                        let windows_empty = state.windows.borrow().is_empty();
+                        let _ = control.response.send(result);
+                        if is_close && windows_empty {
+                            event_loop.exit();
+                        }
+                    }
                     WakerEvent::SelfTestPassed(value) => {
                         if state.self_test_finished.replace(true) {
                             return;
@@ -646,30 +944,75 @@ mod enabled {
             window_id: winit::window::WindowId,
             event: WindowEvent,
         ) {
-            if let Lifecycle::Running(state) = &self.lifecycle {
-                state.servo.spin_event_loop();
+            let Lifecycle::Running(state) = &self.lifecycle else {
+                return;
+            };
+            let state = state.clone();
+            state.servo.spin_event_loop();
+            let mut spin_after_event = false;
 
-                match event {
-                    WindowEvent::CloseRequested => {
-                        if state.close_window(window_id) {
-                            event_loop.exit();
-                        }
+            match event {
+                WindowEvent::CloseRequested => {
+                    if state.close_window(window_id) {
+                        event_loop.exit();
                     }
-                    WindowEvent::RedrawRequested => {
-                        if let Err(error) = state.redraw_window(window_id) {
-                            state.dispatch_window_event(
-                                window_id,
-                                WINDOW_REDRAW_FAILED_EVENT,
-                                state.redraw_failed_payload(window_id, &error.to_string()),
-                            );
-                            self.fail(event_loop, error);
-                        }
-                    }
-                    WindowEvent::Resized(new_size) => {
-                        state.resize_window(window_id, new_size);
-                    }
-                    _ => {}
                 }
+                WindowEvent::RedrawRequested => {
+                    if let Err(error) = state.redraw_window(window_id) {
+                        state.dispatch_window_event(
+                            window_id,
+                            WINDOW_REDRAW_FAILED_EVENT,
+                            state.redraw_failed_payload(window_id, &error.to_string()),
+                        );
+                        self.fail(event_loop, error);
+                    }
+                }
+                WindowEvent::Resized(new_size) => {
+                    state.resize_window(window_id, new_size);
+                    spin_after_event = true;
+                }
+                WindowEvent::Focused(focused) => {
+                    state.focus_window_event(window_id, focused);
+                }
+                WindowEvent::Moved(position) => {
+                    state.move_window_event(window_id, position);
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    state.cursor_moved(window_id, position);
+                    spin_after_event = true;
+                }
+                WindowEvent::CursorLeft { .. } => {
+                    state.cursor_left(window_id);
+                    spin_after_event = true;
+                }
+                WindowEvent::MouseInput {
+                    state: button_state,
+                    button,
+                    ..
+                } => {
+                    state.mouse_input(window_id, button_state, button);
+                    spin_after_event = true;
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    state.mouse_wheel(window_id, delta);
+                    spin_after_event = true;
+                }
+                WindowEvent::Touch(touch) => {
+                    state.touch_event(window_id, touch);
+                    spin_after_event = true;
+                }
+                WindowEvent::ModifiersChanged(modifiers) => {
+                    state.set_modifiers(modifiers.state());
+                }
+                WindowEvent::KeyboardInput { event, .. } => {
+                    state.keyboard_input(window_id, event);
+                    spin_after_event = true;
+                }
+                _ => {}
+            }
+
+            if spin_after_event {
+                state.servo.spin_event_loop();
             }
         }
     }
@@ -693,6 +1036,8 @@ mod enabled {
             self_test_finished: std::cell::Cell::new(false),
             self_test_poll_in_flight: std::cell::Cell::new(false),
             self_test_started: std::cell::Cell::new(false),
+            modifiers_state: std::cell::Cell::new(ModifiersState::empty()),
+            window_registry: Arc::new(Mutex::new(BTreeMap::new())),
             windows: RefCell::new(Vec::new()),
         });
 
@@ -743,12 +1088,29 @@ mod enabled {
                 .delegate(app_state.clone())
                 .build();
 
+            if let Ok(mut registry) = app_state.window_registry.lock() {
+                registry.insert(binding.window_id.clone(), window.id());
+            }
+
+            binding
+                .window_control
+                .install_executor(Arc::new(WinitWindowControlExecutor {
+                    event_loop_proxy: app_state.event_loop_proxy.clone(),
+                    window_registry: app_state.window_registry.clone(),
+                    current_window_id: binding.window_id.clone(),
+                }));
+
             app_state.windows.borrow_mut().push(RuntimeWindow {
                 window_id: binding.window_id.clone(),
                 bridge_token: binding.bridge_token.clone(),
                 security_policy: binding.security_policy.clone(),
                 startup_events: binding.bridge_bindings.startup_events.clone(),
                 startup_events_dispatched: std::cell::Cell::new(false),
+                title: RefCell::new(window_config.title.clone()),
+                resizable: window_config.resizable,
+                visible: std::cell::Cell::new(window_config.visible),
+                focused: std::cell::Cell::new(false),
+                cursor_position: std::cell::Cell::new(DevicePoint::new(0.0, 0.0)),
                 window,
                 rendering_context,
                 webview,
@@ -784,6 +1146,9 @@ mod enabled {
             WINDOW_CLOSE_REQUESTED_EVENT,
             WINDOW_CLOSED_EVENT,
             WINDOW_RESIZED_EVENT,
+            WINDOW_FOCUSED_EVENT,
+            WINDOW_BLURRED_EVENT,
+            WINDOW_MOVED_EVENT,
             WINDOW_REDRAW_FAILED_EVENT,
         ] {
             if !events.iter().any(|existing| existing == event) {
@@ -795,6 +1160,19 @@ mod enabled {
 
     fn window_payload(runtime_window: &RuntimeWindow) -> String {
         window_payload_with_size(runtime_window, runtime_window.window.inner_size())
+    }
+
+    fn window_state_snapshot(runtime_window: &RuntimeWindow) -> WindowStateSnapshot {
+        let size = runtime_window.window.inner_size();
+        WindowStateSnapshot {
+            id: runtime_window.window_id.clone(),
+            title: runtime_window.title.borrow().clone(),
+            width: size.width,
+            height: size.height,
+            resizable: runtime_window.resizable,
+            visible: runtime_window.visible.get(),
+            focused: runtime_window.focused.get(),
+        }
     }
 
     fn window_payload_with_size(
@@ -813,6 +1191,13 @@ mod enabled {
     #[derive(Clone)]
     struct Waker(EventLoopProxy<WakerEvent>);
 
+    #[derive(Debug)]
+    struct WindowControlEvent {
+        window_id: Option<winit::window::WindowId>,
+        request: WindowControlRequest,
+        response: std::sync::mpsc::SyncSender<Result<WindowControlResponse, String>>,
+    }
+
     #[derive(Debug, Clone)]
     enum WakerEvent {
         Wake,
@@ -821,6 +1206,7 @@ mod enabled {
             event_name: String,
             payload_json: String,
         },
+        WindowControl(Arc<WindowControlEvent>),
         SelfTestPassed(String),
         SelfTestFailed(String),
     }
@@ -838,6 +1224,171 @@ mod enabled {
 
         fn wake(&self) {
             let _ = self.0.send_event(WakerEvent::Wake);
+        }
+    }
+
+    fn keyboard_event_from_winit(event: &KeyEvent, modifiers: ModifiersState) -> KeyboardEvent {
+        KeyboardEvent::new_without_event(
+            match event.state {
+                ElementState::Pressed => KeyState::Down,
+                ElementState::Released => KeyState::Up,
+            },
+            key_from_winit(event),
+            code_from_winit(event),
+            location_from_winit(event),
+            modifiers_from_winit(modifiers),
+            event.repeat,
+            false,
+        )
+    }
+
+    fn key_from_winit(event: &KeyEvent) -> Key {
+        match &event.logical_key {
+            WinitKey::Character(value) => Key::Character(value.to_string()),
+            WinitKey::Named(named) => match named {
+                WinitNamedKey::Space => Key::Character(" ".to_owned()),
+                WinitNamedKey::Backspace => Key::Named(NamedKey::Backspace),
+                WinitNamedKey::Tab => Key::Named(NamedKey::Tab),
+                WinitNamedKey::Enter => Key::Named(NamedKey::Enter),
+                WinitNamedKey::Escape => Key::Named(NamedKey::Escape),
+                WinitNamedKey::ArrowLeft => Key::Named(NamedKey::ArrowLeft),
+                WinitNamedKey::ArrowRight => Key::Named(NamedKey::ArrowRight),
+                WinitNamedKey::ArrowUp => Key::Named(NamedKey::ArrowUp),
+                WinitNamedKey::ArrowDown => Key::Named(NamedKey::ArrowDown),
+                WinitNamedKey::Delete => Key::Named(NamedKey::Delete),
+                WinitNamedKey::Home => Key::Named(NamedKey::Home),
+                WinitNamedKey::End => Key::Named(NamedKey::End),
+                _ => Key::Named(NamedKey::Unidentified),
+            },
+            WinitKey::Dead(_) | WinitKey::Unidentified(_) => Key::Named(NamedKey::Unidentified),
+        }
+    }
+
+    fn code_from_winit(event: &KeyEvent) -> Code {
+        match event.physical_key {
+            PhysicalKey::Code(code) => match code {
+                KeyCode::Backspace => Code::Backspace,
+                KeyCode::Tab => Code::Tab,
+                KeyCode::Enter => Code::Enter,
+                KeyCode::Escape => Code::Escape,
+                KeyCode::Space => Code::Space,
+                KeyCode::Delete => Code::Delete,
+                KeyCode::ArrowLeft => Code::ArrowLeft,
+                KeyCode::ArrowRight => Code::ArrowRight,
+                KeyCode::ArrowUp => Code::ArrowUp,
+                KeyCode::ArrowDown => Code::ArrowDown,
+                KeyCode::Home => Code::Home,
+                KeyCode::End => Code::End,
+                KeyCode::KeyA => Code::KeyA,
+                KeyCode::KeyB => Code::KeyB,
+                KeyCode::KeyC => Code::KeyC,
+                KeyCode::KeyD => Code::KeyD,
+                KeyCode::KeyE => Code::KeyE,
+                KeyCode::KeyF => Code::KeyF,
+                KeyCode::KeyG => Code::KeyG,
+                KeyCode::KeyH => Code::KeyH,
+                KeyCode::KeyI => Code::KeyI,
+                KeyCode::KeyJ => Code::KeyJ,
+                KeyCode::KeyK => Code::KeyK,
+                KeyCode::KeyL => Code::KeyL,
+                KeyCode::KeyM => Code::KeyM,
+                KeyCode::KeyN => Code::KeyN,
+                KeyCode::KeyO => Code::KeyO,
+                KeyCode::KeyP => Code::KeyP,
+                KeyCode::KeyQ => Code::KeyQ,
+                KeyCode::KeyR => Code::KeyR,
+                KeyCode::KeyS => Code::KeyS,
+                KeyCode::KeyT => Code::KeyT,
+                KeyCode::KeyU => Code::KeyU,
+                KeyCode::KeyV => Code::KeyV,
+                KeyCode::KeyW => Code::KeyW,
+                KeyCode::KeyX => Code::KeyX,
+                KeyCode::KeyY => Code::KeyY,
+                KeyCode::KeyZ => Code::KeyZ,
+                KeyCode::Digit0 => Code::Digit0,
+                KeyCode::Digit1 => Code::Digit1,
+                KeyCode::Digit2 => Code::Digit2,
+                KeyCode::Digit3 => Code::Digit3,
+                KeyCode::Digit4 => Code::Digit4,
+                KeyCode::Digit5 => Code::Digit5,
+                KeyCode::Digit6 => Code::Digit6,
+                KeyCode::Digit7 => Code::Digit7,
+                KeyCode::Digit8 => Code::Digit8,
+                KeyCode::Digit9 => Code::Digit9,
+                _ => Code::Unidentified,
+            },
+            PhysicalKey::Unidentified(_) => Code::Unidentified,
+        }
+    }
+
+    fn location_from_winit(event: &KeyEvent) -> Location {
+        match event.location {
+            WinitKeyLocation::Standard => Location::Standard,
+            WinitKeyLocation::Left => Location::Left,
+            WinitKeyLocation::Right => Location::Right,
+            WinitKeyLocation::Numpad => Location::Numpad,
+        }
+    }
+
+    fn modifiers_from_winit(modifiers: ModifiersState) -> Modifiers {
+        let mut result = Modifiers::empty();
+        if modifiers.alt_key() {
+            result.insert(Modifiers::ALT);
+        }
+        if modifiers.control_key() {
+            result.insert(Modifiers::CONTROL);
+        }
+        if modifiers.shift_key() {
+            result.insert(Modifiers::SHIFT);
+        }
+        if modifiers.super_key() {
+            result.insert(Modifiers::META);
+        }
+        result
+    }
+
+    #[derive(Clone)]
+    struct WinitWindowControlExecutor {
+        event_loop_proxy: EventLoopProxy<WakerEvent>,
+        window_registry: Arc<Mutex<BTreeMap<String, winit::window::WindowId>>>,
+        current_window_id: String,
+    }
+
+    impl axion_bridge::WindowControlExecutor for WinitWindowControlExecutor {
+        fn execute(
+            &self,
+            target_window_id: Option<&str>,
+            request: WindowControlRequest,
+        ) -> Result<WindowControlResponse, String> {
+            let window_id = match &request {
+                WindowControlRequest::ListStates => None,
+                _ => {
+                    let target_window_id =
+                        target_window_id.unwrap_or(self.current_window_id.as_str());
+                    let registry = self
+                        .window_registry
+                        .lock()
+                        .map_err(|_| "window control registry lock was poisoned".to_owned())?;
+                    Some(
+                        *registry
+                            .get(target_window_id)
+                            .ok_or_else(|| format!("window '{target_window_id}' is unavailable"))?,
+                    )
+                }
+            };
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            self.event_loop_proxy
+                .send_event(WakerEvent::WindowControl(Arc::new(WindowControlEvent {
+                    window_id,
+                    request,
+                    response: sender,
+                })))
+                .map_err(|_| {
+                    "failed to send window control request to the event loop".to_owned()
+                })?;
+            receiver
+                .recv()
+                .map_err(|_| "window control response channel was closed".to_owned())?
         }
     }
     #[derive(Clone)]

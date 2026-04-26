@@ -9,6 +9,21 @@ use crate::error::AxionCliError;
 pub fn run(args: SelfTestArgs) -> Result<(), AxionCliError> {
     let report = run_self_test(&args)?;
 
+    if let Some(path) = &args.report_path {
+        write_report_json(path, &report)?;
+    }
+
+    if args.json {
+        println!("{}", report.to_diagnostics_json());
+        return Ok(());
+    }
+
+    print_human_report(&report);
+
+    Ok(())
+}
+
+fn print_human_report(report: &SelfTestReport) {
     println!("Axion self-test");
     println!("manifest: {}", report.manifest_path.display());
     println!("app: {}", report.app_name);
@@ -77,12 +92,11 @@ pub fn run(args: SelfTestArgs) -> Result<(), AxionCliError> {
         println!("artifacts: kept");
     }
     println!("result: ok");
-
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SelfTestReport {
+    exported_at_unix_seconds: u64,
     manifest_path: PathBuf,
     app_name: String,
     identifier: Option<String>,
@@ -214,6 +228,7 @@ fn run_self_test(args: &SelfTestArgs) -> Result<SelfTestReport, AxionCliError> {
     };
 
     Ok(SelfTestReport {
+        exported_at_unix_seconds: current_unix_timestamp_secs(),
         manifest_path: args.manifest_path.clone(),
         app_name: launch_config.app_name.clone(),
         identifier: launch_config.identifier.clone(),
@@ -233,6 +248,78 @@ fn run_self_test(args: &SelfTestArgs) -> Result<SelfTestReport, AxionCliError> {
         asset_manifest_path,
         artifacts_removed,
     })
+}
+
+impl SelfTestReport {
+    fn to_diagnostics_json(&self) -> String {
+        let windows = self
+            .windows
+            .iter()
+            .map(SelfTestWindowReport::to_diagnostics_json)
+            .collect::<Vec<_>>()
+            .join(",");
+
+        format!(
+            "{{\"schema\":\"axion.diagnostics-report.v1\",\"source\":\"axion-cli self-test\",\"exported_at_unix_seconds\":{},\"manifest_path\":{},\"app_name\":{},\"identifier\":{},\"version\":{},\"description\":{},\"authors\":{},\"homepage\":{},\"mode\":\"production\",\"window_count\":{},\"windows\":[{}],\"frontend_dist\":{},\"entry\":{},\"configured_dialog_backend\":{},\"dialog_backend\":{},\"icon\":{},\"host_events\":{},\"staged_app_dir\":{},\"asset_manifest_path\":{},\"artifacts_removed\":{},\"result\":\"ok\"}}",
+            self.exported_at_unix_seconds,
+            json_path(&self.manifest_path),
+            json_string_literal(&self.app_name),
+            optional_json_string_literal(self.identifier.as_deref()),
+            optional_json_string_literal(self.version.as_deref()),
+            optional_json_string_literal(self.description.as_deref()),
+            json_string_array(&self.authors),
+            optional_json_string_literal(self.homepage.as_deref()),
+            self.window_count,
+            windows,
+            json_path(&self.frontend_dist),
+            json_path(&self.entry),
+            json_string_literal(&self.configured_dialog_backend),
+            json_string_literal(&self.dialog_backend),
+            optional_json_path(self.icon.as_deref()),
+            json_string_array(&self.host_events),
+            json_path(&self.staged_app_dir),
+            json_path(&self.asset_manifest_path),
+            self.artifacts_removed,
+        )
+    }
+}
+
+impl SelfTestWindowReport {
+    fn to_diagnostics_json(&self) -> String {
+        format!(
+            "{{\"id\":{},\"title\":{},\"bridge_enabled\":{},\"configured_commands\":{},\"configured_events\":{},\"configured_protocols\":{},\"runtime_command_count\":{},\"runtime_event_count\":{},\"host_events\":{},\"trusted_origins\":{},\"allowed_navigation_origins\":{},\"allow_remote_navigation\":{}}}",
+            json_string_literal(&self.id),
+            json_string_literal(&self.title),
+            self.bridge_enabled,
+            json_string_array(&self.configured_commands),
+            json_string_array(&self.configured_events),
+            json_string_array(&self.configured_protocols),
+            self.runtime_command_count,
+            self.runtime_event_count,
+            json_string_array(&self.host_events),
+            json_string_array(&self.trusted_origins),
+            json_string_array(&self.allowed_navigation_origins),
+            self.allow_remote_navigation,
+        )
+    }
+}
+
+fn write_report_json(path: &Path, report: &SelfTestReport) -> Result<(), AxionCliError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::write(path, report.to_diagnostics_json())?;
+    Ok(())
+}
+
+fn current_unix_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time must be after unix epoch")
+        .as_secs()
 }
 
 fn default_output_dir(manifest_path: &Path, app_name: &str) -> PathBuf {
@@ -261,13 +348,56 @@ fn list_or_none(values: &[String]) -> String {
     }
 }
 
+fn json_path(path: &Path) -> String {
+    json_string_literal(&path.display().to_string())
+}
+
+fn optional_json_path(path: Option<&Path>) -> String {
+    path.map(json_path).unwrap_or_else(|| "null".to_owned())
+}
+
+fn optional_json_string_literal(value: Option<&str>) -> String {
+    value
+        .map(json_string_literal)
+        .unwrap_or_else(|| "null".to_owned())
+}
+
+fn json_string_array(values: &[String]) -> String {
+    let entries = values
+        .iter()
+        .map(|value| json_string_literal(value))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{entries}]")
+}
+
+fn json_string_literal(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len() + 2);
+    encoded.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => encoded.push_str("\\\""),
+            '\\' => encoded.push_str("\\\\"),
+            '\n' => encoded.push_str("\\n"),
+            '\r' => encoded.push_str("\\r"),
+            '\t' => encoded.push_str("\\t"),
+            character if character.is_control() => {
+                encoded.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => encoded.push(character),
+        }
+    }
+    encoded.push('"');
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{default_output_dir, run_self_test};
+    use super::{default_output_dir, json_string_literal, run_self_test, write_report_json};
     use crate::cli::SelfTestArgs;
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -354,7 +484,7 @@ events = ["app.log"]
 protocols = ["axion"]
 
 [capabilities.settings]
-commands = ["window.info"]
+commands = ["window.info", "window.focus", "window.set_title"]
 events = ["app.log"]
 protocols = ["axion"]
 allowed_navigation_origins = ["https://docs.example"]
@@ -383,6 +513,8 @@ allowed_navigation_origins = ["https://docs.example"]
         let report = run_self_test(&SelfTestArgs {
             manifest_path: manifest,
             output_dir: Some(output_dir.clone()),
+            report_path: None,
+            json: false,
             keep_artifacts: false,
         })
         .expect("self-test should pass");
@@ -439,6 +571,8 @@ allowed_navigation_origins = ["https://docs.example"]
         let report = run_self_test(&SelfTestArgs {
             manifest_path: manifest,
             output_dir: Some(output_dir.clone()),
+            report_path: None,
+            json: false,
             keep_artifacts: true,
         })
         .expect("self-test should pass");
@@ -458,6 +592,8 @@ allowed_navigation_origins = ["https://docs.example"]
         let report = run_self_test(&SelfTestArgs {
             manifest_path: manifest,
             output_dir: Some(output_dir.clone()),
+            report_path: None,
+            json: false,
             keep_artifacts: false,
         })
         .expect("multi-window self-test should pass");
@@ -474,9 +610,13 @@ allowed_navigation_origins = ["https://docs.example"]
         assert_eq!(report.windows[1].id, "settings");
         assert_eq!(
             report.windows[1].configured_commands,
-            vec!["window.info".to_owned()]
+            vec![
+                "window.focus".to_owned(),
+                "window.info".to_owned(),
+                "window.set_title".to_owned()
+            ]
         );
-        assert_eq!(report.windows[1].runtime_command_count, 1);
+        assert_eq!(report.windows[1].runtime_command_count, 3);
         assert_eq!(
             report.windows[1].allowed_navigation_origins,
             vec!["https://docs.example".to_owned()]
@@ -487,6 +627,60 @@ allowed_navigation_origins = ["https://docs.example"]
                 .host_events
                 .contains(&"window.close_requested".to_owned())
         );
+        assert!(report.host_events.contains(&"window.focused".to_owned()));
         assert!(report.artifacts_removed);
+    }
+
+    #[test]
+    fn self_test_report_serializes_diagnostics_json() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        let manifest = write_project(&root);
+        let output_dir = root.join("json-output");
+
+        let report = run_self_test(&SelfTestArgs {
+            manifest_path: manifest,
+            output_dir: Some(output_dir),
+            report_path: None,
+            json: false,
+            keep_artifacts: false,
+        })
+        .expect("self-test should pass");
+        let json = report.to_diagnostics_json();
+
+        assert!(json.contains("\"schema\":\"axion.diagnostics-report.v1\""));
+        assert!(json.contains("\"source\":\"axion-cli self-test\""));
+        assert!(json.contains("\"app_name\":\"self-test-app\""));
+        assert!(json.contains("\"window_count\":1"));
+        assert!(json.contains("\"configured_commands\":[\"app.ping\"]"));
+        assert!(json.contains("\"result\":\"ok\""));
+    }
+
+    #[test]
+    fn json_string_literal_escapes_control_characters() {
+        assert_eq!(json_string_literal("a\"b\\c\n\t"), "\"a\\\"b\\\\c\\n\\t\"");
+    }
+
+    #[test]
+    fn self_test_report_writes_json_file() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        let manifest = write_project(&root);
+        let output_dir = root.join("write-report-output");
+        let report_path = root.join("reports").join("self-test.json");
+
+        let report = run_self_test(&SelfTestArgs {
+            manifest_path: manifest,
+            output_dir: Some(output_dir),
+            report_path: None,
+            json: false,
+            keep_artifacts: false,
+        })
+        .expect("self-test should pass");
+
+        write_report_json(&report_path, &report).expect("report json should be written");
+        let contents = fs::read_to_string(report_path).expect("report json should be readable");
+        assert!(contents.contains("\"schema\":\"axion.diagnostics-report.v1\""));
+        assert!(contents.contains("\"source\":\"axion-cli self-test\""));
     }
 }
