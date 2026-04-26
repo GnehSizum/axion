@@ -2,12 +2,12 @@
 
 Axion is a Rust desktop application framework built on a vendored Servo engine. It provides an explicit manifest, capability-gated JavaScript bridge, packaged app assets, runtime diagnostics, and a `winit` desktop backend.
 
-Axion is currently at the **v0.1.9.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
+Axion is currently at the **v0.1.10.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
 
 ## What Works Today
 
 - Generate a guided Axion application with `axion-cli new --template vanilla`.
-- Inspect development-server readiness, run external frontend commands, watch frontend files, request reload diagnostics, and use packaged fallback through `axion-cli dev`.
+- Inspect development-server readiness, run external frontend commands, watch frontend files with debounce/ignore rules, reload live windows when launched, and use packaged fallback through `axion-cli dev`.
 - Reuse bridge-provided text-input compatibility helpers in generated apps and custom frontends.
 - Load and validate `axion.toml` manifests.
 - Install crash reporting in generated and example applications.
@@ -15,11 +15,11 @@ Axion is currently at the **v0.1.9.0 developer preview**. It is suitable for fra
 - Compile and launch a Servo-backed desktop window behind `servo-runtime`.
 - Invoke built-in bridge commands from frontend JavaScript.
 - Use capability-gated native commands for app metadata, app-data text files, and preview file dialogs with explicit backend diagnostics.
-- Use capability-gated window control commands such as `window.list`, `window.set_title`, and `window.set_size`, including targeted multi-window control.
+- Use capability-gated window control commands such as `window.list`, `window.reload`, `window.set_title`, and `window.set_size`, including targeted multi-window control.
 - Stage and verify bundle scaffolds with app icon, executable, metadata, and fingerprinted bundle manifest output.
 - Inspect per-window capabilities and targeted window control with the `multi-window` example.
 - Try controlled filesystem and dialog capabilities with the `file-access-demo` example.
-- Use the `bridge-diagnostics-demo` example to inspect bridge snapshots, host events, input compatibility, frontend self-checks, a visual smoke checklist, and export or reload diagnostics reports.
+- Use the `bridge-diagnostics-demo` example to inspect bridge snapshots, host lifecycle events, input compatibility, frontend self-checks, a visual smoke checklist, and export or reload diagnostics reports.
 - Run non-GUI CI checks for formatting, workspace tests, and example self-tests.
 - Run Servo-backed GUI smoke checks locally, with optional GitHub Actions artifact capture through `workflow_dispatch`.
 
@@ -33,11 +33,13 @@ cargo run -p multi-window -- --plan
 cargo run -p file-access-demo -- --plan
 cargo run -p bridge-diagnostics-demo -- --plan
 cargo run -p axion-cli -- dev --manifest-path examples/hello-axion/axion.toml
-cargo run -p axion-cli -- dev --manifest-path examples/hello-axion/axion.toml --fallback-packaged --watch --reload --open-devtools
+cargo run -p axion-cli --features servo-runtime -- dev --manifest-path examples/hello-axion/axion.toml --launch --fallback-packaged --watch --reload
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/file-access-demo/axion.toml
 AXION_SELFTEST_BRIDGE=1 cargo run -p hello-axion --features servo-runtime
 ```
+
+While the `axion-cli dev --launch --watch --reload` command is running, edit `examples/hello-axion/frontend/app.js` or `style.css`. The CLI should print `reload_requested` followed by `reload_applied: window=main`.
 
 Generate a new application:
 
@@ -110,4 +112,4 @@ Servo warnings from the vendored `servo/` subtree are not Axion release blockers
 
 ## Versioning
 
-Axion public releases use four-part tags such as `v0.1.9.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.9`. See `docs/versioning.md`.
+Axion public releases use four-part tags such as `v0.1.10.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.10`. See `docs/versioning.md`.

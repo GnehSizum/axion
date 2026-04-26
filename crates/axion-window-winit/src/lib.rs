@@ -755,6 +755,15 @@ mod enabled {
                         runtime_window.focused.set(true);
                         WindowControlResponse::State(window_state_snapshot(runtime_window))
                     }
+                    WindowControlRequest::Reload => {
+                        runtime_window.startup_events_dispatched.set(false);
+                        runtime_window.webview.evaluate_javascript(
+                            "window.location.reload(); 'axion-reload-requested';",
+                            |_| {},
+                        );
+                        runtime_window.window.request_redraw();
+                        WindowControlResponse::State(window_state_snapshot(runtime_window))
+                    }
                     WindowControlRequest::SetTitle { title } => {
                         runtime_window.window.set_title(&title);
                         *runtime_window.title.borrow_mut() = title;

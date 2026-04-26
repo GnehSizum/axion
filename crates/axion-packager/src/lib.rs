@@ -212,17 +212,17 @@ pub fn stage_bundle_from_web_assets_with_metadata(
         copied_icon_path.as_deref(),
     )?;
     let entry_path = resources_app_dir.join(validation.relative_entry);
-    let bundle_manifest_path = write_bundle_manifest(
-        &bundle_dir,
-        bundle_plan.target,
+    let bundle_manifest_path = write_bundle_manifest(BundleManifestInput {
+        bundle_dir: &bundle_dir,
+        target: bundle_plan.target,
         metadata,
-        &resources_app_dir,
-        &entry_path,
-        &asset_manifest_path,
-        &metadata_path,
-        copied_executable_path.as_deref(),
-        copied_icon_path.as_deref(),
-    )?;
+        resources_app_dir: &resources_app_dir,
+        entry_path: &entry_path,
+        asset_manifest_path: &asset_manifest_path,
+        metadata_path: &metadata_path,
+        executable_path: copied_executable_path.as_deref(),
+        icon_path: copied_icon_path.as_deref(),
+    })?;
 
     Ok(BundleArtifact {
         target: bundle_plan.target,
@@ -634,19 +634,21 @@ fn write_directory_bundle_metadata(
     Ok(metadata_path)
 }
 
-fn write_bundle_manifest(
-    bundle_dir: &Path,
+struct BundleManifestInput<'a> {
+    bundle_dir: &'a Path,
     target: BundleTarget,
-    metadata: &BundleMetadata,
-    resources_app_dir: &Path,
-    entry_path: &Path,
-    asset_manifest_path: &Path,
-    metadata_path: &Path,
-    executable_path: Option<&Path>,
-    icon_path: Option<&Path>,
-) -> Result<PathBuf, PackagerError> {
-    let manifest_path = bundle_dir.join(AXION_BUNDLE_MANIFEST_FILE_NAME);
-    let files = collect_bundle_manifest_files(bundle_dir)?
+    metadata: &'a BundleMetadata,
+    resources_app_dir: &'a Path,
+    entry_path: &'a Path,
+    asset_manifest_path: &'a Path,
+    metadata_path: &'a Path,
+    executable_path: Option<&'a Path>,
+    icon_path: Option<&'a Path>,
+}
+
+fn write_bundle_manifest(input: BundleManifestInput<'_>) -> Result<PathBuf, PackagerError> {
+    let manifest_path = input.bundle_dir.join(AXION_BUNDLE_MANIFEST_FILE_NAME);
+    let files = collect_bundle_manifest_files(input.bundle_dir)?
         .into_iter()
         .map(|file| {
             format!(
@@ -660,22 +662,30 @@ fn write_bundle_manifest(
         .join(",\n");
     let source = format!(
         "{{\n  \"version\": 1,\n  \"target\": {},\n  \"app\": {},\n  \"identifier\": {},\n  \"app_version\": {},\n  \"resources\": {},\n  \"entry\": {},\n  \"asset_manifest\": {},\n  \"metadata\": {},\n  \"executable\": {},\n  \"icon\": {},\n  \"files\": [\n{}\n  ]\n}}\n",
-        json_string_literal(bundle_target_name(target)),
-        json_string_literal(&metadata.app_name),
-        json_optional_string_literal(metadata.identifier.as_deref()),
-        json_optional_string_literal(metadata.version.as_deref()),
-        json_string_literal(&bundle_relative_path(bundle_dir, resources_app_dir)),
-        json_string_literal(&bundle_relative_path(bundle_dir, entry_path)),
-        json_string_literal(&bundle_relative_path(bundle_dir, asset_manifest_path)),
-        json_string_literal(&bundle_relative_path(bundle_dir, metadata_path)),
+        json_string_literal(bundle_target_name(input.target)),
+        json_string_literal(&input.metadata.app_name),
+        json_optional_string_literal(input.metadata.identifier.as_deref()),
+        json_optional_string_literal(input.metadata.version.as_deref()),
+        json_string_literal(&bundle_relative_path(
+            input.bundle_dir,
+            input.resources_app_dir
+        )),
+        json_string_literal(&bundle_relative_path(input.bundle_dir, input.entry_path)),
+        json_string_literal(&bundle_relative_path(
+            input.bundle_dir,
+            input.asset_manifest_path
+        )),
+        json_string_literal(&bundle_relative_path(input.bundle_dir, input.metadata_path)),
         json_optional_string_literal(
-            executable_path
-                .map(|path| bundle_relative_path(bundle_dir, path))
+            input
+                .executable_path
+                .map(|path| bundle_relative_path(input.bundle_dir, path))
                 .as_deref(),
         ),
         json_optional_string_literal(
-            icon_path
-                .map(|path| bundle_relative_path(bundle_dir, path))
+            input
+                .icon_path
+                .map(|path| bundle_relative_path(input.bundle_dir, path))
                 .as_deref(),
         ),
         files

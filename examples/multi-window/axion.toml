@@ -33,14 +33,14 @@ icon = "icons/app.icns"
 backend = "headless"
 
 [capabilities.main]
-commands = ["app.ping", "app.info", "app.echo", "window.list", "window.info", "window.focus", "window.set_title"]
+commands = ["app.ping", "app.info", "app.echo", "window.list", "window.info", "window.reload", "window.focus", "window.set_title"]
 events = ["app.log"]
 protocols = ["axion"]
 allowed_navigation_origins = []
 allow_remote_navigation = false
 
 [capabilities.settings]
-commands = ["window.info", "window.focus", "window.set_title"]
+commands = ["window.info", "window.reload", "window.focus", "window.set_title"]
 events = ["app.log"]
 protocols = ["axion"]
 allowed_navigation_origins = ["https://docs.example"]

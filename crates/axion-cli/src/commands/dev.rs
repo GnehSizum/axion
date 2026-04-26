@@ -17,6 +17,7 @@ use crate::error::AxionCliError;
 const DEFAULT_DEV_SERVER_TIMEOUT_MS: u64 = 15_000;
 const DEV_SERVER_POLL_INTERVAL_MS: u64 = 100;
 const WATCH_POLL_INTERVAL_MS: u64 = 500;
+const WATCH_DEBOUNCE_MS: u64 = 250;
 
 pub fn run(args: DevArgs) -> Result<(), AxionCliError> {
     let config = axion_manifest::load_app_config_from_path(&args.manifest_path)?;
@@ -82,8 +83,10 @@ pub fn run(args: DevArgs) -> Result<(), AxionCliError> {
             println!("{line}");
         }
 
-        let watch_guard = DevWatchGuard::spawn(&args, app.config())?;
-        axion_runtime::run(app, launch_mode)?;
+        let launch_request = axion_runtime::launch_request(&app, launch_mode)?;
+        let reload_targets = reload_targets_from_launch_request(&launch_request);
+        let watch_guard = DevWatchGuard::spawn(&args, app.config(), reload_targets)?;
+        axion_runtime::run_launch_request(launch_request)?;
         drop(watch_guard);
         drop(frontend_process);
         return Ok(());
@@ -538,8 +541,33 @@ struct DevWatchGuard {
     handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone)]
+struct ReloadTarget {
+    window_id: String,
+    window_control: axion_runtime::WindowControlHandle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReloadOutcome {
+    Applied {
+        window_id: String,
+    },
+    Deferred {
+        window_id: Option<String>,
+        reason: String,
+    },
+    RestartRequired {
+        window_id: String,
+        reason: String,
+    },
+}
+
 impl DevWatchGuard {
-    fn spawn(args: &DevArgs, config: &AppConfig) -> Result<Option<Self>, AxionCliError> {
+    fn spawn(
+        args: &DevArgs,
+        config: &AppConfig,
+        reload_targets: Vec<ReloadTarget>,
+    ) -> Result<Option<Self>, AxionCliError> {
         if !args.watch {
             return Ok(None);
         }
@@ -548,9 +576,10 @@ impl DevWatchGuard {
         let mut snapshot = scan_watch_root(&root)?;
         let reload = args.reload;
         println!(
-            "watch: watching {} (poll={}ms, files={})",
+            "watch: watching {} (poll={}ms, debounce={}ms, files={})",
             root.display(),
             WATCH_POLL_INTERVAL_MS,
+            WATCH_DEBOUNCE_MS,
             snapshot.files.len()
         );
         println!("{}", reload_mode_line(reload));
@@ -566,13 +595,22 @@ impl DevWatchGuard {
 
                 match scan_watch_root(&root) {
                     Ok(next_snapshot) => {
-                        let changes = watch_changes(&snapshot, &next_snapshot);
+                        let (changes, debounced_snapshot) =
+                            debounce_watch_changes(&root, &snapshot, next_snapshot);
                         if !changes.is_empty() {
-                            for line in watch_change_lines(&changes, reload) {
+                            let reload_outcomes = if reload {
+                                reload_targets
+                                    .iter()
+                                    .map(apply_reload_target)
+                                    .collect::<Vec<_>>()
+                            } else {
+                                Vec::new()
+                            };
+                            for line in watch_change_lines(&changes, reload, &reload_outcomes) {
                                 println!("{line}");
                             }
                         }
-                        snapshot = next_snapshot;
+                        snapshot = debounced_snapshot;
                     }
                     Err(error) => {
                         println!("watch_error: {error}");
@@ -597,11 +635,36 @@ impl Drop for DevWatchGuard {
     }
 }
 
+fn reload_targets_from_launch_request(
+    launch_request: &axion_runtime::RuntimeLaunchRequest,
+) -> Vec<ReloadTarget> {
+    launch_request
+        .window_bindings
+        .iter()
+        .map(|binding| ReloadTarget {
+            window_id: binding.window_id.clone(),
+            window_control: binding.window_control.clone(),
+        })
+        .collect()
+}
+
+fn apply_reload_target(target: &ReloadTarget) -> ReloadOutcome {
+    match axion_runtime::reload_window(&target.window_control, Some(target.window_id.as_str())) {
+        Ok(()) => ReloadOutcome::Applied {
+            window_id: target.window_id.clone(),
+        },
+        Err(error) => ReloadOutcome::RestartRequired {
+            window_id: target.window_id.clone(),
+            reason: error,
+        },
+    }
+}
+
 fn run_foreground_watch_if_requested(
     args: &DevArgs,
     config: &AppConfig,
 ) -> Result<(), AxionCliError> {
-    let Some(_watch_guard) = DevWatchGuard::spawn(args, config)? else {
+    let Some(_watch_guard) = DevWatchGuard::spawn(args, config, Vec::new())? else {
         return Ok(());
     };
 
@@ -627,6 +690,10 @@ fn scan_watch_dir(
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path)?;
 
+        if should_ignore_watch_entry(&path, metadata.is_dir()) {
+            continue;
+        }
+
         if metadata.is_dir() {
             scan_watch_dir(root, &path, files)?;
         } else if metadata.is_file() {
@@ -642,6 +709,28 @@ fn scan_watch_dir(
     }
 
     Ok(())
+}
+
+fn should_ignore_watch_entry(path: &Path, is_dir: bool) -> bool {
+    let Some(file_name) = path.file_name().and_then(|file_name| file_name.to_str()) else {
+        return false;
+    };
+
+    if is_dir {
+        return matches!(
+            file_name,
+            ".git" | ".next" | ".turbo" | ".vite" | "node_modules" | "target"
+        );
+    }
+
+    file_name == ".DS_Store"
+        || file_name.starts_with(".#")
+        || file_name.ends_with('~')
+        || file_name.ends_with(".log")
+        || file_name.ends_with(".swp")
+        || file_name.ends_with(".swo")
+        || file_name.ends_with(".tmp")
+        || file_name.ends_with(".temp")
 }
 
 fn modified_millis(modified: Option<SystemTime>) -> u128 {
@@ -680,7 +769,30 @@ fn watch_changes(previous: &WatchSnapshot, next: &WatchSnapshot) -> Vec<WatchCha
     changes
 }
 
-fn watch_change_lines(changes: &[WatchChange], reload: bool) -> Vec<String> {
+fn debounce_watch_changes(
+    root: &Path,
+    previous: &WatchSnapshot,
+    next: WatchSnapshot,
+) -> (Vec<WatchChange>, WatchSnapshot) {
+    if watch_changes(previous, &next).is_empty() {
+        return (Vec::new(), next);
+    }
+
+    thread::sleep(Duration::from_millis(WATCH_DEBOUNCE_MS));
+    match scan_watch_root(root) {
+        Ok(debounced_snapshot) => (
+            watch_changes(previous, &debounced_snapshot),
+            debounced_snapshot,
+        ),
+        Err(_) => (watch_changes(previous, &next), next),
+    }
+}
+
+fn watch_change_lines(
+    changes: &[WatchChange],
+    reload: bool,
+    reload_outcomes: &[ReloadOutcome],
+) -> Vec<String> {
     let mut lines = Vec::new();
     for change in changes {
         lines.push(format!(
@@ -690,11 +802,34 @@ fn watch_change_lines(changes: &[WatchChange], reload: bool) -> Vec<String> {
         ));
     }
     if reload {
-        lines.push(
-            "reload_requested: frontend assets changed; current Servo backend reports the request but does not hot-reload yet.".to_owned(),
-        );
+        lines.push("reload_requested: frontend assets changed.".to_owned());
+        if reload_outcomes.is_empty() {
+            lines.push(reload_outcome_line(&ReloadOutcome::Deferred {
+                window_id: None,
+                reason: "no live window control targets are available; launch the app with --launch to apply reloads".to_owned(),
+            }));
+        } else {
+            for outcome in reload_outcomes {
+                lines.push(reload_outcome_line(outcome));
+            }
+        }
     }
     lines
+}
+
+fn reload_outcome_line(outcome: &ReloadOutcome) -> String {
+    match outcome {
+        ReloadOutcome::Applied { window_id } => {
+            format!("reload_applied: window={window_id}")
+        }
+        ReloadOutcome::Deferred { window_id, reason } => match window_id {
+            Some(window_id) => format!("reload_deferred: window={window_id}; reason={reason}"),
+            None => format!("reload_deferred: {reason}."),
+        },
+        ReloadOutcome::RestartRequired { window_id, reason } => {
+            format!("restart_required: window={window_id}; reason={reason}")
+        }
+    }
 }
 
 fn watch_change_kind_label(kind: &WatchChangeKind) -> &'static str {
@@ -707,9 +842,9 @@ fn watch_change_kind_label(kind: &WatchChangeKind) -> &'static str {
 
 fn reload_mode_line(reload: bool) -> String {
     if reload {
-        "reload: enabled for watch diagnostics; hot reload is reported as reload_requested until the Servo backend exposes a safe reload hook.".to_owned()
+        "reload: enabled; file changes emit reload_requested and attempt window reload when --launch is active.".to_owned()
     } else {
-        "reload: disabled; use --reload to request reload diagnostics when watched files change."
+        "reload: disabled; use --reload to request live window reloads when watched files change."
             .to_owned()
     }
 }
@@ -870,8 +1005,7 @@ fn dev_option_lines(args: &DevArgs) -> Vec<String> {
     if args.reload {
         if args.watch {
             lines.push(
-                "reload: enabled for watch diagnostics; backend hot reload is still reported-only."
-                    .to_owned(),
+                "reload: enabled; window reload is attempted when --launch is active.".to_owned(),
             );
         } else {
             lines.push(
@@ -923,10 +1057,11 @@ mod tests {
 
     use super::{
         DevServerStatus, DevServerWaitResult, FrontendCommandPlan, PackagedFallbackStatus,
-        dev_diagnostic_lines, dev_option_lines, dev_server_status, dev_server_status_with,
-        frontend_command_plan, frontend_diagnostic_lines, frontend_wait_error,
-        launch_summary_lines, packaged_fallback_status, reload_mode_line, scan_watch_root,
-        select_launch_mode, select_launch_mode_with_packaged_fallback, watch_change_lines,
+        ReloadOutcome, dev_diagnostic_lines, dev_option_lines, dev_server_status,
+        dev_server_status_with, frontend_command_plan, frontend_diagnostic_lines,
+        frontend_wait_error, launch_summary_lines, packaged_fallback_status, reload_mode_line,
+        reload_targets_from_launch_request, scan_watch_root, select_launch_mode,
+        select_launch_mode_with_packaged_fallback, should_ignore_watch_entry, watch_change_lines,
         watch_changes,
     };
     use crate::cli::DevArgs;
@@ -1190,7 +1325,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.starts_with("reload: enabled for watch diagnostics"))
+                .any(|line| line.starts_with("reload: enabled; window reload is attempted"))
         );
         assert!(
             lines
@@ -1226,7 +1361,7 @@ mod tests {
         fs::remove_file(root.join("nested").join("app.js")).unwrap();
         let second = scan_watch_root(&root).unwrap();
         let changes = watch_changes(&first, &second);
-        let lines = watch_change_lines(&changes, true);
+        let lines = watch_change_lines(&changes, true, &[]);
 
         assert!(
             lines
@@ -1248,11 +1383,117 @@ mod tests {
                 .iter()
                 .any(|line| line.starts_with("reload_requested: frontend assets changed"))
         );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("reload_deferred: no live window control targets"))
+        );
     }
 
     #[test]
-    fn reload_mode_lines_describe_report_only_backend() {
-        assert!(reload_mode_line(true).contains("hot reload is reported"));
+    fn watch_change_lines_report_applied_and_deferred_reload_outcomes() {
+        let changes = vec![super::WatchChange {
+            path: "app.js".into(),
+            kind: super::WatchChangeKind::Modified,
+        }];
+        let lines = watch_change_lines(
+            &changes,
+            true,
+            &[
+                ReloadOutcome::Applied {
+                    window_id: "main".to_owned(),
+                },
+                ReloadOutcome::Deferred {
+                    window_id: Some("settings".to_owned()),
+                    reason: "no live target".to_owned(),
+                },
+                ReloadOutcome::RestartRequired {
+                    window_id: "tools".to_owned(),
+                    reason: "window control backend is unavailable".to_owned(),
+                },
+            ],
+        );
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "reload_applied: window=main")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| { line == "reload_deferred: window=settings; reason=no live target" })
+        );
+        assert!(lines.iter().any(|line| {
+            line == "restart_required: window=tools; reason=window control backend is unavailable"
+        }));
+    }
+
+    #[test]
+    fn reload_targets_cover_each_launch_window() {
+        let app = app_with_frontend(None, 2);
+        let launch_request = axion_runtime::launch_request(&app, RunMode::Production)
+            .expect("production launch request should build");
+        let reload_targets = reload_targets_from_launch_request(&launch_request);
+        let window_ids = reload_targets
+            .iter()
+            .map(|target| target.window_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(window_ids, vec!["main", "settings"]);
+    }
+
+    #[test]
+    fn watch_snapshot_ignores_common_temporary_files_and_dirs() {
+        let root = temp_dir();
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::create_dir_all(root.join(".vite")).unwrap();
+        fs::write(root.join("index.html"), "ok").unwrap();
+        fs::write(root.join(".DS_Store"), "ignored").unwrap();
+        fs::write(root.join("debug.log"), "ignored").unwrap();
+        fs::write(root.join("index.html.swp"), "ignored").unwrap();
+        fs::write(root.join("node_modules").join("dep.js"), "ignored").unwrap();
+        fs::write(root.join(".vite").join("cache.js"), "ignored").unwrap();
+
+        let snapshot = scan_watch_root(&root).unwrap();
+
+        assert!(
+            snapshot
+                .files
+                .contains_key(std::path::Path::new("index.html"))
+        );
+        assert!(
+            !snapshot
+                .files
+                .contains_key(std::path::Path::new(".DS_Store"))
+        );
+        assert!(
+            !snapshot
+                .files
+                .contains_key(std::path::Path::new("debug.log"))
+        );
+        assert!(
+            !snapshot
+                .files
+                .contains_key(std::path::Path::new("index.html.swp"))
+        );
+        assert!(
+            !snapshot
+                .files
+                .contains_key(std::path::Path::new("node_modules/dep.js"))
+        );
+        assert!(
+            !snapshot
+                .files
+                .contains_key(std::path::Path::new(".vite/cache.js"))
+        );
+        assert!(should_ignore_watch_entry(&root.join(".DS_Store"), false));
+        assert!(should_ignore_watch_entry(&root.join("node_modules"), true));
+    }
+
+    #[test]
+    fn reload_mode_lines_describe_live_reload_behavior() {
+        assert!(reload_mode_line(true).contains("attempt window reload"));
         assert!(reload_mode_line(false).contains("use --reload"));
     }
 

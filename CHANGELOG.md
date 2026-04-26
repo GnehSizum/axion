@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.1.10.0 - Preview
+
+Axion v0.1.10.0 stabilizes the development loop and window lifecycle diagnostics on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.10`.
+- Axion public release metadata is `v0.1.10.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added debounce handling to `axion dev --watch` so quick editor save bursts are grouped before diagnostics are printed.
+- Added watch ignore rules for common temporary files and cache directories such as `.DS_Store`, swap files, logs, `node_modules`, `.vite`, `.next`, `.turbo`, `.git`, and `target`.
+- Added `reload_applied`, `reload_deferred`, and `restart_required` diagnostics for `axion dev --watch --reload`; when launched with Servo runtime, watched file changes now request a reload on each live window.
+- Added `WindowControlRequest::Reload`, `axion_runtime::reload_window`, and the capability-gated `window.reload` bridge command.
+- Added `window.ready` as a built-in listen-only host lifecycle event after `window.created`.
+- Generated apps, `hello-axion`, and `multi-window` now expose lifecycle/reload capabilities for development-loop validation.
+
+### Changed
+
+- Runtime diagnostics now include `window.ready` in per-window lifecycle event lists and host event summaries.
+- `axion dev --watch` startup output now reports the poll interval, debounce interval, and initial watched file count.
+- `axion dev --watch --reload` without `--launch` now clearly reports that no live window control target is available.
+- `axion dev --watch --reload --launch` now reports `restart_required` when a live backend cannot apply reload in place.
+
+### Deferred
+
+- Full restart fallback for backends that cannot reload an existing WebView.
+- Servo devtools integration.
+- Installer generation, signing, notarization, auto-updates, and platform store packaging.
+
 ## v0.1.9.0 - Preview
 
 Axion v0.1.9.0 completes the development-server diagnostics milestone on the current Servo `0.1` baseline.

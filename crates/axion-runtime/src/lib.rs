@@ -13,7 +13,7 @@ pub use axion_bridge::{
     WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-pub const AXION_RELEASE_VERSION: &str = "v0.1.9.0";
+pub const AXION_RELEASE_VERSION: &str = "v0.1.10.0";
 pub const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 pub trait RuntimePlugin: Send + Sync {
@@ -183,6 +183,7 @@ impl DiagnosticsWindowReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowLifecycleEventKind {
     Created,
+    Ready,
     CloseRequested,
     Closed,
     Resized,
@@ -196,6 +197,7 @@ impl WindowLifecycleEventKind {
     pub const fn event_name(self) -> &'static str {
         match self {
             Self::Created => "window.created",
+            Self::Ready => "window.ready",
             Self::CloseRequested => "window.close_requested",
             Self::Closed => "window.closed",
             Self::Resized => "window.resized",
@@ -219,6 +221,7 @@ pub struct WindowLifecycleEvent {
 pub fn window_lifecycle_event_names() -> Vec<String> {
     [
         WindowLifecycleEventKind::Created,
+        WindowLifecycleEventKind::Ready,
         WindowLifecycleEventKind::CloseRequested,
         WindowLifecycleEventKind::Closed,
         WindowLifecycleEventKind::Resized,
@@ -816,6 +819,14 @@ impl BridgeBindingsPlugin for BuiltinBridgePlugin {
                 command_context.window.visible,
             ),
         ));
+        builder.push_startup_event(BridgeEvent::new(
+            WindowLifecycleEventKind::Ready.event_name(),
+            format!(
+                "{{\"windowId\":{},\"title\":{},\"bridgeReady\":true}}",
+                json_string_literal(&command_context.window.id),
+                json_string_literal(&command_context.window.title),
+            ),
+        ));
     }
 }
 
@@ -975,6 +986,24 @@ fn register_builtin_commands(
                     &window_control,
                     target_window_id.as_deref(),
                     WindowControlRequest::Focus,
+                )
+            }
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "window.reload")
+    {
+        let window_control = window_control.clone();
+        builder.register_command_async("window.reload", move |_context, request| {
+            let window_control = window_control.clone();
+            async move {
+                let target_window_id = json_string_field(&request.payload, "target");
+                execute_window_control_json(
+                    &window_control,
+                    target_window_id.as_deref(),
+                    WindowControlRequest::Reload,
                 )
             }
         });
@@ -1410,7 +1439,7 @@ fn build_security_policy(
         origins.push(SecurityPolicy::origin_string(url));
     }
     SecurityPolicy::from_capabilities(
-        app.config().capabilities.get(window_id).into_iter(),
+        app.config().capabilities.get(window_id),
         app_origin,
         origins,
     )
@@ -1426,16 +1455,18 @@ pub fn run_with_plugins(
     plugins: &[&dyn RuntimePlugin],
 ) -> Result<(), RuntimeError> {
     let launch_request = launch_request_with_plugins(&app, mode, plugins)?;
+    run_launch_request(launch_request)
+}
 
+pub fn run_launch_request(launch_request: RuntimeLaunchRequest) -> Result<(), RuntimeError> {
     #[cfg(not(feature = "servo-runtime"))]
     {
-        let _ = (app, launch_request);
+        let _ = launch_request;
         Err(RuntimeError::ServoRuntimeDisabled)
     }
 
     #[cfg(feature = "servo-runtime")]
     {
-        let _ = app;
         let window_bindings = launch_request
             .window_bindings
             .into_iter()
@@ -1474,7 +1505,17 @@ pub fn run_with_plugins(
     }
 }
 
+pub fn reload_window(
+    window_control: &WindowControlHandle,
+    target_window_id: Option<&str>,
+) -> Result<(), String> {
+    window_control
+        .execute(target_window_id, WindowControlRequest::Reload)
+        .map(|_| ())
+}
+
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use std::fs;
     use std::future::Future;
@@ -1499,6 +1540,7 @@ mod tests {
         RuntimePlugin, WindowControlHandle, WindowControlRequest, WindowControlResponse,
         WindowStateSnapshot, current_window_state, diagnostic_report, execute_dialog_request,
         format_panic_report_body, launch_request, launch_request_with_plugins, panic_report_path,
+        reload_window,
     };
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1716,6 +1758,7 @@ mod tests {
                         "window.info".to_owned(),
                         "window.show".to_owned(),
                         "window.hide".to_owned(),
+                        "window.reload".to_owned(),
                         "window.focus".to_owned(),
                         "window.set_title".to_owned(),
                         "window.set_size".to_owned(),
@@ -1752,7 +1795,8 @@ mod tests {
             match request {
                 WindowControlRequest::GetState
                 | WindowControlRequest::Show
-                | WindowControlRequest::Close => {}
+                | WindowControlRequest::Close
+                | WindowControlRequest::Reload => {}
                 WindowControlRequest::Hide => state.visible = false,
                 WindowControlRequest::Focus => state.focused = true,
                 WindowControlRequest::SetTitle { title } => state.title = title,
@@ -1827,13 +1871,20 @@ mod tests {
         assert!(matches!(request.target, RuntimeLaunchTarget::DevServer(_)));
         assert!(!binding.bridge_token.is_empty());
         assert_eq!(binding.window_id, "main");
-        assert_eq!(binding.bridge_bindings.startup_events.len(), 2);
+        assert_eq!(binding.bridge_bindings.startup_events.len(), 3);
         assert!(
             binding
                 .bridge_bindings
                 .startup_events
                 .iter()
                 .any(|event| event.name == "window.created")
+        );
+        assert!(
+            binding
+                .bridge_bindings
+                .startup_events
+                .iter()
+                .any(|event| event.name == "window.ready")
         );
         assert_eq!(
             binding.bridge_bindings.event_registry.event_names(),
@@ -1899,7 +1950,7 @@ mod tests {
             RuntimeLaunchTarget::DevServer(_) => panic!("expected app protocol launch target"),
         }
         assert!(!binding.bridge_token.is_empty());
-        assert_eq!(binding.bridge_bindings.startup_events.len(), 2);
+        assert_eq!(binding.bridge_bindings.startup_events.len(), 3);
         assert_eq!(
             binding.bridge_bindings.command_registry.command_names(),
             vec!["app.ping".to_owned()]
@@ -2099,7 +2150,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.9.0\""));
+        assert!(version.contains("\"release\":\"v0.1.10.0\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
@@ -2263,6 +2314,7 @@ mod tests {
             vec![
                 "app.ready".to_owned(),
                 "window.created".to_owned(),
+                "window.ready".to_owned(),
                 "window.close_requested".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
@@ -2272,11 +2324,12 @@ mod tests {
                 "window.redraw_failed".to_owned(),
             ]
         );
-        assert_eq!(settings.startup_event_count, 2);
+        assert_eq!(settings.startup_event_count, 3);
         assert_eq!(
             settings.lifecycle_events,
             vec![
                 "window.created".to_owned(),
+                "window.ready".to_owned(),
                 "window.close_requested".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
@@ -2318,6 +2371,7 @@ mod tests {
             vec![
                 "window.created".to_owned(),
                 "plugin.ready".to_owned(),
+                "window.ready".to_owned(),
                 "window.close_requested".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
@@ -2343,7 +2397,7 @@ mod tests {
             },
         );
 
-        assert_eq!(response.canceled, true);
+        assert!(response.canceled);
         assert_eq!(response.path, None);
         assert_eq!(response.paths, None);
         assert_eq!(response.backend, DialogBackendKind::Headless);
@@ -2470,6 +2524,16 @@ mod tests {
         assert!(resized.contains("\"width\":640"));
         assert!(resized.contains("\"height\":480"));
 
+        let reloaded = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("window.reload", "null"),
+        ))
+        .expect("window.reload should dispatch");
+        assert!(reloaded.contains("\"id\":\"main\""));
+
+        reload_window(&binding.window_control, Some("main"))
+            .expect("reload helper should dispatch");
+
         let missing = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
             &BridgeRequest::new("window.info", "{\"target\":\"missing\"}"),
@@ -2536,6 +2600,7 @@ mod tests {
             super::window_lifecycle_event_names(),
             vec![
                 "window.created".to_owned(),
+                "window.ready".to_owned(),
                 "window.close_requested".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
@@ -2748,15 +2813,12 @@ fn json_field_value_from<'a>(
 ) -> Option<&'a str> {
     let field_pattern = format!("\"{}\"", field);
 
-    while let Some(relative_position) = payload[*search_start..].find(&field_pattern) {
-        let field_start = *search_start + relative_position + field_pattern.len();
-        let after_field = payload[field_start..].trim_start();
-        let after_colon = after_field.strip_prefix(':')?.trim_start();
-        *search_start = field_start;
-        return Some(after_colon);
-    }
-
-    None
+    let relative_position = payload[*search_start..].find(&field_pattern)?;
+    let field_start = *search_start + relative_position + field_pattern.len();
+    let after_field = payload[field_start..].trim_start();
+    let after_colon = after_field.strip_prefix(':')?.trim_start();
+    *search_start = field_start;
+    Some(after_colon)
 }
 
 fn extract_json_array(input: &str) -> Option<&str> {

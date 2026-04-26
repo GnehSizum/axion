@@ -520,6 +520,7 @@ allowed_navigation_origins = ["https://docs.example"]
                 .contains(&"axion://app".to_owned())
         );
         assert!(report.host_events.contains(&"app.ready".to_owned()));
+        assert!(report.host_events.contains(&"window.ready".to_owned()));
         assert!(report.artifacts_removed);
         assert!(!output_dir.exists());
     }
@@ -587,6 +588,7 @@ allowed_navigation_origins = ["https://docs.example"]
             vec!["https://docs.example".to_owned()]
         );
         assert!(report.host_events.contains(&"app.ready".to_owned()));
+        assert!(report.host_events.contains(&"window.ready".to_owned()));
         assert!(
             report
                 .host_events

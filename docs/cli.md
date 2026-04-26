@@ -80,18 +80,22 @@ cargo run -p axion-cli --features servo-runtime -- dev \
 
 Watch and reload preview:
 
-- `--watch`: polls `[build].frontend_dist` for created, modified, and deleted files. With `--launch`, polling runs while the app window is open. Without `--launch`, the command prints the runtime plan and keeps watching until interrupted.
-- `--reload`: when combined with `--watch`, prints `reload_requested` when watched files change. The current Servo backend does not hot-reload windows yet, so this is a report-only preview.
+- `--watch`: polls `[build].frontend_dist` for created, modified, and deleted files. It ignores common temporary files and cache directories, then debounces editor save bursts before printing diagnostics. With `--launch`, polling runs while the app window is open. Without `--launch`, the command prints the runtime plan and keeps watching until interrupted.
+- `--reload`: when combined with `--watch`, prints `reload_requested` when watched files change. With `--launch`, Axion asks each live window to reload and prints `reload_applied`, `reload_deferred`, or `restart_required` per window. Without `--launch`, no live window target exists, so reload remains diagnostic-only.
 - `--open-devtools`: accepted as an explicit reserved option and reports that the current Servo backend does not open devtools.
 
 Example:
 
 ```sh
-cargo run -p axion-cli -- dev \
+cargo run -p axion-cli --features servo-runtime -- dev \
   --manifest-path examples/hello-axion/axion.toml \
+  --launch \
+  --fallback-packaged \
   --watch \
   --reload
 ```
+
+After the window opens, edit a file under `examples/hello-axion/frontend/`. A successful live reload prints `reload_requested` and `reload_applied: window=main`. Multi-window apps print one reload result per live window.
 
 ## `doctor`
 
