@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axion_core::{Builder, RunMode};
+use axion_runtime::{DiagnosticsReport, DiagnosticsWindowReport};
 
 use crate::cli::SelfTestArgs;
 use crate::error::AxionCliError;
@@ -257,55 +258,53 @@ fn run_self_test(args: &SelfTestArgs) -> Result<SelfTestReport, AxionCliError> {
 
 impl SelfTestReport {
     fn to_diagnostics_json(&self) -> String {
+        self.to_diagnostics_report().to_json()
+    }
+
+    fn to_diagnostics_report(&self) -> DiagnosticsReport {
         let windows = self
             .windows
             .iter()
-            .map(SelfTestWindowReport::to_diagnostics_json)
-            .collect::<Vec<_>>()
-            .join(",");
+            .map(|window| DiagnosticsWindowReport {
+                id: window.id.clone(),
+                title: window.title.clone(),
+                bridge_enabled: window.bridge_enabled,
+                configured_commands: window.configured_commands.clone(),
+                configured_events: window.configured_events.clone(),
+                configured_protocols: window.configured_protocols.clone(),
+                runtime_command_count: window.runtime_command_count,
+                runtime_event_count: window.runtime_event_count,
+                host_events: window.host_events.clone(),
+                trusted_origins: window.trusted_origins.clone(),
+                allowed_navigation_origins: window.allowed_navigation_origins.clone(),
+                allow_remote_navigation: window.allow_remote_navigation,
+            })
+            .collect();
 
-        format!(
-            "{{\"schema\":\"axion.diagnostics-report.v1\",\"source\":\"axion-cli self-test\",\"exported_at_unix_seconds\":{},\"manifest_path\":{},\"app_name\":{},\"identifier\":{},\"version\":{},\"description\":{},\"authors\":{},\"homepage\":{},\"mode\":\"production\",\"window_count\":{},\"windows\":[{}],\"frontend_dist\":{},\"entry\":{},\"configured_dialog_backend\":{},\"dialog_backend\":{},\"icon\":{},\"host_events\":{},\"staged_app_dir\":{},\"asset_manifest_path\":{},\"artifacts_removed\":{},\"result\":\"ok\"}}",
-            self.exported_at_unix_seconds,
-            json_path(&self.manifest_path),
-            json_string_literal(&self.app_name),
-            optional_json_string_literal(self.identifier.as_deref()),
-            optional_json_string_literal(self.version.as_deref()),
-            optional_json_string_literal(self.description.as_deref()),
-            json_string_array(&self.authors),
-            optional_json_string_literal(self.homepage.as_deref()),
-            self.window_count,
+        DiagnosticsReport {
+            source: "axion-cli self-test".to_owned(),
+            exported_at_unix_seconds: Some(self.exported_at_unix_seconds),
+            manifest_path: Some(self.manifest_path.clone()),
+            app_name: self.app_name.clone(),
+            identifier: self.identifier.clone(),
+            version: self.version.clone(),
+            description: self.description.clone(),
+            authors: self.authors.clone(),
+            homepage: self.homepage.clone(),
+            mode: Some("production".to_owned()),
+            window_count: self.window_count,
             windows,
-            json_path(&self.frontend_dist),
-            json_path(&self.entry),
-            json_string_literal(&self.configured_dialog_backend),
-            json_string_literal(&self.dialog_backend),
-            optional_json_path(self.icon.as_deref()),
-            json_string_array(&self.host_events),
-            json_path(&self.staged_app_dir),
-            json_path(&self.asset_manifest_path),
-            self.artifacts_removed,
-        )
-    }
-}
-
-impl SelfTestWindowReport {
-    fn to_diagnostics_json(&self) -> String {
-        format!(
-            "{{\"id\":{},\"title\":{},\"bridge_enabled\":{},\"configured_commands\":{},\"configured_events\":{},\"configured_protocols\":{},\"runtime_command_count\":{},\"runtime_event_count\":{},\"host_events\":{},\"trusted_origins\":{},\"allowed_navigation_origins\":{},\"allow_remote_navigation\":{}}}",
-            json_string_literal(&self.id),
-            json_string_literal(&self.title),
-            self.bridge_enabled,
-            json_string_array(&self.configured_commands),
-            json_string_array(&self.configured_events),
-            json_string_array(&self.configured_protocols),
-            self.runtime_command_count,
-            self.runtime_event_count,
-            json_string_array(&self.host_events),
-            json_string_array(&self.trusted_origins),
-            json_string_array(&self.allowed_navigation_origins),
-            self.allow_remote_navigation,
-        )
+            frontend_dist: Some(self.frontend_dist.clone()),
+            entry: Some(self.entry.clone()),
+            configured_dialog_backend: Some(self.configured_dialog_backend.clone()),
+            dialog_backend: Some(self.dialog_backend.clone()),
+            icon: self.icon.clone(),
+            host_events: self.host_events.clone(),
+            staged_app_dir: Some(self.staged_app_dir.clone()),
+            asset_manifest_path: Some(self.asset_manifest_path.clone()),
+            artifacts_removed: Some(self.artifacts_removed),
+            result: "ok".to_owned(),
+        }
     }
 }
 
@@ -353,56 +352,13 @@ fn list_or_none(values: &[String]) -> String {
     }
 }
 
-fn json_path(path: &Path) -> String {
-    json_string_literal(&path.display().to_string())
-}
-
-fn optional_json_path(path: Option<&Path>) -> String {
-    path.map(json_path).unwrap_or_else(|| "null".to_owned())
-}
-
-fn optional_json_string_literal(value: Option<&str>) -> String {
-    value
-        .map(json_string_literal)
-        .unwrap_or_else(|| "null".to_owned())
-}
-
-fn json_string_array(values: &[String]) -> String {
-    let entries = values
-        .iter()
-        .map(|value| json_string_literal(value))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{entries}]")
-}
-
-fn json_string_literal(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len() + 2);
-    encoded.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => encoded.push_str("\\\""),
-            '\\' => encoded.push_str("\\\\"),
-            '\n' => encoded.push_str("\\n"),
-            '\r' => encoded.push_str("\\r"),
-            '\t' => encoded.push_str("\\t"),
-            character if character.is_control() => {
-                encoded.push_str(&format!("\\u{:04x}", character as u32));
-            }
-            character => encoded.push(character),
-        }
-    }
-    encoded.push('"');
-    encoded
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{default_output_dir, json_string_literal, run_self_test, write_report_json};
+    use super::{default_output_dir, run_self_test, write_report_json};
     use crate::cli::SelfTestArgs;
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -663,11 +619,6 @@ allowed_navigation_origins = ["https://docs.example"]
         assert!(json.contains("\"window_count\":1"));
         assert!(json.contains("\"configured_commands\":[\"app.ping\"]"));
         assert!(json.contains("\"result\":\"ok\""));
-    }
-
-    #[test]
-    fn json_string_literal_escapes_control_characters() {
-        assert_eq!(json_string_literal("a\"b\\c\n\t"), "\"a\\\"b\\\\c\\n\\t\"");
     }
 
     #[test]

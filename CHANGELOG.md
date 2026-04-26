@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.1.7.0 - Preview
+
+Axion v0.1.7.0 completes the diagnostics model and local GUI smoke milestone on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.7`.
+- Axion public release metadata is `v0.1.7.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion_runtime::DiagnosticsReport` and `DiagnosticsWindowReport` as the shared Rust model for `axion.diagnostics-report.v1`.
+- Bridge bootstrap now exposes `window.__AXION__.diagnostics.reportSchema` so frontends can use the active diagnostics schema string.
+- Added `AXION_GUI_SMOKE=1` local GUI smoke mode for Servo-backed runs that call `window.__AXION_GUI_SMOKE__()`, print the returned report, and exit.
+- Added `AXION_GUI_SMOKE_TIMEOUT_MS` and `AXION_SELFTEST_TIMEOUT_MS` timeout controls for GUI smoke and bridge self-test runs.
+
+### Changed
+
+- `axion self-test --json` and `--report-path` now serialize through the shared runtime diagnostics report model instead of CLI-local report string assembly.
+- `examples/bridge-diagnostics-demo` now aligns its GUI-exported report with the shared top-level fields, including `result`.
+- Diagnostics report docs now cover the shared model, schema exposure, GUI preview fields, and local GUI smoke usage.
+
+### Deferred
+
+- Running GUI smoke in GitHub CI by default.
+- Installer generation, signing, notarization, auto-updates, and platform store packaging.
+
 ## v0.1.6.0 - Preview
 
 Axion v0.1.6.0 completes the CI and diagnostics stabilization milestone on the current Servo `0.1` baseline.

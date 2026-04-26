@@ -59,6 +59,7 @@ mod enabled {
     use std::pin::Pin;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     use axion_bridge::{
         BootstrapConfig, BridgeBindings, BridgeEmitRequest, BridgeEvent, BridgePayloadError,
@@ -111,6 +112,7 @@ mod enabled {
     const WINDOW_BLURRED_EVENT: &str = "window.blurred";
     const WINDOW_MOVED_EVENT: &str = "window.moved";
     const WINDOW_REDRAW_FAILED_EVENT: &str = "window.redraw_failed";
+    const DEFAULT_SELF_TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
     pub fn run_dev_server(
         app_name: String,
@@ -173,6 +175,8 @@ mod enabled {
         startup_target: StartupTarget,
         exit_after_startup: bool,
         self_test_bridge: bool,
+        gui_smoke: bool,
+        self_test_timeout: Duration,
     }
 
     #[derive(Clone, Debug)]
@@ -213,6 +217,10 @@ mod enabled {
                 }
             }
 
+            let self_test_bridge = std::env::var_os("AXION_SELFTEST_BRIDGE").is_some();
+            let gui_smoke = std::env::var_os("AXION_GUI_SMOKE").is_some();
+            let self_test_timeout = launch_self_test_timeout(gui_smoke);
+
             Ok(Self {
                 app_name,
                 resolver,
@@ -220,8 +228,11 @@ mod enabled {
                 window_bindings,
                 startup_target,
                 exit_after_startup: std::env::var_os("AXION_EXIT_AFTER_STARTUP").is_some()
-                    && std::env::var_os("AXION_SELFTEST_BRIDGE").is_none(),
-                self_test_bridge: std::env::var_os("AXION_SELFTEST_BRIDGE").is_some(),
+                    && !self_test_bridge
+                    && !gui_smoke,
+                self_test_bridge,
+                gui_smoke,
+                self_test_timeout,
             })
         }
 
@@ -254,6 +265,29 @@ mod enabled {
         }
     }
 
+    fn launch_self_test_timeout(gui_smoke: bool) -> Duration {
+        let override_name = if gui_smoke {
+            "AXION_GUI_SMOKE_TIMEOUT_MS"
+        } else {
+            "AXION_SELFTEST_TIMEOUT_MS"
+        };
+
+        std::env::var(override_name)
+            .ok()
+            .and_then(|value| parse_timeout_ms(&value))
+            .or_else(|| {
+                std::env::var("AXION_SELFTEST_TIMEOUT_MS")
+                    .ok()
+                    .and_then(|value| parse_timeout_ms(&value))
+            })
+            .unwrap_or(DEFAULT_SELF_TEST_TIMEOUT)
+    }
+
+    fn parse_timeout_ms(value: &str) -> Option<Duration> {
+        let millis = value.trim().parse::<u64>().ok()?;
+        (millis > 0).then(|| Duration::from_millis(millis))
+    }
+
     struct RuntimeWindow {
         window_id: String,
         bridge_token: String,
@@ -274,9 +308,12 @@ mod enabled {
         event_loop_proxy: EventLoopProxy<WakerEvent>,
         servo: Servo,
         self_test_bridge: bool,
+        gui_smoke: bool,
         self_test_finished: std::cell::Cell<bool>,
         self_test_poll_in_flight: std::cell::Cell<bool>,
         self_test_started: std::cell::Cell<bool>,
+        self_test_started_at: std::cell::Cell<Option<Instant>>,
+        self_test_timeout: Duration,
         modifiers_state: std::cell::Cell<ModifiersState>,
         window_registry: Arc<Mutex<BTreeMap<String, winit::window::WindowId>>>,
         windows: RefCell<Vec<RuntimeWindow>>,
@@ -296,7 +333,7 @@ mod enabled {
                 return;
             }
 
-            if self.self_test_bridge && !self.self_test_started.replace(true) {
+            if (self.self_test_bridge || self.gui_smoke) && !self.self_test_started.replace(true) {
                 self.start_self_test(webview);
             } else {
                 self.queue_startup_events(&webview);
@@ -767,6 +804,7 @@ mod enabled {
         }
 
         fn start_self_test(&self, webview: WebView) {
+            self.self_test_started_at.set(Some(Instant::now()));
             let event_loop_proxy = self.event_loop_proxy.clone();
             let startup_events = self.binding_for_webview(webview.id()).and_then(
                 |(bridge_token, startup_events)| {
@@ -774,28 +812,40 @@ mod enabled {
                         .then_some((bridge_token, startup_events))
                 },
             );
-            webview.evaluate_javascript(
-                "Promise.all([\n  new Promise(resolve => window.__AXION__.listen('app.ready', payload => resolve(payload))),\n  window.__AXION__.invoke('app.ping', { from: 'axion-selftest' })\n]).then(([eventPayload, pingPayload]) => {\n  window.__AXION_SELFTEST__ = JSON.stringify({ eventPayload, pingPayload });\n}).catch(error => {\n  window.__AXION_SELFTEST__ = 'ERROR:' + error.message;\n});\n'started';",
-                move |_| {
-                    if let Some((bridge_token, startup_events)) = startup_events {
-                        for event in startup_events {
-                            let _ = event_loop_proxy.send_event(WakerEvent::DispatchEvent {
-                                bridge_token: bridge_token.clone(),
-                                event_name: event.name,
-                                payload_json: event.payload_json,
-                            });
-                        }
+            let script = if self.gui_smoke {
+                "Promise.resolve()\n  .then(() => {\n    if (typeof window.__AXION_GUI_SMOKE__ !== 'function') {\n      throw new Error('window.__AXION_GUI_SMOKE__ is not available');\n    }\n    return window.__AXION_GUI_SMOKE__();\n  })\n  .then(payload => {\n    const result = payload ?? { result: 'ok' };\n    if (result.result && result.result !== 'ok') {\n      window.__AXION_SELFTEST__ = 'ERROR:' + JSON.stringify(result);\n      return;\n    }\n    window.__AXION_SELFTEST__ = JSON.stringify(result);\n  })\n  .catch(error => {\n    window.__AXION_SELFTEST__ = 'ERROR:' + error.message;\n  });\n'started';"
+            } else {
+                "Promise.all([\n  new Promise(resolve => window.__AXION__.listen('app.ready', payload => resolve(payload))),\n  window.__AXION__.invoke('app.ping', { from: 'axion-selftest' })\n]).then(([eventPayload, pingPayload]) => {\n  window.__AXION_SELFTEST__ = JSON.stringify({ eventPayload, pingPayload });\n}).catch(error => {\n  window.__AXION_SELFTEST__ = 'ERROR:' + error.message;\n});\n'started';"
+            };
+            webview.evaluate_javascript(script, move |_| {
+                if let Some((bridge_token, startup_events)) = startup_events {
+                    for event in startup_events {
+                        let _ = event_loop_proxy.send_event(WakerEvent::DispatchEvent {
+                            bridge_token: bridge_token.clone(),
+                            event_name: event.name,
+                            payload_json: event.payload_json,
+                        });
                     }
-                    let _ = event_loop_proxy.send_event(WakerEvent::Wake);
-                },
-            );
+                }
+                let _ = event_loop_proxy.send_event(WakerEvent::Wake);
+            });
         }
 
         fn poll_self_test(self: &Rc<Self>, webview: &WebView) {
-            if !self.self_test_bridge
+            if !(self.self_test_bridge || self.gui_smoke)
                 || !self.self_test_started.get()
                 || self.self_test_poll_in_flight.replace(true)
             {
+                return;
+            }
+
+            if self.self_test_timed_out() {
+                let _ = self
+                    .event_loop_proxy
+                    .send_event(WakerEvent::SelfTestFailed(format!(
+                        "timed out after {}ms",
+                        self.self_test_timeout.as_millis()
+                    )));
                 return;
             }
 
@@ -827,6 +877,12 @@ mod enabled {
                     }
                 }
             });
+        }
+
+        fn self_test_timed_out(&self) -> bool {
+            self.self_test_started_at
+                .get()
+                .is_some_and(|started_at| started_at.elapsed() >= self.self_test_timeout)
         }
     }
 
@@ -920,19 +976,23 @@ mod enabled {
                         if state.self_test_finished.replace(true) {
                             return;
                         }
-                        println!("Axion self-test passed: {value}");
+                        if state.gui_smoke {
+                            println!("Axion GUI smoke passed: {value}");
+                        } else {
+                            println!("Axion self-test passed: {value}");
+                        }
                         event_loop.exit();
                     }
                     WakerEvent::SelfTestFailed(message) => {
                         if state.self_test_finished.replace(true) {
                             return;
                         }
-                        self.fail(
-                            event_loop,
-                            WinitRunError::RegisterProtocol(format!(
-                                "bridge self-test failed: {message}"
-                            )),
-                        );
+                        let message = if state.gui_smoke {
+                            format!("GUI smoke failed: {message}")
+                        } else {
+                            format!("bridge self-test failed: {message}")
+                        };
+                        self.fail(event_loop, WinitRunError::RegisterProtocol(message));
                     }
                 }
             }
@@ -1033,9 +1093,12 @@ mod enabled {
             event_loop_proxy: waker.0.clone(),
             servo,
             self_test_bridge: launch.self_test_bridge,
+            gui_smoke: launch.gui_smoke,
             self_test_finished: std::cell::Cell::new(false),
             self_test_poll_in_flight: std::cell::Cell::new(false),
             self_test_started: std::cell::Cell::new(false),
+            self_test_started_at: std::cell::Cell::new(None),
+            self_test_timeout: launch.self_test_timeout,
             modifiers_state: std::cell::Cell::new(ModifiersState::empty()),
             window_registry: Arc::new(Mutex::new(BTreeMap::new())),
             windows: RefCell::new(Vec::new()),
@@ -1953,6 +2016,29 @@ mod enabled {
             .get("X-Axion-Bridge-Token")
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value == expected_token)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::time::Duration;
+
+        use super::parse_timeout_ms;
+
+        #[test]
+        fn parse_timeout_ms_accepts_positive_values() {
+            assert_eq!(parse_timeout_ms("1"), Some(Duration::from_millis(1)));
+            assert_eq!(
+                parse_timeout_ms(" 2500 "),
+                Some(Duration::from_millis(2500))
+            );
+        }
+
+        #[test]
+        fn parse_timeout_ms_rejects_invalid_values() {
+            assert_eq!(parse_timeout_ms("0"), None);
+            assert_eq!(parse_timeout_ms("-1"), None);
+            assert_eq!(parse_timeout_ms("abc"), None);
+        }
     }
 }
 

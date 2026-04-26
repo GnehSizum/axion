@@ -90,7 +90,7 @@ impl NewProject {
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.1.6\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.1.7\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root
