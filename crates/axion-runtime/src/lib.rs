@@ -13,7 +13,8 @@ pub use axion_bridge::{
     WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-pub const AXION_RELEASE_VERSION: &str = "v0.1.6.0";
+pub const AXION_RELEASE_VERSION: &str = "v0.1.7.0";
+pub const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 pub trait RuntimePlugin: Send + Sync {
     fn register(&self, builder: &mut RuntimeBridgeBindingsBuilder);
@@ -68,6 +69,106 @@ impl RuntimeDiagnosticReport {
         self.issues
             .iter()
             .any(|issue| matches!(issue.severity, DiagnosticSeverity::Error))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticsReport {
+    pub source: String,
+    pub exported_at_unix_seconds: Option<u64>,
+    pub manifest_path: Option<std::path::PathBuf>,
+    pub app_name: String,
+    pub identifier: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub authors: Vec<String>,
+    pub homepage: Option<String>,
+    pub mode: Option<String>,
+    pub window_count: usize,
+    pub windows: Vec<DiagnosticsWindowReport>,
+    pub frontend_dist: Option<std::path::PathBuf>,
+    pub entry: Option<std::path::PathBuf>,
+    pub configured_dialog_backend: Option<String>,
+    pub dialog_backend: Option<String>,
+    pub icon: Option<std::path::PathBuf>,
+    pub host_events: Vec<String>,
+    pub staged_app_dir: Option<std::path::PathBuf>,
+    pub asset_manifest_path: Option<std::path::PathBuf>,
+    pub artifacts_removed: Option<bool>,
+    pub result: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticsWindowReport {
+    pub id: String,
+    pub title: String,
+    pub bridge_enabled: bool,
+    pub configured_commands: Vec<String>,
+    pub configured_events: Vec<String>,
+    pub configured_protocols: Vec<String>,
+    pub runtime_command_count: usize,
+    pub runtime_event_count: usize,
+    pub host_events: Vec<String>,
+    pub trusted_origins: Vec<String>,
+    pub allowed_navigation_origins: Vec<String>,
+    pub allow_remote_navigation: bool,
+}
+
+impl DiagnosticsReport {
+    pub fn to_json(&self) -> String {
+        let windows = self
+            .windows
+            .iter()
+            .map(DiagnosticsWindowReport::to_json)
+            .collect::<Vec<_>>()
+            .join(",");
+
+        format!(
+            "{{\"schema\":{},\"source\":{},\"exported_at_unix_seconds\":{},\"manifest_path\":{},\"app_name\":{},\"identifier\":{},\"version\":{},\"description\":{},\"authors\":{},\"homepage\":{},\"mode\":{},\"window_count\":{},\"windows\":[{}],\"frontend_dist\":{},\"entry\":{},\"configured_dialog_backend\":{},\"dialog_backend\":{},\"icon\":{},\"host_events\":{},\"staged_app_dir\":{},\"asset_manifest_path\":{},\"artifacts_removed\":{},\"result\":{}}}",
+            json_string_literal(AXION_DIAGNOSTICS_REPORT_SCHEMA),
+            json_string_literal(&self.source),
+            optional_json_u64(self.exported_at_unix_seconds),
+            optional_json_path(self.manifest_path.as_deref()),
+            json_string_literal(&self.app_name),
+            optional_json_string_literal(self.identifier.as_deref()),
+            optional_json_string_literal(self.version.as_deref()),
+            optional_json_string_literal(self.description.as_deref()),
+            json_string_array_literal(&self.authors),
+            optional_json_string_literal(self.homepage.as_deref()),
+            optional_json_string_literal(self.mode.as_deref()),
+            self.window_count,
+            windows,
+            optional_json_path(self.frontend_dist.as_deref()),
+            optional_json_path(self.entry.as_deref()),
+            optional_json_string_literal(self.configured_dialog_backend.as_deref()),
+            optional_json_string_literal(self.dialog_backend.as_deref()),
+            optional_json_path(self.icon.as_deref()),
+            json_string_array_literal(&self.host_events),
+            optional_json_path(self.staged_app_dir.as_deref()),
+            optional_json_path(self.asset_manifest_path.as_deref()),
+            optional_json_bool(self.artifacts_removed),
+            json_string_literal(&self.result),
+        )
+    }
+}
+
+impl DiagnosticsWindowReport {
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"id\":{},\"title\":{},\"bridge_enabled\":{},\"configured_commands\":{},\"configured_events\":{},\"configured_protocols\":{},\"runtime_command_count\":{},\"runtime_event_count\":{},\"host_events\":{},\"trusted_origins\":{},\"allowed_navigation_origins\":{},\"allow_remote_navigation\":{}}}",
+            json_string_literal(&self.id),
+            json_string_literal(&self.title),
+            self.bridge_enabled,
+            json_string_array_literal(&self.configured_commands),
+            json_string_array_literal(&self.configured_events),
+            json_string_array_literal(&self.configured_protocols),
+            self.runtime_command_count,
+            self.runtime_event_count,
+            json_string_array_literal(&self.host_events),
+            json_string_array_literal(&self.trusted_origins),
+            json_string_array_literal(&self.allowed_navigation_origins),
+            self.allow_remote_navigation,
+        )
     }
 }
 
@@ -1384,12 +1485,12 @@ mod tests {
     use url::Url;
 
     use super::{
-        AppProtocolLaunch, BridgeRequest, DiagnosticSeverity, DialogBackendKind, DialogRequest,
-        DialogRequestKind, PanicReportConfig, RuntimeBridgeBindingsBuilder, RuntimeError,
-        RuntimeLaunchTarget, RuntimePlugin, WindowControlHandle, WindowControlRequest,
-        WindowControlResponse, WindowStateSnapshot, current_window_state, diagnostic_report,
-        execute_dialog_request, format_panic_report_body, launch_request,
-        launch_request_with_plugins, panic_report_path,
+        AppProtocolLaunch, BridgeRequest, DiagnosticSeverity, DiagnosticsReport,
+        DiagnosticsWindowReport, DialogBackendKind, DialogRequest, DialogRequestKind,
+        PanicReportConfig, RuntimeBridgeBindingsBuilder, RuntimeError, RuntimeLaunchTarget,
+        RuntimePlugin, WindowControlHandle, WindowControlRequest, WindowControlResponse,
+        WindowStateSnapshot, current_window_state, diagnostic_report, execute_dialog_request,
+        format_panic_report_body, launch_request, launch_request_with_plugins, panic_report_path,
     };
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1984,7 +2085,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.6.0\""));
+        assert!(version.contains("\"release\":\"v0.1.7.0\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
@@ -2021,6 +2122,55 @@ mod tests {
             super::json_string_literal("hello \"axion\"\n"),
             "\"hello \\\"axion\\\"\\n\""
         );
+        assert_eq!(super::json_string_literal("a\u{0007}b"), "\"a\\u0007b\"");
+    }
+
+    #[test]
+    fn diagnostics_report_serializes_stable_schema() {
+        let report = DiagnosticsReport {
+            source: "unit-test".to_owned(),
+            exported_at_unix_seconds: Some(42),
+            manifest_path: Some(std::path::PathBuf::from("axion.toml")),
+            app_name: "diagnostics-test".to_owned(),
+            identifier: Some("dev.axion.diagnostics-test".to_owned()),
+            version: Some("0.1.0".to_owned()),
+            description: None,
+            authors: vec!["Axion".to_owned()],
+            homepage: None,
+            mode: Some("production".to_owned()),
+            window_count: 1,
+            windows: vec![DiagnosticsWindowReport {
+                id: "main".to_owned(),
+                title: "Main".to_owned(),
+                bridge_enabled: true,
+                configured_commands: vec!["app.ping".to_owned()],
+                configured_events: vec!["app.ready".to_owned()],
+                configured_protocols: vec!["axion".to_owned()],
+                runtime_command_count: 1,
+                runtime_event_count: 1,
+                host_events: vec!["app.ready".to_owned()],
+                trusted_origins: Vec::new(),
+                allowed_navigation_origins: Vec::new(),
+                allow_remote_navigation: false,
+            }],
+            frontend_dist: Some(std::path::PathBuf::from("frontend")),
+            entry: Some(std::path::PathBuf::from("frontend/index.html")),
+            configured_dialog_backend: Some("headless".to_owned()),
+            dialog_backend: Some("headless".to_owned()),
+            icon: None,
+            host_events: vec!["app.ready".to_owned()],
+            staged_app_dir: Some(std::path::PathBuf::from("target/axion/app")),
+            asset_manifest_path: Some(std::path::PathBuf::from("target/axion/app/assets.json")),
+            artifacts_removed: Some(true),
+            result: "ok".to_owned(),
+        };
+        let json = report.to_json();
+
+        assert!(json.contains("\"schema\":\"axion.diagnostics-report.v1\""));
+        assert!(json.contains("\"source\":\"unit-test\""));
+        assert!(json.contains("\"manifest_path\":\"axion.toml\""));
+        assert!(json.contains("\"configured_commands\":[\"app.ping\"]"));
+        assert!(json.contains("\"artifacts_removed\":true"));
     }
 
     #[test]
@@ -2416,18 +2566,45 @@ mod tests {
 /// Custom command handlers return JSON text today. Use this helper when building
 /// small JSON responses without adding an application-level JSON dependency.
 pub fn json_string_literal(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
-    format!("\"{escaped}\"")
+    let mut encoded = String::with_capacity(value.len() + 2);
+    encoded.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => encoded.push_str("\\\""),
+            '\\' => encoded.push_str("\\\\"),
+            '\n' => encoded.push_str("\\n"),
+            '\r' => encoded.push_str("\\r"),
+            '\t' => encoded.push_str("\\t"),
+            character if character.is_control() => {
+                encoded.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => encoded.push(character),
+        }
+    }
+    encoded.push('"');
+    encoded
 }
 
 fn optional_json_string_literal(value: Option<&str>) -> String {
     value
         .map(json_string_literal)
+        .unwrap_or_else(|| "null".to_owned())
+}
+
+fn optional_json_path(path: Option<&std::path::Path>) -> String {
+    path.map(|path| json_string_literal(&path.display().to_string()))
+        .unwrap_or_else(|| "null".to_owned())
+}
+
+fn optional_json_bool(value: Option<bool>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_owned())
+}
+
+fn optional_json_u64(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
         .unwrap_or_else(|| "null".to_owned())
 }
 

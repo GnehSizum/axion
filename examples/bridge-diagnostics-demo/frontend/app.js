@@ -185,8 +185,17 @@ window.addEventListener('DOMContentLoaded', async () => {
       state.dialogPreview?.dialogSave?.backend ??
       null;
 
+    const result =
+      state.lastSelfCheck?.ok === false ||
+      state.smokeChecks.some((check) => check.status === 'fail')
+        ? 'failed'
+        : 'ok';
+
     return {
-      schema: 'axion.diagnostics-report.v1',
+      schema:
+        diagnostics?.reportSchema ??
+        bridgeInfo.diagnosticsReportSchema ??
+        'axion.diagnostics-report.v1',
       source: 'bridge-diagnostics-demo',
       exported_at: exportedAt.toISOString(),
       exported_at_unix_seconds: Math.floor(exportedAt.getTime() / 1000),
@@ -209,6 +218,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       staged_app_dir: null,
       asset_manifest_path: null,
       artifacts_removed: null,
+      result,
       diagnostics: {
         bridge: bridgeInfo,
         app_version: state.appVersion,
@@ -680,6 +690,24 @@ window.addEventListener('DOMContentLoaded', async () => {
       actionFeedback.textContent = `Export failed: ${message}`;
       renderSelfCheck();
     }
+  };
+
+  window.__AXION_GUI_SMOKE__ = async () => {
+    await runSelfCheck();
+    await runSmokeChecklist();
+    await runDialogPreview();
+    await refreshRuntimeMetadata();
+    const report = buildDiagnosticsReport();
+    state.lastLoadedReport = {
+      ok: report.result === 'ok',
+      path: 'AXION_GUI_SMOKE',
+      loadedAt: new Date().toISOString(),
+      report,
+    };
+    renderSelfCheck();
+    renderSmokeChecklist();
+    renderSavedReport();
+    return report;
   };
 
   document.getElementById('run-self-check')?.addEventListener('click', () => {
