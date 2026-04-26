@@ -14,6 +14,24 @@ pub enum BundleTarget {
     WindowsDir,
 }
 
+impl BundleTarget {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MacOsApp => "macos-app",
+            Self::LinuxDir => "linux-dir",
+            Self::WindowsDir => "windows-dir",
+        }
+    }
+
+    pub const fn layout_summary(self) -> &'static str {
+        match self {
+            Self::MacOsApp => ".app bundle with Contents/MacOS and Contents/Resources/app",
+            Self::LinuxDir => "directory bundle with bin/ and resources/app",
+            Self::WindowsDir => "directory bundle with bin/*.exe and resources/app",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundlePlan {
     pub target: BundleTarget,
@@ -77,7 +95,11 @@ pub struct BundleArtifact {
 pub struct BundleVerificationReport {
     pub bundle_dir: PathBuf,
     pub checked_paths: Vec<PathBuf>,
+    pub checked_dirs: usize,
+    pub checked_files: usize,
     pub bundle_file_count: usize,
+    pub fingerprinted_files: usize,
+    pub total_bytes: u64,
 }
 
 #[derive(Debug, Error)]
@@ -257,12 +279,19 @@ pub fn verify_bundle_artifact(
     }
 
     verify_bundle_manifest_references(artifact)?;
-    let bundle_file_count = collect_bundle_manifest_files(&artifact.bundle_dir)?.len();
+    let bundle_files = collect_bundle_manifest_files(&artifact.bundle_dir)?;
+    let checked_dirs = checked_paths.iter().filter(|path| path.is_dir()).count();
+    let checked_files = checked_paths.iter().filter(|path| path.is_file()).count();
+    let total_bytes = bundle_files.iter().map(|file| file.bytes).sum();
 
     Ok(BundleVerificationReport {
         bundle_dir: artifact.bundle_dir.clone(),
         checked_paths,
-        bundle_file_count,
+        checked_dirs,
+        checked_files,
+        bundle_file_count: bundle_files.len(),
+        fingerprinted_files: bundle_files.len(),
+        total_bytes,
     })
 }
 
@@ -757,11 +786,7 @@ fn fnv1a64_file_hex(path: &Path) -> Result<String, PackagerError> {
 }
 
 fn bundle_target_name(target: BundleTarget) -> &'static str {
-    match target {
-        BundleTarget::MacOsApp => "macos-app",
-        BundleTarget::LinuxDir => "linux-dir",
-        BundleTarget::WindowsDir => "windows-dir",
-    }
+    target.as_str()
 }
 
 fn bundle_relative_path(bundle_dir: &Path, path: &Path) -> String {
@@ -1244,6 +1269,13 @@ mod tests {
         let verification = verify_bundle_artifact(&artifact).unwrap();
         assert_eq!(verification.bundle_dir, artifact.bundle_dir);
         assert!(verification.bundle_file_count >= 3);
+        assert_eq!(
+            verification.fingerprinted_files,
+            verification.bundle_file_count
+        );
+        assert!(verification.total_bytes > 0);
+        assert_eq!(verification.checked_dirs, 2);
+        assert!(verification.checked_files >= 4);
         assert!(
             verification
                 .checked_paths
@@ -1437,6 +1469,11 @@ mod tests {
         assert!(bundle_manifest.contains("\"path\": \"Contents/Resources/app.icns\""));
         let verification = verify_bundle_artifact(&artifact).unwrap();
         assert!(verification.bundle_file_count >= 4);
+        assert_eq!(
+            verification.fingerprinted_files,
+            verification.bundle_file_count
+        );
+        assert!(verification.checked_files >= 5);
     }
 
     #[test]

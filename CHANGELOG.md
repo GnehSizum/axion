@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.1.11.0 - Preview
+
+Axion v0.1.11.0 improves bundle reporting, packaging documentation, and release-readiness checks on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.11`.
+- Axion public release metadata is `v0.1.11.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added platform layout summaries to `axion bundle` output for macOS `.app`, Linux directory, and Windows directory bundle scaffolds.
+- Added richer bundle verification statistics: checked directories, checked files, fingerprinted files, and total bundle bytes.
+- Added `bundle.target`, `bundle.layout`, and `bundle.metadata` diagnostics to `axion doctor`.
+- Added `docs/packaging.md` with bundle layout, icon, executable, verification, and release checklist guidance.
+- Generated app READMEs now include a clearer packaging preview and release validation path.
+
+### Changed
+
+- Bundle target names now use stable string values such as `macos-app`, `linux-dir`, and `windows-dir` in CLI output.
+- Bundle icon diagnostics now include the detected file extension format.
+
+### Deferred
+
+- Signed installers, notarization, auto-updates, and platform store packaging.
+- Cross-platform installer generation.
+
 ## v0.1.10.0 - Preview
 
 Axion v0.1.10.0 stabilizes the development loop and window lifecycle diagnostics on the current Servo `0.1` baseline.

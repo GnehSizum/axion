@@ -222,13 +222,44 @@ fn build_asset_diagnostic_lines(config: &AppConfig) -> Vec<String> {
 }
 
 fn bundle_diagnostic_lines(config: &AppConfig) -> Vec<String> {
+    let target = axion_packager::current_bundle_target();
+    let mut lines = vec![
+        format!("bundle.target: {}", target.as_str()),
+        format!("bundle.layout: {}", target.layout_summary()),
+        format!(
+            "bundle.metadata: app={}, version={}, identifier={}",
+            config.identity.name,
+            config
+                .identity
+                .version
+                .as_deref()
+                .unwrap_or("not configured"),
+            config
+                .identity
+                .identifier
+                .as_deref()
+                .unwrap_or("not configured")
+        ),
+    ];
     match config.bundle.icon.as_deref() {
         Some(icon) => match axion_packager::validate_bundle_icon(Some(icon)) {
-            Ok(_) => vec![format!("bundle.icon: ok ({})", icon.display())],
-            Err(error) => vec![format!("bundle.icon: invalid ({error})")],
+            Ok(_) => lines.push(format!(
+                "bundle.icon: ok ({}; format={})",
+                icon.display(),
+                bundle_icon_format(icon)
+            )),
+            Err(error) => lines.push(format!("bundle.icon: invalid ({error})")),
         },
-        None => vec!["bundle.icon: not configured".to_owned()],
+        None => lines.push("bundle.icon: not configured".to_owned()),
     }
+    lines
+}
+
+fn bundle_icon_format(path: &Path) -> String {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 fn runtime_diagnostic_lines(config: &AppConfig) -> Vec<String> {
@@ -362,7 +393,7 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.1.10.0"));
+        assert!(line.contains("release=v0.1.11.0"));
         assert!(line.contains("msrv="));
     }
 
@@ -503,16 +534,25 @@ mod tests {
             capabilities: Default::default(),
         };
 
-        assert_eq!(
-            bundle_diagnostic_lines(&config),
-            vec![format!("bundle.icon: ok ({})", icon.display())]
+        let lines = bundle_diagnostic_lines(&config);
+        assert!(lines.iter().any(|line| line.starts_with("bundle.target: ")));
+        assert!(lines.iter().any(|line| line.starts_with("bundle.layout: ")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "bundle.metadata: app=doctor-test, version=not configured, identifier=not configured")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == &format!("bundle.icon: ok ({}; format=icns)", icon.display()))
         );
 
         config.bundle = axion_core::BundleConfig::new().with_icon(root.join("missing.icns"));
         assert!(
             bundle_diagnostic_lines(&config)
-                .first()
-                .is_some_and(|line| line.starts_with("bundle.icon: invalid"))
+                .iter()
+                .any(|line| line.starts_with("bundle.icon: invalid"))
         );
     }
 
