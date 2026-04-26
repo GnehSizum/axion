@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.1.12.0 - Preview
+
+Axion v0.1.12.0 tightens capability and security diagnostics on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.12`.
+- Axion public release metadata is `v0.1.12.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `security.summary`, `security.window.*`, `security.notice.*`, `security.warning.*`, and `security.recommendation.*` lines to `axion doctor`.
+- Added `axion doctor --json` with structured `diagnostics.security` output in the existing diagnostics report schema.
+- Added per-window security risk classification for disabled, bridge-enabled, remote-origin, and broad remote-navigation capability sets.
+- Added command category summaries for app, window, filesystem, dialog, and custom command capabilities.
+- Added warnings for bridge command/event declarations without `protocols = ["axion"]`.
+- Added warnings for nonstandard protocol capabilities and redundant `allowed_navigation_origins` when `allow_remote_navigation = true`.
+
+### Changed
+
+- Security documentation now includes minimum capability patterns, remote-navigation guidance, and CI-friendly `doctor` checks.
+
+### Deferred
+
+- Policy profiles, signed permission manifests, and automatic capability minimization.
+
 ## v0.1.11.0 - Preview
 
 Axion v0.1.11.0 improves bundle reporting, packaging documentation, and release-readiness checks on the current Servo `0.1` baseline.

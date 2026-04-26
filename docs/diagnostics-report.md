@@ -7,6 +7,7 @@ The CLI report is generated through the shared `axion_runtime::DiagnosticsReport
 
 - `axion self-test --json`: prints a non-GUI report to stdout.
 - `axion self-test --report-path <path>`: writes the same non-GUI report to disk.
+- `axion doctor --json`: prints environment, manifest, runtime, and structured security diagnostics.
 - `axion gui-smoke --report-path <path>`: runs a Servo-backed GUI smoke check and writes the returned GUI report.
 - `examples/bridge-diagnostics-demo`: exports a GUI-side report from app-data.
 - `window.__AXION__.diagnostics.reportSchema`: exposes the active schema string to frontends.
@@ -24,6 +25,7 @@ The CLI report is generated through the shared `axion_runtime::DiagnosticsReport
 - `icon`: validated bundle icon path when available.
 - `host_events`: merged host event allowlist.
 - `staged_app_dir`, `asset_manifest_path`, `artifacts_removed`: CLI staging results.
+- `diagnostics`: optional producer-specific object. `doctor --json` uses `diagnostics.security.warning_count`, `diagnostics.security.windows`, and `diagnostics.security.findings`.
 - `result`: `ok` or `failed`.
 
 ## Window Fields

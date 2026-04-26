@@ -78,6 +78,9 @@ pub struct BundleArgs {
 pub struct DoctorArgs {
     #[arg(long, default_value = "axion.toml")]
     pub manifest_path: PathBuf,
+
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
