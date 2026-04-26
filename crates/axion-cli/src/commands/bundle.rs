@@ -54,7 +54,8 @@ pub fn run(args: BundleArgs) -> Result<(), AxionCliError> {
     if let Some(version) = &launch_config.version {
         println!("version: {version}");
     }
-    println!("target: {:?}", artifact.target);
+    println!("target: {}", artifact.target.as_str());
+    println!("layout: {}", artifact.target.layout_summary());
     println!("output_dir: {}", artifact.output_dir.display());
     println!("bundle_dir: {}", artifact.bundle_dir.display());
     println!(
@@ -70,6 +71,10 @@ pub fn run(args: BundleArgs) -> Result<(), AxionCliError> {
     );
     println!("verification: ok");
     println!("bundle_files: {}", verification.bundle_file_count);
+    println!("fingerprinted_files: {}", verification.fingerprinted_files);
+    println!("bundle_bytes: {}", verification.total_bytes);
+    println!("checked_dirs: {}", verification.checked_dirs);
+    println!("checked_files: {}", verification.checked_files);
     println!("checked_paths: {}", verification.checked_paths.len());
     match &artifact.icon_path {
         Some(path) => println!("icon: {}", path.display()),
@@ -184,6 +189,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{default_executable_path, default_output_dir, executable_file_name};
+    use axion_packager::BundleTarget;
 
     #[test]
     fn default_output_dir_is_workspace_local() {
@@ -192,6 +198,21 @@ mod tests {
             path,
             PathBuf::from("/tmp/demo/target/axion/hello-axion/bundle")
         );
+    }
+
+    #[test]
+    fn bundle_layout_summary_describes_platform_structure() {
+        assert!(
+            BundleTarget::MacOsApp
+                .layout_summary()
+                .contains("Contents/MacOS")
+        );
+        assert!(
+            BundleTarget::LinuxDir
+                .layout_summary()
+                .contains("resources/app")
+        );
+        assert!(BundleTarget::WindowsDir.layout_summary().contains("*.exe"));
     }
 
     #[test]

@@ -184,8 +184,9 @@ Executable handling:
 - If `--executable <path>` is passed, that binary is copied into the bundle.
 - If no executable is passed, Axion searches nearby `target/release/` and `target/debug/` directories for a binary matching the app name.
 - Pass `--build-executable` to run `cargo build --release` for the app before bundling.
-- Use the printed `bundle_manifest` path to inspect the generated entry, resource, metadata, icon, executable, and file list.
+- Use the printed `layout`, `bundle_dir`, and `bundle_manifest` values to inspect the generated platform structure.
 - `verification: ok` means every referenced bundle path exists and the manifest file list matches generated file sizes and `fnv1a64` fingerprints.
+- `checked_dirs`, `checked_files`, `fingerprinted_files`, and `bundle_bytes` summarize the verification pass.
 
 ```sh
 cargo run -p axion-cli -- bundle \

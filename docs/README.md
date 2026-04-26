@@ -7,6 +7,7 @@ This directory contains public, user-facing documentation for Axion.
 - `getting-started.md`: create and run a minimal Axion app.
 - `cli.md`: command reference for `axion-cli`.
 - `manifest.md`: `axion.toml` configuration guide.
+- `packaging.md`: bundle layouts, verification, icons, and release checks.
 - `native-api.md`: built-in bridge command reference.
 - `diagnostics-report.md`: machine-readable diagnostics report schema.
 - `custom-commands.md`: Rust command registration and frontend invocation.
@@ -18,14 +19,14 @@ This directory contains public, user-facing documentation for Axion.
 
 ## Current Version
 
-Axion is at **v0.1.10.0 developer preview**. The current preview focuses on the core desktop framework loop:
+Axion is at **v0.1.11.0 developer preview**. The current preview focuses on the core desktop framework loop:
 
 1. load an app manifest
 2. build a runtime plan
 3. stage frontend assets
 4. inject a controlled JavaScript bridge
 5. launch a Servo-backed `winit` window when `servo-runtime` is enabled
-6. generate, validate, fingerprint, and bundle simple applications through `axion-cli`
+6. generate, validate, fingerprint, bundle, and inspect release-ready application scaffolds through `axion-cli`
 7. configure headless or preview system file-dialog behavior through `[native.dialog]`
 8. validate controlled app-data filesystem and dialog flows through `examples/file-access-demo`
 9. reuse bridge-provided text-input compatibility helpers in examples and generated apps
