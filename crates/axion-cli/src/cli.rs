@@ -15,6 +15,7 @@ pub enum Command {
     Build(BuildArgs),
     Bundle(BundleArgs),
     Doctor(DoctorArgs),
+    GuiSmoke(GuiSmokeArgs),
     New(NewArgs),
     SelfTest(SelfTestArgs),
 }
@@ -59,6 +60,30 @@ pub struct BundleArgs {
 pub struct DoctorArgs {
     #[arg(long, default_value = "axion.toml")]
     pub manifest_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct GuiSmokeArgs {
+    #[arg(long, default_value = "axion.toml")]
+    pub manifest_path: PathBuf,
+
+    #[arg(long)]
+    pub report_path: Option<PathBuf>,
+
+    #[arg(long)]
+    pub cargo_target_dir: Option<PathBuf>,
+
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub build_env: Vec<String>,
+
+    #[arg(long, default_value_t = false)]
+    pub serial_build: bool,
+
+    #[arg(long)]
+    pub timeout_ms: Option<u64>,
+
+    #[arg(long, default_value_t = false)]
+    pub quiet: bool,
 }
 
 #[derive(Debug, Clone, Args)]

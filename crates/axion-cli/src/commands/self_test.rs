@@ -303,6 +303,7 @@ impl SelfTestReport {
             staged_app_dir: Some(self.staged_app_dir.clone()),
             asset_manifest_path: Some(self.asset_manifest_path.clone()),
             artifacts_removed: Some(self.artifacts_removed),
+            diagnostics: None,
             result: "ok".to_owned(),
         }
     }

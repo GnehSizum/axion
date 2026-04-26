@@ -7,6 +7,7 @@ The CLI report is generated through the shared `axion_runtime::DiagnosticsReport
 
 - `axion self-test --json`: prints a non-GUI report to stdout.
 - `axion self-test --report-path <path>`: writes the same non-GUI report to disk.
+- `axion gui-smoke --report-path <path>`: runs a Servo-backed GUI smoke check and writes the returned GUI report.
 - `examples/bridge-diagnostics-demo`: exports a GUI-side report from app-data.
 - `window.__AXION__.diagnostics.reportSchema`: exposes the active schema string to frontends.
 
@@ -38,6 +39,10 @@ Each `windows[]` entry includes:
 
 GUI reports may include an additional `diagnostics` object with bridge snapshots, smoke checks, recent host events, dialog previews, export metadata, and text-control snapshots. GUI window entries may also include preview native state fields such as `width`, `height`, `resizable`, `visible`, and `focused`.
 
+Each `diagnostics.smoke_checks[]` entry should include stable `id`, user-facing `label`, `status` (`pass`, `fail`, or `skip`), and optional `detail`. Check ids use dotted lower-case names such as `bridge.bootstrap`, `app.ping`, `fs.roundtrip`, `dialog.preview`, and `input.snapshot`.
+
+CLI-generated GUI smoke failure reports use `source = "axion-cli gui-smoke"` and put process context under `diagnostics`: `failure_phase`, `help`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr`. The `failure_phase` value is one of `build`, `runtime`, or `report`.
+
 ## CI Usage
 
 ```sh
@@ -51,11 +56,28 @@ The command exits non-zero if manifest loading, runtime diagnostics, asset stagi
 
 ## Local GUI Smoke
 
-`AXION_GUI_SMOKE=1` runs the Servo-backed window, calls `window.__AXION_GUI_SMOKE__()` after the page loads, prints the returned diagnostics report, and exits. The bridge diagnostics demo implements this hook. The default timeout is 10 seconds; set `AXION_GUI_SMOKE_TIMEOUT_MS=<milliseconds>` when a local debug build needs more time.
+`axion gui-smoke` is the preferred local entrypoint. It runs the Servo-backed window, captures the returned diagnostics report, validates the schema and `result: "ok"`, optionally writes it to `--report-path`, and exits. The bridge diagnostics demo implements the required `window.__AXION_GUI_SMOKE__()` hook.
 
 ```sh
-AXION_GUI_SMOKE=1 cargo run -p bridge-diagnostics-demo --features servo-runtime
-AXION_GUI_SMOKE=1 AXION_GUI_SMOKE_TIMEOUT_MS=30000 cargo run -p bridge-diagnostics-demo --features servo-runtime
+cargo run -p axion-cli -- gui-smoke \
+  --manifest-path examples/bridge-diagnostics-demo/axion.toml \
+  --report-path target/axion/reports/bridge-diagnostics-gui-smoke.json \
+  --timeout-ms 30000
+cargo run -p axion-cli -- gui-smoke \
+  --manifest-path examples/hello-axion/axion.toml \
+  --report-path target/axion/reports/hello-gui-smoke.json \
+  --timeout-ms 30000
 ```
 
-This is intended for local GUI regression checks first. It is not yet part of the default GitHub CI gate.
+For generated apps outside the Axion workspace, prefer reusing the checkout build cache:
+
+```sh
+cargo run -p axion-cli -- gui-smoke \
+  --manifest-path /tmp/demo-app/axion.toml \
+  --report-path target/axion/reports/demo-app-gui-smoke.json \
+  --timeout-ms 30000 \
+  --cargo-target-dir target \
+  --serial-build
+```
+
+The lower-level `AXION_GUI_SMOKE=1` environment variable remains available for direct app runs. The default runtime timeout is 10 seconds; `--timeout-ms` maps to `AXION_GUI_SMOKE_TIMEOUT_MS`.

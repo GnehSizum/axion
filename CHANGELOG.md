@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.1.8.0 - Preview
+
+Axion v0.1.8.0 completes the GUI smoke command and optional CI artifact milestone on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.8`.
+- Axion public release metadata is `v0.1.8.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion-cli gui-smoke` to launch a Servo-backed app with `AXION_GUI_SMOKE=1`, capture the returned diagnostics report, and optionally write it with `--report-path`.
+- Added `--timeout-ms` and `--quiet` options for GUI smoke automation.
+- Added `--cargo-target-dir`, `--serial-build`, and repeatable `--build-env KEY=VALUE` options for generated-app GUI smoke runs and resource-constrained Servo builds.
+- Added failure report generation for `axion gui-smoke --report-path` when the GUI process exits unsuccessfully or does not print a valid diagnostics report.
+- Added an optional `workflow_dispatch` GitHub Actions GUI smoke job that runs under `xvfb` and uploads the GUI diagnostics artifact.
+- Added GUI smoke hooks for generated vanilla apps, `hello-axion`, and `file-access-demo`.
+
+### Changed
+
+- `examples/bridge-diagnostics-demo` smoke checks now include stable `id`, `label`, `status`, and `detail` fields.
+- The optional GUI smoke workflow now collects bridge diagnostics, hello, and file-access reports.
+- `axion gui-smoke` failure reports now include process context such as failure phase, help text, status code, timeout, Cargo manifest path, target directory, build environment keys, stdout, and stderr.
+- Diagnostics documentation now describes CLI GUI smoke usage, GUI smoke reports, and stable smoke check fields.
+
+### Deferred
+
+- Enabling GUI smoke as a default pull-request gate.
+- Cross-platform GUI CI coverage beyond the optional Linux job.
+- Installer generation, signing, notarization, auto-updates, and platform store packaging.
+
 ## v0.1.7.0 - Preview
 
 Axion v0.1.7.0 completes the diagnostics model and local GUI smoke milestone on the current Servo `0.1` baseline.

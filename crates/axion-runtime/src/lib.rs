@@ -13,7 +13,7 @@ pub use axion_bridge::{
     WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-pub const AXION_RELEASE_VERSION: &str = "v0.1.7.0";
+pub const AXION_RELEASE_VERSION: &str = "v0.1.8.0";
 pub const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 pub trait RuntimePlugin: Send + Sync {
@@ -95,6 +95,7 @@ pub struct DiagnosticsReport {
     pub staged_app_dir: Option<std::path::PathBuf>,
     pub asset_manifest_path: Option<std::path::PathBuf>,
     pub artifacts_removed: Option<bool>,
+    pub diagnostics: Option<String>,
     pub result: String,
 }
 
@@ -123,8 +124,14 @@ impl DiagnosticsReport {
             .collect::<Vec<_>>()
             .join(",");
 
+        let diagnostics = self
+            .diagnostics
+            .as_deref()
+            .map(|diagnostics| format!(",\"diagnostics\":{diagnostics}"))
+            .unwrap_or_default();
+
         format!(
-            "{{\"schema\":{},\"source\":{},\"exported_at_unix_seconds\":{},\"manifest_path\":{},\"app_name\":{},\"identifier\":{},\"version\":{},\"description\":{},\"authors\":{},\"homepage\":{},\"mode\":{},\"window_count\":{},\"windows\":[{}],\"frontend_dist\":{},\"entry\":{},\"configured_dialog_backend\":{},\"dialog_backend\":{},\"icon\":{},\"host_events\":{},\"staged_app_dir\":{},\"asset_manifest_path\":{},\"artifacts_removed\":{},\"result\":{}}}",
+            "{{\"schema\":{},\"source\":{},\"exported_at_unix_seconds\":{},\"manifest_path\":{},\"app_name\":{},\"identifier\":{},\"version\":{},\"description\":{},\"authors\":{},\"homepage\":{},\"mode\":{},\"window_count\":{},\"windows\":[{}],\"frontend_dist\":{},\"entry\":{},\"configured_dialog_backend\":{},\"dialog_backend\":{},\"icon\":{},\"host_events\":{},\"staged_app_dir\":{},\"asset_manifest_path\":{},\"artifacts_removed\":{}{},\"result\":{}}}",
             json_string_literal(AXION_DIAGNOSTICS_REPORT_SCHEMA),
             json_string_literal(&self.source),
             optional_json_u64(self.exported_at_unix_seconds),
@@ -147,6 +154,7 @@ impl DiagnosticsReport {
             optional_json_path(self.staged_app_dir.as_deref()),
             optional_json_path(self.asset_manifest_path.as_deref()),
             optional_json_bool(self.artifacts_removed),
+            diagnostics,
             json_string_literal(&self.result),
         )
     }
@@ -2085,7 +2093,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.7.0\""));
+        assert!(version.contains("\"release\":\"v0.1.8.0\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
@@ -2162,6 +2170,7 @@ mod tests {
             staged_app_dir: Some(std::path::PathBuf::from("target/axion/app")),
             asset_manifest_path: Some(std::path::PathBuf::from("target/axion/app/assets.json")),
             artifacts_removed: Some(true),
+            diagnostics: Some("{\"kind\":\"unit\"}".to_owned()),
             result: "ok".to_owned(),
         };
         let json = report.to_json();
@@ -2171,6 +2180,7 @@ mod tests {
         assert!(json.contains("\"manifest_path\":\"axion.toml\""));
         assert!(json.contains("\"configured_commands\":[\"app.ping\"]"));
         assert!(json.contains("\"artifacts_removed\":true"));
+        assert!(json.contains("\"diagnostics\":{\"kind\":\"unit\"}"));
     }
 
     #[test]

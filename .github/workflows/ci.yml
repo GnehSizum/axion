@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run_gui_smoke:
+        description: Run optional Servo GUI smoke under xvfb
+        required: false
+        default: "false"
 
 jobs:
   rust:
@@ -44,4 +50,53 @@ jobs:
           path: |
             target/axion-doctor.txt
             target/axion/reports/*.json
+          if-no-files-found: error
+
+  gui-smoke:
+    name: Optional GUI smoke
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.run_gui_smoke == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.86.0
+      - name: Install virtual display
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Run bridge diagnostics GUI smoke
+        run: |
+          xvfb-run -a cargo run -p axion-cli -- gui-smoke \
+            --manifest-path examples/bridge-diagnostics-demo/axion.toml \
+            --report-path target/axion/reports/bridge-diagnostics-gui-smoke.json \
+            --timeout-ms 30000 \
+            --quiet
+      - name: Run hello GUI smoke
+        run: |
+          xvfb-run -a cargo run -p axion-cli -- gui-smoke \
+            --manifest-path examples/hello-axion/axion.toml \
+            --report-path target/axion/reports/hello-gui-smoke.json \
+            --timeout-ms 30000 \
+            --quiet
+      - name: Run file access GUI smoke
+        run: |
+          xvfb-run -a cargo run -p axion-cli -- gui-smoke \
+            --manifest-path examples/file-access-demo/axion.toml \
+            --report-path target/axion/reports/file-access-gui-smoke.json \
+            --timeout-ms 30000 \
+            --quiet
+      - name: Check GUI smoke report
+        run: |
+          for report in target/axion/reports/*-gui-smoke.json; do
+            echo "checking $report"
+            test -s "$report"
+            grep -q '"schema":"axion.diagnostics-report.v1"' "$report"
+            grep -q '"result":"ok"' "$report"
+            grep -o '"source":"[^"]*"' "$report" | head -n 1
+            grep -o '"app_name":"[^"]*"' "$report" | head -n 1
+          done
+      - name: Upload GUI smoke artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: axion-gui-smoke
+          path: target/axion/reports/*-gui-smoke.json
           if-no-files-found: error
