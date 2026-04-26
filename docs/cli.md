@@ -107,6 +107,14 @@ cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml
 
 `doctor` prints `axion: cli_version=..., release=..., msrv=...` and `rustc.msrv: ok|failed` so CI and local environments can quickly confirm the active compiler satisfies the workspace `rust-version`.
 
+It also prints capability security diagnostics. Use `security.summary: warnings=0` as the simple CI gate. Per-window lines report bridge status, risk level, command category counts, protocol count, remote-navigation settings, and recommendations for unsafe or contradictory capability declarations.
+
+Use `--json` to emit the stable `axion.diagnostics-report.v1` schema with structured `diagnostics.security` data:
+
+```sh
+cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml --json
+```
+
 ## `self-test`
 
 Run the non-GUI release gate for a manifest. It loads the app, prints app metadata, configured and effective native dialog backend, and per-window capability/runtime summaries, checks runtime diagnostics, stages frontend assets, and removes generated artifacts by default.
