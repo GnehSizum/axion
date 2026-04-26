@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>File Access Demo</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <div>
+          <h1>File Access Demo</h1>
+          <p>This example demonstrates Axion's app-data filesystem bridge, host events, and preview dialog APIs.</p>
+        </div>
+        <p id="bridge-status" class="status">Waiting for Axion bridge…</p>
+      </header>
+
+      <section class="grid">
+        <article class="panel">
+          <h2>Bridge Summary</h2>
+          <dl class="facts">
+            <div><dt>App</dt><dd id="summary-app">Loading…</dd></div>
+            <div><dt>Window</dt><dd id="summary-window">Loading…</dd></div>
+            <div><dt>Commands</dt><dd id="summary-commands">Loading…</dd></div>
+            <div><dt>Events</dt><dd id="summary-events">Loading…</dd></div>
+          </dl>
+        </article>
+
+        <article class="panel">
+          <h2>File Controls</h2>
+          <label class="field">
+            <span>Relative Path</span>
+            <input id="file-path" type="text" value="notes/demo.txt">
+          </label>
+          <label class="field">
+            <span>Contents</span>
+            <textarea id="file-contents" rows="6" wrap="off">Axion file-access-demo wrote this text through the bridge.</textarea>
+          </label>
+          <div class="actions">
+            <button id="write-text" type="button">Write Text</button>
+            <button id="read-text" type="button">Read Text</button>
+            <button id="probe-invalid-path" type="button">Probe Invalid Path</button>
+          </div>
+          <p id="file-feedback" class="feedback">No file action yet.</p>
+        </article>
+
+        <article class="panel">
+          <h2>Dialog Controls</h2>
+          <label class="field">
+            <span>Save Default Path</span>
+            <input id="dialog-default-path" type="text" value="notes/export.txt">
+          </label>
+          <div class="actions">
+            <button id="dialog-open" type="button">Open Preview Dialog</button>
+            <button id="dialog-save" type="button">Save Preview Dialog</button>
+            <button id="emit-log" type="button">Emit `app.log`</button>
+          </div>
+          <p class="hint">With `backend = "headless"`, dialogs return deterministic preview responses without opening a native sheet.</p>
+          <p id="dialog-feedback" class="feedback">No dialog action yet.</p>
+        </article>
+
+        <article class="panel">
+          <h2>Last Operation</h2>
+          <pre id="operation-result">Waiting for interaction…</pre>
+        </article>
+
+        <article class="panel">
+          <h2>Host Events</h2>
+          <pre id="event-log">Waiting for host events…</pre>
+        </article>
+
+        <article class="panel">
+          <h2>Bridge Diagnostics</h2>
+          <pre id="bridge-details">Loading Axion metadata…</pre>
+        </article>
+
+        <article class="panel">
+          <h2>Input Diagnostics</h2>
+          <pre id="input-diagnostics">Waiting for text input focus…</pre>
+        </article>
+      </section>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

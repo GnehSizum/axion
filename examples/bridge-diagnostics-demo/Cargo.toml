@@ -1,0 +1,14 @@
+[package]
+name = "bridge-diagnostics-demo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+servo-runtime = ["axion-runtime/servo-runtime"]
+
+[dependencies]
+axion-core.workspace = true
+axion-manifest.workspace = true
+axion-runtime.workspace = true

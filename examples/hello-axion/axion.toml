@@ -28,7 +28,7 @@ icon = "icons/app.icns"
 backend = "headless"
 
 [capabilities.main]
-commands = ["app.ping", "app.info", "app.version", "app.echo", "window.info", "fs.write_text", "fs.read_text", "dialog.open", "dialog.save", "demo.greet"]
+commands = ["app.ping", "app.info", "app.version", "app.echo", "window.info", "window.show", "window.hide", "window.focus", "window.set_title", "window.set_size", "fs.write_text", "fs.read_text", "dialog.open", "dialog.save", "demo.greet"]
 events = ["app.log"]
 protocols = ["axion"]
 allowed_navigation_origins = ["https://docs.example"]

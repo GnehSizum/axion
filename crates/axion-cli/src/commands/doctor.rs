@@ -457,10 +457,10 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("events=1, frontend_events=app.log, host_events=app.ready,window.created,window.close_requested,window.closed,window.resized,window.redraw_failed"))
+                .any(|line| line.contains("events=1, frontend_events=app.log, host_events=app.ready,window.created,window.close_requested,window.closed,window.resized,window.focused,window.blurred,window.moved,window.redraw_failed"))
         );
         assert!(lines.iter().any(|line| line.contains(
-            "lifecycle_events=window.created,window.close_requested,window.closed,window.resized,window.redraw_failed"
+            "lifecycle_events=window.created,window.close_requested,window.closed,window.resized,window.focused,window.blurred,window.moved,window.redraw_failed"
         )));
     }
 
@@ -496,7 +496,11 @@ mod tests {
                 (
                     "settings".to_owned(),
                     CapabilityConfig {
-                        commands: vec!["window.info".to_owned()],
+                        commands: vec![
+                            "window.info".to_owned(),
+                            "window.focus".to_owned(),
+                            "window.set_title".to_owned(),
+                        ],
                         events: vec!["app.log".to_owned()],
                         protocols: vec!["axion".to_owned()],
                         allowed_navigation_origins: vec!["https://docs.example".to_owned()],
@@ -516,7 +520,7 @@ mod tests {
                 && line.contains("frontend_events=app.log")
         }));
         assert!(lines.iter().any(|line| {
-            line.starts_with("runtime.window.settings: bridge=enabled, commands=1")
+            line.starts_with("runtime.window.settings: bridge=enabled, commands=3")
                 && line.contains("navigation_origins=https://docs.example")
         }));
     }

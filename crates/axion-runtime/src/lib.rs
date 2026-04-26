@@ -10,9 +10,10 @@ use thiserror::Error;
 pub use axion_bridge::BridgeBindingsBuilder as RuntimeBridgeBindingsBuilder;
 pub use axion_bridge::{
     BridgeEmitRequest, BridgeEvent as RuntimeBridgeEvent, BridgeRequest, CommandRegistryError,
+    WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-const AXION_RELEASE_VERSION: &str = "v0.1.4.0";
+const AXION_RELEASE_VERSION: &str = "v0.1.5.0";
 
 pub trait RuntimePlugin: Send + Sync {
     fn register(&self, builder: &mut RuntimeBridgeBindingsBuilder);
@@ -76,6 +77,9 @@ pub enum WindowLifecycleEventKind {
     CloseRequested,
     Closed,
     Resized,
+    Focused,
+    Blurred,
+    Moved,
     RedrawFailed,
 }
 
@@ -86,6 +90,9 @@ impl WindowLifecycleEventKind {
             Self::CloseRequested => "window.close_requested",
             Self::Closed => "window.closed",
             Self::Resized => "window.resized",
+            Self::Focused => "window.focused",
+            Self::Blurred => "window.blurred",
+            Self::Moved => "window.moved",
             Self::RedrawFailed => "window.redraw_failed",
         }
     }
@@ -106,6 +113,9 @@ pub fn window_lifecycle_event_names() -> Vec<String> {
         WindowLifecycleEventKind::CloseRequested,
         WindowLifecycleEventKind::Closed,
         WindowLifecycleEventKind::Resized,
+        WindowLifecycleEventKind::Focused,
+        WindowLifecycleEventKind::Blurred,
+        WindowLifecycleEventKind::Moved,
         WindowLifecycleEventKind::RedrawFailed,
     ]
     .into_iter()
@@ -260,6 +270,7 @@ pub struct RuntimeWindowBinding {
     pub command_context: CommandContext,
     pub bridge_bindings: BridgeBindings,
     pub security_policy: SecurityPolicy,
+    pub window_control: WindowControlHandle,
 }
 
 #[derive(Debug, Default)]
@@ -522,6 +533,7 @@ pub fn launch_request_with_plugins(
             let command_context = build_command_context(&launch_config, window);
             let security_policy = build_security_policy(app, &target, &app_protocol, &window.id);
             let app_data_dir = app_data_dir(&launch_config);
+            let window_control = WindowControlHandle::new();
             RuntimeWindowBinding {
                 window_id: window.id.clone(),
                 bridge_token: uuid::Uuid::new_v4().to_string(),
@@ -529,11 +541,13 @@ pub fn launch_request_with_plugins(
                     &security_policy,
                     &command_context,
                     app_data_dir,
+                    window_control.clone(),
                     dialog_backend,
                     plugins,
                 ),
                 security_policy,
                 command_context,
+                window_control,
             }
         })
         .collect();
@@ -614,6 +628,7 @@ fn build_bridge_bindings(
     security_policy: &SecurityPolicy,
     command_context: &CommandContext,
     app_data_dir: std::path::PathBuf,
+    window_control: WindowControlHandle,
     dialog_backend: DialogBackendKind,
     plugins: &[&dyn RuntimePlugin],
 ) -> BridgeBindings {
@@ -632,6 +647,7 @@ fn build_bridge_bindings(
         allowed_commands: allowed_commands.clone(),
         allowed_events: allowed_events.clone(),
         app_data_dir,
+        window_control,
         dialog_backend,
     };
     builder.apply_plugin(&plugin);
@@ -649,6 +665,7 @@ struct BuiltinBridgePlugin {
     allowed_commands: Vec<String>,
     allowed_events: Vec<String>,
     app_data_dir: std::path::PathBuf,
+    window_control: WindowControlHandle,
     dialog_backend: DialogBackendKind,
 }
 
@@ -660,6 +677,7 @@ impl BridgeBindingsPlugin for BuiltinBridgePlugin {
             builder,
             &self.allowed_commands,
             self.app_data_dir.clone(),
+            self.window_control.clone(),
             self.dialog_backend,
         );
         register_builtin_events(builder, &self.allowed_events);
@@ -696,6 +714,7 @@ fn register_builtin_commands(
     builder: &mut BridgeBindingsBuilder,
     allowed_commands: &[String],
     app_data_dir: std::path::PathBuf,
+    window_control: WindowControlHandle,
     dialog_backend: DialogBackendKind,
 ) {
     if allowed_commands.iter().any(|command| command == "app.ping") {
@@ -753,18 +772,150 @@ fn register_builtin_commands(
 
     if allowed_commands
         .iter()
+        .any(|command| command == "window.list")
+    {
+        let window_control = window_control.clone();
+        builder.register_command_async("window.list", move |_context, _request| {
+            let window_control = window_control.clone();
+            async move {
+                execute_window_control_json(&window_control, None, WindowControlRequest::ListStates)
+            }
+        });
+    }
+
+    if allowed_commands
+        .iter()
         .any(|command| command == "window.info")
     {
-        builder.register_command("window.info", |context, _request| {
-            Ok(format!(
-                "{{\"id\":{},\"title\":{},\"width\":{},\"height\":{},\"resizable\":{},\"visible\":{}}}",
-                json_string_literal(&context.window.id),
-                json_string_literal(&context.window.title),
-                context.window.width,
-                context.window.height,
-                context.window.resizable,
-                context.window.visible,
-            ))
+        let window_control = window_control.clone();
+        builder.register_command_async("window.info", move |context, request| {
+            let window_control = window_control.clone();
+            async move {
+                let target_window_id = json_string_field(&request.payload, "target");
+                let state =
+                    current_window_state(&window_control, &context, target_window_id.as_deref())?;
+                Ok(window_state_json(&state))
+            }
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "window.show")
+    {
+        let window_control = window_control.clone();
+        builder.register_command_async("window.show", move |_context, request| {
+            let window_control = window_control.clone();
+            async move {
+                let target_window_id = json_string_field(&request.payload, "target");
+                execute_window_control_json(
+                    &window_control,
+                    target_window_id.as_deref(),
+                    WindowControlRequest::Show,
+                )
+            }
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "window.hide")
+    {
+        let window_control = window_control.clone();
+        builder.register_command_async("window.hide", move |_context, request| {
+            let window_control = window_control.clone();
+            async move {
+                let target_window_id = json_string_field(&request.payload, "target");
+                execute_window_control_json(
+                    &window_control,
+                    target_window_id.as_deref(),
+                    WindowControlRequest::Hide,
+                )
+            }
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "window.close")
+    {
+        let window_control = window_control.clone();
+        builder.register_command_async("window.close", move |_context, request| {
+            let window_control = window_control.clone();
+            async move {
+                let target_window_id = json_string_field(&request.payload, "target");
+                execute_window_control_json(
+                    &window_control,
+                    target_window_id.as_deref(),
+                    WindowControlRequest::Close,
+                )
+            }
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "window.focus")
+    {
+        let window_control = window_control.clone();
+        builder.register_command_async("window.focus", move |_context, request| {
+            let window_control = window_control.clone();
+            async move {
+                let target_window_id = json_string_field(&request.payload, "target");
+                execute_window_control_json(
+                    &window_control,
+                    target_window_id.as_deref(),
+                    WindowControlRequest::Focus,
+                )
+            }
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "window.set_title")
+    {
+        let window_control = window_control.clone();
+        builder.register_command_async("window.set_title", move |_context, request| {
+            let window_control = window_control.clone();
+            async move {
+                let target_window_id = json_string_field(&request.payload, "target");
+                let title = json_string_field(&request.payload, "title").ok_or_else(|| {
+                    "window.set_title requires a JSON string field named 'title'".to_owned()
+                })?;
+                execute_window_control_json(
+                    &window_control,
+                    target_window_id.as_deref(),
+                    WindowControlRequest::SetTitle { title },
+                )
+            }
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "window.set_size")
+    {
+        let window_control = window_control.clone();
+        builder.register_command_async("window.set_size", move |_context, request| {
+            let window_control = window_control.clone();
+            async move {
+                let target_window_id = json_string_field(&request.payload, "target");
+                let width = json_u32_field(&request.payload, "width").ok_or_else(|| {
+                    "window.set_size requires a JSON number field named 'width'".to_owned()
+                })?;
+                let height = json_u32_field(&request.payload, "height").ok_or_else(|| {
+                    "window.set_size requires a JSON number field named 'height'".to_owned()
+                })?;
+                if width == 0 || height == 0 {
+                    return Err("window.set_size requires non-zero width and height".to_owned());
+                }
+                execute_window_control_json(
+                    &window_control,
+                    target_window_id.as_deref(),
+                    WindowControlRequest::SetSize { width, height },
+                )
+            }
         });
     }
 
@@ -890,6 +1041,7 @@ impl DialogResponse {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn selected(path: impl Into<std::path::PathBuf>, backend: DialogBackendKind) -> Self {
         let path = path.into();
         Self {
@@ -900,6 +1052,7 @@ impl DialogResponse {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn selected_multiple(paths: Vec<std::path::PathBuf>, backend: DialogBackendKind) -> Self {
         let path = paths.first().cloned();
         Self {
@@ -1077,6 +1230,65 @@ fn register_builtin_events(builder: &mut BridgeBindingsBuilder, allowed_events: 
     }
 }
 
+fn execute_window_control_json(
+    window_control: &WindowControlHandle,
+    target_window_id: Option<&str>,
+    request: WindowControlRequest,
+) -> Result<String, String> {
+    match window_control.execute(target_window_id, request)? {
+        WindowControlResponse::State(state) => Ok(window_state_json(&state)),
+        WindowControlResponse::List(states) => Ok(window_state_list_json(&states)),
+    }
+}
+
+fn current_window_state(
+    window_control: &WindowControlHandle,
+    context: &CommandContext,
+    target_window_id: Option<&str>,
+) -> Result<WindowStateSnapshot, String> {
+    match window_control.execute(target_window_id, WindowControlRequest::GetState) {
+        Ok(WindowControlResponse::State(state)) => Ok(state),
+        Ok(WindowControlResponse::List(_)) => {
+            Err("window control backend returned an unexpected list response".to_owned())
+        }
+        Err(_) if target_window_id.is_none_or(|target| target == context.window.id) => {
+            Ok(WindowStateSnapshot {
+                id: context.window.id.clone(),
+                title: context.window.title.clone(),
+                width: context.window.width,
+                height: context.window.height,
+                resizable: context.window.resizable,
+                visible: context.window.visible,
+                focused: false,
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn window_state_list_json(states: &[WindowStateSnapshot]) -> String {
+    let entries = states
+        .iter()
+        .map(window_state_json)
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!("{{\"windows\":[{entries}]}}")
+}
+
+fn window_state_json(state: &WindowStateSnapshot) -> String {
+    format!(
+        "{{\"id\":{},\"title\":{},\"width\":{},\"height\":{},\"resizable\":{},\"visible\":{},\"focused\":{}}}",
+        json_string_literal(&state.id),
+        json_string_literal(&state.title),
+        state.width,
+        state.height,
+        state.resizable,
+        state.visible,
+        state.focused,
+    )
+}
+
 fn build_security_policy(
     app: &App,
     target: &RuntimeLaunchTarget,
@@ -1124,6 +1336,7 @@ pub fn run_with_plugins(
                 command_context: binding.command_context,
                 bridge_bindings: binding.bridge_bindings,
                 security_policy: binding.security_policy,
+                window_control: binding.window_control,
             })
             .collect();
 
@@ -1158,6 +1371,7 @@ mod tests {
     use std::future::Future;
     use std::path::PathBuf;
     use std::pin::pin;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1172,8 +1386,10 @@ mod tests {
     use super::{
         AppProtocolLaunch, BridgeRequest, DiagnosticSeverity, DialogBackendKind, DialogRequest,
         DialogRequestKind, PanicReportConfig, RuntimeBridgeBindingsBuilder, RuntimeError,
-        RuntimeLaunchTarget, RuntimePlugin, diagnostic_report, execute_dialog_request,
-        format_panic_report_body, launch_request, launch_request_with_plugins, panic_report_path,
+        RuntimeLaunchTarget, RuntimePlugin, WindowControlHandle, WindowControlRequest,
+        WindowControlResponse, WindowStateSnapshot, current_window_state, diagnostic_report,
+        execute_dialog_request, format_panic_report_body, launch_request,
+        launch_request_with_plugins, panic_report_path,
     };
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1372,6 +1588,95 @@ mod tests {
             )
             .build()
             .expect("test app should build")
+    }
+
+    fn app_with_window_control_commands() -> axion_core::App {
+        let (frontend_dist, entry) = frontend_fixture("window-controls");
+        Builder::new()
+            .with_name("axion-runtime-test")
+            .with_window(WindowConfig::main("Runtime Test"))
+            .with_build(BuildConfig::new(frontend_dist, entry))
+            .with_capability(
+                "main",
+                CapabilityConfig {
+                    commands: vec![
+                        "window.list".to_owned(),
+                        "window.info".to_owned(),
+                        "window.show".to_owned(),
+                        "window.hide".to_owned(),
+                        "window.focus".to_owned(),
+                        "window.set_title".to_owned(),
+                        "window.set_size".to_owned(),
+                    ],
+                    events: Vec::new(),
+                    protocols: vec!["axion".to_owned()],
+                    allowed_navigation_origins: Vec::new(),
+                    allow_remote_navigation: false,
+                },
+            )
+            .build()
+            .expect("test app should build")
+    }
+
+    #[derive(Clone)]
+    struct FakeWindowControlExecutor;
+
+    impl axion_bridge::WindowControlExecutor for FakeWindowControlExecutor {
+        fn execute(
+            &self,
+            target_window_id: Option<&str>,
+            request: WindowControlRequest,
+        ) -> Result<WindowControlResponse, String> {
+            if matches!(request, WindowControlRequest::ListStates) {
+                return Ok(WindowControlResponse::List(vec![
+                    fake_window_state("main").expect("main fake state should exist"),
+                    fake_window_state("settings").expect("settings fake state should exist"),
+                ]));
+            }
+
+            let target_window_id = target_window_id.unwrap_or("main");
+            let mut state = fake_window_state(target_window_id)
+                .ok_or_else(|| format!("window '{target_window_id}' is unavailable"))?;
+            match request {
+                WindowControlRequest::GetState
+                | WindowControlRequest::Show
+                | WindowControlRequest::Close => {}
+                WindowControlRequest::Hide => state.visible = false,
+                WindowControlRequest::Focus => state.focused = true,
+                WindowControlRequest::SetTitle { title } => state.title = title,
+                WindowControlRequest::SetSize { width, height } => {
+                    state.width = width;
+                    state.height = height;
+                }
+                WindowControlRequest::ListStates => unreachable!(),
+            }
+
+            Ok(WindowControlResponse::State(state))
+        }
+    }
+
+    fn fake_window_state(window_id: &str) -> Option<WindowStateSnapshot> {
+        match window_id {
+            "main" => Some(WindowStateSnapshot {
+                id: "main".to_owned(),
+                title: "Runtime Test".to_owned(),
+                width: 960,
+                height: 720,
+                resizable: true,
+                visible: true,
+                focused: false,
+            }),
+            "settings" => Some(WindowStateSnapshot {
+                id: "settings".to_owned(),
+                title: "Settings".to_owned(),
+                width: 720,
+                height: 540,
+                resizable: true,
+                visible: true,
+                focused: false,
+            }),
+            _ => None,
+        }
     }
 
     fn app_with_missing_entry(dev: Option<&str>) -> axion_core::App {
@@ -1679,7 +1984,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.4.0\""));
+        assert!(version.contains("\"release\":\"v0.1.5.0\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
@@ -1795,6 +2100,9 @@ mod tests {
                 "window.close_requested".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
+                "window.focused".to_owned(),
+                "window.blurred".to_owned(),
+                "window.moved".to_owned(),
                 "window.redraw_failed".to_owned(),
             ]
         );
@@ -1806,6 +2114,9 @@ mod tests {
                 "window.close_requested".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
+                "window.focused".to_owned(),
+                "window.blurred".to_owned(),
+                "window.moved".to_owned(),
                 "window.redraw_failed".to_owned(),
             ]
         );
@@ -1844,6 +2155,9 @@ mod tests {
                 "window.close_requested".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
+                "window.focused".to_owned(),
+                "window.blurred".to_owned(),
+                "window.moved".to_owned(),
                 "window.redraw_failed".to_owned(),
             ]
         );
@@ -1926,6 +2240,114 @@ mod tests {
     }
 
     #[test]
+    fn window_control_commands_dispatch_through_control_handle() {
+        let request = launch_request(
+            &app_with_window_control_commands(),
+            axion_core::RunMode::Production,
+        )
+        .expect("launch request should build");
+        let binding = request
+            .window_bindings
+            .first()
+            .expect("main window binding should exist");
+        binding
+            .window_control
+            .install_executor(Arc::new(FakeWindowControlExecutor));
+
+        let info = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("window.info", "null"),
+        ))
+        .expect("window.info should dispatch");
+        assert!(info.contains("\"id\":\"main\""));
+        assert!(info.contains("\"focused\":false"));
+
+        let windows = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("window.list", "null"),
+        ))
+        .expect("window.list should dispatch");
+        assert!(windows.contains("\"windows\":["));
+        assert!(windows.contains("\"id\":\"main\""));
+        assert!(windows.contains("\"id\":\"settings\""));
+
+        let targeted_info = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("window.info", "{\"target\":\"settings\"}"),
+        ))
+        .expect("targeted window.info should dispatch");
+        assert!(targeted_info.contains("\"id\":\"settings\""));
+
+        let hidden = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("window.hide", "null"),
+        ))
+        .expect("window.hide should dispatch");
+        assert!(hidden.contains("\"visible\":false"));
+
+        let renamed = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "window.set_title",
+                "{\"target\":\"settings\",\"title\":\"Renamed\"}",
+            ),
+        ))
+        .expect("window.set_title should dispatch");
+        assert!(renamed.contains("\"id\":\"settings\""));
+        assert!(renamed.contains("\"title\":\"Renamed\""));
+
+        let resized = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("window.set_size", "{\"width\":640,\"height\":480}"),
+        ))
+        .expect("window.set_size should dispatch");
+        assert!(resized.contains("\"width\":640"));
+        assert!(resized.contains("\"height\":480"));
+
+        let missing = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("window.info", "{\"target\":\"missing\"}"),
+        ))
+        .expect_err("missing target should fail");
+        assert!(matches!(
+            missing,
+            axion_bridge::CommandDispatchError::Handler(message)
+                if message.contains("unavailable")
+        ));
+    }
+
+    #[test]
+    fn window_info_falls_back_to_command_context_without_backend() {
+        let state = current_window_state(
+            &WindowControlHandle::new(),
+            &axion_bridge::CommandContext {
+                app_name: "axion-runtime-test".to_owned(),
+                identifier: None,
+                version: None,
+                description: None,
+                authors: Vec::new(),
+                homepage: None,
+                mode: axion_bridge::BridgeRunMode::Production,
+                window: axion_bridge::WindowCommandContext {
+                    id: "main".to_owned(),
+                    title: "Runtime Test".to_owned(),
+                    width: 960,
+                    height: 720,
+                    resizable: true,
+                    visible: true,
+                },
+            },
+            None,
+        );
+        let state = state.expect("window.info fallback should succeed");
+
+        assert_eq!(state.id, "main");
+        assert_eq!(state.title, "Runtime Test");
+        assert_eq!(state.width, 960);
+        assert!(state.visible);
+    }
+
+    #[test]
     fn diagnostic_report_captures_launch_errors() {
         let report = diagnostic_report(
             &app_with_missing_entry(None),
@@ -1951,6 +2373,9 @@ mod tests {
                 "window.close_requested".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
+                "window.focused".to_owned(),
+                "window.blurred".to_owned(),
+                "window.moved".to_owned(),
                 "window.redraw_failed".to_owned(),
             ]
         );
@@ -2041,6 +2466,14 @@ fn json_bool_field(payload: &str, field: &str) -> Option<bool> {
     } else {
         None
     }
+}
+
+fn json_u32_field(payload: &str, field: &str) -> Option<u32> {
+    let value = json_field_value(payload, field)?;
+    let end = value
+        .find(|character: char| !(character.is_ascii_digit()))
+        .unwrap_or(value.len());
+    value[..end].parse().ok()
 }
 
 fn json_string_field(payload: &str, field: &str) -> Option<String> {

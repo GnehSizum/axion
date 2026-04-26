@@ -15,8 +15,12 @@ From the repository root:
 ```sh
 cargo run -p hello-axion -- --plan
 cargo run -p multi-window -- --plan
+cargo run -p file-access-demo -- --plan
+cargo run -p bridge-diagnostics-demo -- --plan
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/multi-window/axion.toml
+cargo run -p axion-cli -- self-test --manifest-path examples/file-access-demo/axion.toml
+cargo run -p axion-cli -- self-test --manifest-path examples/bridge-diagnostics-demo/axion.toml --json
 ```
 
 To run the GUI bridge self-test:
@@ -33,13 +37,33 @@ To keep the example window open, run without `AXION_SELFTEST_BRIDGE`:
 cargo run -p hello-axion --features servo-runtime
 ```
 
+`hello-axion` now includes a small input-compatibility panel wired to `window.__AXION__.compat.installTextInputSelectionPatch`, so you can quickly inspect caret placement, drag selection, and textarea `Tab` handling alongside the core bridge smoke checks.
+
 To inspect per-window capability behavior:
 
 ```sh
 cargo run -p multi-window --features servo-runtime
 ```
 
-The `main` window can call app-level commands, while the `settings` window is limited to `window.info`.
+The `main` window can call app-level commands, while the `settings` window is restricted to window-local controls such as `window.info`, `window.focus`, and `window.set_title`.
+The updated example also lets the `main` window use `window.list` plus `{ target: "settings" }` to inspect and rename the `settings` window.
+
+To inspect controlled filesystem and dialog capabilities:
+
+```sh
+cargo run -p file-access-demo --features servo-runtime
+```
+
+This example writes and reads `target/axion-data/file-access-demo/notes/demo.txt`, emits `app.log`, and shows the preview `dialog.open` / `dialog.save` responses configured by `[native.dialog]`.
+The page also includes editable file inputs, action buttons, a rejected-path probe, and a live host-event log so you can inspect the bridge behavior without opening developer tools.
+
+To inspect bridge snapshots, frontend self-checks, and unified compat diagnostics:
+
+```sh
+cargo run -p bridge-diagnostics-demo --features servo-runtime
+```
+
+This example renders `window.__AXION__.diagnostics.describeBridge()`, records host events, exercises built-in bridge commands, previews dialogs, includes a focused input/textarea compatibility panel, runs a visual smoke checklist for bridge, filesystem, dialog, event, and diagnostics helpers, and can export or reload a JSON diagnostics report from app-data.
 
 To inspect the development launch path:
 
@@ -68,11 +92,13 @@ Generated projects contain:
 - `src/main.rs`: Rust entrypoint with panic reporting and a `demo.greet` custom command plugin
 - `frontend/index.html`: packaged HTML entry
 - `frontend/style.css`: CSP-compatible external styles
-- `frontend/app.js`: bridge, native API, filesystem, custom command, event, and denied-command demos
+- `frontend/app.js`: bridge, native API, input-compatibility, custom command, event, and denied-command demos
 
 The generated `demo.greet` command is registered in Rust, allowed in `[capabilities.main]`, and invoked from frontend JavaScript. See `custom-commands.md` for the pattern.
 
 Generated manifests also include optional app metadata (`version`, `description`, `authors`, and `homepage`), `[bundle] icon = "icons/app.icns"`, and `[native.dialog] backend = "headless"`. These values appear in `app.info`, `axion doctor`, self-test output, and bundle metadata scaffolds. The generated frontend also demonstrates `dialog.open` with multi-select and filter metadata plus `dialog.save` with `defaultPath`.
+
+Generated frontends now include a small text-input compatibility panel wired to `window.__AXION__.compat.installTextInputSelectionPatch`. Use it as the starting pattern when a Servo-backed page needs more stable caret placement or drag selection in `input` and `textarea` controls.
 
 Generated apps install Axion panic reporting by default. Crash reports are written under `target/axion/crash-reports/`, which is ignored by the generated `.gitignore`.
 
@@ -87,7 +113,7 @@ cargo run -p axion-cli -- build --manifest-path /tmp/demo-app/axion.toml
 cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml
 ```
 
-`self-test` prints app metadata, native dialog backend, each window's configured commands/events/protocols, runtime command/event counts, host events, navigation origins, and staged asset paths.
+`self-test` prints app metadata, native dialog backend, each window's configured commands/events/protocols, runtime command/event counts, host events, navigation origins, and staged asset paths. Add `--json` to print an `axion.diagnostics-report.v1` report, or `--report-path <path>` to write that report while keeping the default text output.
 
 To customize an application icon in bundle scaffolds, update `[bundle] icon = "icons/app.icns"` in `axion.toml` and keep the icon file inside the project directory. Bundle output includes `axion-bundle-manifest.json`, which records the generated entry, metadata, icon, executable, file sizes, and `fnv1a64` fingerprints. The `bundle` command prints `verification: ok` after checking those references against the generated files.
 

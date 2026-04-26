@@ -77,7 +77,11 @@ Run the non-GUI release gate for a manifest. It loads the app, prints app metada
 ```sh
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml --keep-artifacts
+cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml --json
+cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-self-test.json
 ```
+
+Use `--json` to print a machine-readable `axion.diagnostics-report.v1` report. Use `--report-path <path>` to write the same report to disk while keeping the default human-readable output.
 
 ## `build`
 

@@ -4,13 +4,39 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Hello Axion</title>
+    <link rel="stylesheet" href="style.css">
   </head>
   <body>
-    <main>
-      <h1>Hello Axion</h1>
-      <p>This smoke app exists to validate the Axion workspace, manifest loader, and CLI flow.</p>
-      <p id="bridge-status">Waiting for Axion bridge…</p>
-      <pre id="bridge-details">Loading Axion metadata…</pre>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Axion Smoke Example</p>
+          <h1>Hello Axion</h1>
+          <p>This smoke app validates the workspace, bridge bootstrap, native preview APIs, and text-input compatibility helpers.</p>
+        </div>
+        <p id="bridge-status" class="status">Waiting for Axion bridge…</p>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2>Bridge Diagnostics</h2>
+          <pre id="bridge-details">Loading Axion metadata…</pre>
+        </article>
+
+        <article class="card">
+          <h2>Input Compatibility</h2>
+          <label class="field">
+            <span>Sample Input</span>
+            <input id="compat-input" type="text" value="Axion caret placement demo">
+          </label>
+          <label class="field">
+            <span>Sample Textarea</span>
+            <textarea id="compat-textarea" rows="5">Try clicking, selecting, and pressing Tab here.
+This textarea is wired to window.__AXION__.compat.installTextInputSelectionPatch.</textarea>
+          </label>
+          <pre id="compat-diagnostics">Waiting for input interaction…</pre>
+        </article>
+      </section>
     </main>
     <script src="app.js"></script>
   </body>

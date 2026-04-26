@@ -8,6 +8,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
 
   const bridge = window.__AXION__;
+  const diagnostics = bridge.diagnostics;
+  const formatPretty = (value) =>
+    typeof diagnostics?.toPrettyJson === 'function'
+      ? diagnostics.toPrettyJson(value)
+      : JSON.stringify(value, null, 2);
   const results = {
     appName: bridge.appName,
     commands: [...bridge.commands],
@@ -25,7 +30,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       results.windowInfo?.id ||
       (bridge.commands.includes('window.info') ? 'settings-like window' : 'main-like window');
     status.textContent = `Axion multi-window bridge ready: ${windowLabel}`;
-    details.textContent = JSON.stringify(results, null, 2);
+    details.textContent = formatPretty({
+      bridge: typeof diagnostics?.describeBridge === 'function' ? diagnostics.describeBridge() : null,
+      ...results,
+    });
   };
 
   for (const name of bridge.hostEvents) {
@@ -54,13 +62,44 @@ window.addEventListener('DOMContentLoaded', async () => {
         async: true,
       });
     }
+    if (bridge.commands.includes('window.list')) {
+      results.allowedCalls.windowList = await bridge.invoke('window.list', null);
+    }
     if (bridge.commands.includes('window.info')) {
       results.windowInfo = await bridge.invoke('window.info', null);
     }
+    if (bridge.commands.includes('window.focus')) {
+      const target = bridge.commands.includes('window.list') ? 'settings' : undefined;
+      results.allowedCalls.windowFocus = await bridge.invoke(
+        'window.focus',
+        target ? { target } : null,
+      );
+    }
+    if (bridge.commands.includes('window.set_title')) {
+      const target = bridge.commands.includes('window.list') ? 'settings' : undefined;
+      const title = target
+        ? 'Settings · Controlled From Main'
+        : `${results.windowInfo?.title ?? 'Settings'} · Controlled`;
+      results.allowedCalls.windowTitleUpdate = await bridge.invoke(
+        'window.set_title',
+        target ? { target, title } : { title },
+      );
+    }
+    if (bridge.commands.includes('window.info') && bridge.commands.includes('window.list')) {
+      results.allowedCalls.targetedWindowInfo = await bridge.invoke('window.info', {
+        target: 'settings',
+      });
+    }
 
-    const deniedProbeCommands = ['app.ping', 'app.info', 'app.echo', 'window.info'].filter(
-      (command) => !bridge.commands.includes(command),
-    );
+    const deniedProbeCommands = [
+      'app.ping',
+      'app.info',
+      'app.echo',
+      'window.list',
+      'window.info',
+      'window.focus',
+      'window.set_title',
+    ].filter((command) => !bridge.commands.includes(command));
     for (const command of deniedProbeCommands) {
       try {
         await bridge.invoke(command, null);

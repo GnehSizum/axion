@@ -153,9 +153,12 @@ impl SecurityPolicy {
         connect_sources.extend(self.trusted_origins.iter().cloned());
         connect_sources.extend(self.capabilities.allowed_navigation_origins.iter().cloned());
 
+        let style_sources = ["'self'".to_owned(), self.app_origin.clone()].join(" ");
+
         format!(
-            "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self' {}; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src {}",
+            "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self' {}; style-src {}; img-src 'self' data:; font-src 'self'; connect-src {}",
             self.app_origin,
+            style_sources,
             connect_sources.into_iter().collect::<Vec<_>>().join(" ")
         )
     }
@@ -308,6 +311,7 @@ mod tests {
         assert!(csp.contains("object-src 'none'"));
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(csp.contains("script-src 'self' axion://app"));
+        assert!(csp.contains("style-src 'self' axion://app"));
         assert!(csp.contains("connect-src"));
         assert!(csp.contains("http://127.0.0.1:3000"));
         assert!(csp.contains("https://docs.example"));

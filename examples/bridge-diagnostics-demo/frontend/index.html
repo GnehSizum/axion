@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bridge Diagnostics Demo</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Axion Diagnostics Demo</p>
+          <h1>Bridge Diagnostics Demo</h1>
+          <p>Use this example to inspect bridge metadata, run frontend self-checks, and verify text-input compatibility patches.</p>
+        </div>
+        <p id="bridge-status" class="status">Waiting for Axion bridge…</p>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2>Bridge Snapshot</h2>
+          <pre id="bridge-snapshot">Loading bridge state…</pre>
+        </article>
+
+        <article class="card">
+          <h2>Diagnostics Actions</h2>
+          <div class="actions">
+            <button id="run-self-check" type="button">Run Self-Check</button>
+            <button id="emit-host-log" type="button">Emit Host Log</button>
+            <button id="run-dialog-preview" type="button">Run Dialog Preview</button>
+            <button id="export-report" type="button">Export Report</button>
+            <button id="read-latest-report" type="button">Read Latest Report</button>
+          </div>
+          <p id="action-feedback" class="feedback">No diagnostics action yet.</p>
+        </article>
+
+        <article class="card">
+          <h2>Compatibility Input</h2>
+          <label class="field">
+            <span>Sample Input</span>
+            <input id="compat-input" type="text" value="Axion diagnostics input">
+          </label>
+          <label class="field">
+            <span>Sample Textarea</span>
+            <textarea id="compat-textarea" rows="6">Click, drag, and press Tab in this textarea.
+It uses window.__AXION__.compat.installTextInputSelectionPatch.</textarea>
+          </label>
+          <pre id="compat-diagnostics">Waiting for input interaction…</pre>
+        </article>
+
+        <article class="card">
+          <h2>Self-Check Result</h2>
+          <pre id="self-check-result">Waiting for diagnostics run…</pre>
+        </article>
+
+        <article class="card">
+          <h2>Smoke Checklist</h2>
+          <ul id="smoke-checklist" class="checklist">
+            <li>Waiting for smoke checklist…</li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <h2>Event Log</h2>
+          <pre id="event-log">Waiting for host events…</pre>
+        </article>
+
+        <article class="card">
+          <h2>Saved Report</h2>
+          <pre id="saved-report">No exported report loaded yet.</pre>
+        </article>
+      </section>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>
