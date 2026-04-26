@@ -91,6 +91,8 @@ When a window has permission for a window command, frontend code can optionally 
 - `frontend_dist`: directory containing frontend assets.
 - `entry`: HTML entry file. It must stay inside `frontend_dist`.
 
+`frontend_dist` and `entry` are always used for packaged `axion://app` launches, self-tests, and bundle staging. Development launches use `[dev]` when present and reachable, but packaged assets remain the validated fallback path.
+
 ## Bundle
 
 ```toml
@@ -104,9 +106,24 @@ Icon paths must be relative to the manifest directory and must not contain `..`.
 
 ## Dev
 
-- `url`: frontend dev server URL used by `axion dev --launch`.
+```toml
+[dev]
+url = "http://127.0.0.1:3000"
+command = "python3 -m http.server 3000 --bind 127.0.0.1 --directory frontend"
+cwd = "."
+timeout_ms = 15000
+```
 
-If `[dev]` is absent, development planning still works, but `axion dev --launch` requires `--fallback-packaged` to launch packaged assets.
+- `url`: frontend dev server URL used by `axion dev --launch`.
+- `command`: optional frontend command that `axion dev --frontend-command` can override.
+- `cwd`: optional command working directory, relative to the manifest directory.
+- `timeout_ms`: optional wait timeout for the dev server to become reachable.
+
+The URL must include a usable host and port. `axion dev` probes the endpoint before launch and reports one of `unconfigured`, `invalid endpoint`, `unreachable`, or `reachable`.
+
+If `[dev]` is absent or unreachable, development planning still works, but `axion dev --launch` requires `--fallback-packaged` to launch packaged assets. With multiple windows, every window uses the same dev server entry URL in development mode; packaged fallback uses the app protocol entry from `[build]`.
+
+CLI options take precedence over manifest development process fields: `--frontend-command`, `--frontend-cwd`, and `--dev-server-timeout-ms`.
 
 ## Native
 

@@ -362,7 +362,7 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.1.8.0"));
+        assert!(line.contains("release=v0.1.9.0"));
         assert!(line.contains("msrv="));
     }
 
@@ -743,6 +743,9 @@ mod tests {
             windows: vec![WindowConfig::main("Main")],
             dev: Some(DevServerConfig {
                 url: Url::parse("http://127.0.0.1:3000").unwrap(),
+                command: None,
+                cwd: None,
+                timeout_ms: None,
             }),
             build: BuildConfig::new("frontend", "frontend/index.html"),
             bundle: Default::default(),

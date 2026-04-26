@@ -30,6 +30,24 @@ pub struct DevArgs {
 
     #[arg(long, default_value_t = false)]
     pub fallback_packaged: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub watch: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub reload: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub open_devtools: bool,
+
+    #[arg(long)]
+    pub frontend_command: Option<String>,
+
+    #[arg(long)]
+    pub frontend_cwd: Option<PathBuf>,
+
+    #[arg(long)]
+    pub dev_server_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Args)]

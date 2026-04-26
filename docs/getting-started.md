@@ -73,6 +73,29 @@ cargo run -p axion-cli -- dev --manifest-path examples/hello-axion/axion.toml
 
 `axion dev` reports the selected launch mode, dev-server reachability, packaged fallback availability, and each window entry URL. `axion dev --launch` requires the configured frontend dev server to be running. If it is not reachable, the command exits with a diagnostic instead of silently launching packaged assets. Use `--fallback-packaged` only when you explicitly want to launch the packaged `axion://app` entry instead.
 
+`axion dev --launch` prints a launch summary before opening windows:
+
+```sh
+cargo run -p axion-cli --features servo-runtime -- dev \
+  --manifest-path examples/hello-axion/axion.toml \
+  --launch \
+  --fallback-packaged
+```
+
+The preview flags `--watch` and `--reload` are available for frontend development diagnostics. `--watch` polls `[build].frontend_dist` and reports created, modified, and deleted files. `--reload` reports `reload_requested` when watched files change; Servo window hot reload is still not wired, so restart the window when you need the page to refresh. `--open-devtools` is accepted for diagnostics, but the current Servo backend does not open devtools yet.
+
+To let Axion start a simple local frontend server, run:
+
+```sh
+cargo run -p axion-cli -- dev \
+  --manifest-path examples/hello-axion/axion.toml \
+  --frontend-command "python3 -m http.server 3000 --bind 127.0.0.1 --directory frontend" \
+  --frontend-cwd examples/hello-axion \
+  --dev-server-timeout-ms 5000
+```
+
+With `--launch`, Axion keeps that frontend process alive while the window runs and terminates it when the CLI exits.
+
 ## Create a New App
 
 ```sh
@@ -97,6 +120,8 @@ Generated projects contain:
 The generated `demo.greet` command is registered in Rust, allowed in `[capabilities.main]`, and invoked from frontend JavaScript. See `custom-commands.md` for the pattern.
 
 Generated manifests also include optional app metadata (`version`, `description`, `authors`, and `homepage`), `[bundle] icon = "icons/app.icns"`, and `[native.dialog] backend = "headless"`. These values appear in `app.info`, `axion doctor`, self-test output, and bundle metadata scaffolds. The generated frontend also demonstrates `dialog.open` with multi-select and filter metadata plus `dialog.save` with `defaultPath`.
+
+Generated manifests include commented `[dev]` lines. Uncomment them when you attach a frontend toolchain such as Vite, Trunk, or another static server. You can start that server separately before running `axion dev --launch`, or set `[dev] command` / pass `--frontend-command` so Axion starts it for you.
 
 Generated frontends now include a small text-input compatibility panel wired to `window.__AXION__.compat.installTextInputSelectionPatch`. Use it as the starting pattern when a Servo-backed page needs more stable caret placement or drag selection in `input` and `textarea` controls.
 

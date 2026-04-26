@@ -56,6 +56,9 @@ impl AppIdentity {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DevServerConfig {
     pub url: Url,
+    pub command: Option<String>,
+    pub cwd: Option<PathBuf>,
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -137,7 +137,12 @@ pub fn load_app_config_from_path(path: impl AsRef<Path>) -> Result<AppConfig, Ma
         .dev
         .map(|dev| {
             Url::parse(&dev.url)
-                .map(|url| DevServerConfig { url })
+                .map(|url| DevServerConfig {
+                    url,
+                    command: clean_optional_string(dev.command),
+                    cwd: dev.cwd.map(|cwd| resolve_path(&manifest_dir, cwd)),
+                    timeout_ms: dev.timeout_ms,
+                })
                 .map_err(|source| ManifestError::InvalidDevUrl {
                     path: path.clone(),
                     value: dev.url,
@@ -619,6 +624,9 @@ height = 600
 
 [dev]
 url = "http://127.0.0.1:3000"
+command = "python3 -m http.server 3000"
+cwd = "frontend"
+timeout_ms = 2500
 
 [build]
 frontend_dist = "frontend"
@@ -657,6 +665,13 @@ allow_remote_navigation = false
             Some("https://example.dev")
         );
         assert_eq!(config.windows[0].title, "Hello");
+        let dev = config.dev.as_ref().expect("dev config should load");
+        assert_eq!(dev.command.as_deref(), Some("python3 -m http.server 3000"));
+        assert_eq!(
+            dev.cwd.as_deref(),
+            Some(manifest_path.parent().unwrap().join("frontend").as_path())
+        );
+        assert_eq!(dev.timeout_ms, Some(2500));
         assert!(config.build.frontend_dist.is_absolute());
         assert!(config.build.entry.is_absolute());
         assert_eq!(

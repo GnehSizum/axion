@@ -2,11 +2,12 @@
 
 Axion is a Rust desktop application framework built on a vendored Servo engine. It provides an explicit manifest, capability-gated JavaScript bridge, packaged app assets, runtime diagnostics, and a `winit` desktop backend.
 
-Axion is currently at the **v0.1.8.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
+Axion is currently at the **v0.1.9.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
 
 ## What Works Today
 
 - Generate a guided Axion application with `axion-cli new --template vanilla`.
+- Inspect development-server readiness, run external frontend commands, watch frontend files, request reload diagnostics, and use packaged fallback through `axion-cli dev`.
 - Reuse bridge-provided text-input compatibility helpers in generated apps and custom frontends.
 - Load and validate `axion.toml` manifests.
 - Install crash reporting in generated and example applications.
@@ -32,6 +33,7 @@ cargo run -p multi-window -- --plan
 cargo run -p file-access-demo -- --plan
 cargo run -p bridge-diagnostics-demo -- --plan
 cargo run -p axion-cli -- dev --manifest-path examples/hello-axion/axion.toml
+cargo run -p axion-cli -- dev --manifest-path examples/hello-axion/axion.toml --fallback-packaged --watch --reload --open-devtools
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/file-access-demo/axion.toml
 AXION_SELFTEST_BRIDGE=1 cargo run -p hello-axion --features servo-runtime
@@ -108,4 +110,4 @@ Servo warnings from the vendored `servo/` subtree are not Axion release blockers
 
 ## Versioning
 
-Axion public releases use four-part tags such as `v0.1.8.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.8`. See `docs/versioning.md`.
+Axion public releases use four-part tags such as `v0.1.9.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.9`. See `docs/versioning.md`.

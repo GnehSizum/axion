@@ -68,6 +68,12 @@ impl Default for WindowSection {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DevSection {
     pub url: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
