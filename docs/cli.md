@@ -239,3 +239,26 @@ cargo run -p axion-cli -- bundle \
   --json \
   --report-path target/axion/reports/hello-bundle.json
 ```
+
+## `release`
+
+Run the preview release artifact workflow. `release` applies the doctor gate, checks readiness, runs quiet `self-test`, stages a bundle, embeds the bundle report, and can optionally create a dependency-free `.tar` artifact:
+
+```sh
+cargo run -p axion-cli -- release \
+  --manifest-path examples/hello-axion/axion.toml \
+  --json \
+  --report-path target/axion/reports/hello-release.json \
+  --bundle-report-path target/axion/reports/hello-bundle.json
+```
+
+Useful options:
+
+- `--archive`: create a `.tar` archive next to the generated bundle and report its bytes plus `fnv1a64` fingerprint.
+- `--archive-path <path>`: choose the archive output path.
+- `--skip-build-executable`: skip the default release executable build and use an existing or discovered executable.
+- `--max-risk low|medium|high`: tune the doctor security gate; default is `medium`.
+
+JSON output uses `axion.release-report.v1` and includes `doctor`, `readiness`, `self_test`, embedded `bundle.report`, optional `archive`, `artifacts[]`, `failure_phase`, `failed_reasons`, `next_step`, and `result`.
+
+When `--archive` is used, `archive.verification` confirms the tar file still exists, is non-empty, and matches the byte count plus `fnv1a64` fingerprint recorded during generation. `artifacts[]` lists generated release outputs for CI upload; the release report itself records only path and existence because size or fingerprint would otherwise be self-referential.

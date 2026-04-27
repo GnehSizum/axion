@@ -1,6 +1,6 @@
 # Packaging
 
-Axion v0.1.15.0 provides bundle scaffolds for local validation and early distribution experiments. These bundles are not signed installers yet.
+Axion v0.1.16.0 provides bundle scaffolds and preview release artifacts for local validation and early distribution experiments. These bundles are not signed installers yet.
 
 ## Bundle Command
 
@@ -50,6 +50,16 @@ cargo run -p axion-cli -- bundle --manifest-path path/to/axion.toml --build-exec
 
 The report includes `target`, `layout`, generated paths, platform metadata paths, copied `icon` and `executable`, `verification.checked_paths`, `bundle_files`, `fingerprinted_files`, `bundle_bytes`, `blockers`, `warnings`, `report_path`, and `result`. When readiness blocks bundling, JSON output still uses the same schema with `result = "failed"`.
 
+## Release Preview
+
+Use `release` when you want one command to run the release gate, stage the bundle, write reports, and optionally archive the output:
+
+```sh
+cargo run -p axion-cli -- release --manifest-path path/to/axion.toml --json --report-path target/axion/reports/app-release.json --bundle-report-path target/axion/reports/app-bundle.json --archive --archive-path target/axion/reports/app-bundle.tar
+```
+
+`axion.release-report.v1` embeds the bundle report, records `failure_phase` and `failed_reasons`, inventories generated artifacts, and records archive path, bytes, `fnv1a64`, and verification status when `--archive` is passed. The archive is an unsigned `.tar` preview artifact.
+
 ## Icons And Metadata
 
 Set a project-local icon in `axion.toml`:
@@ -73,6 +83,7 @@ cargo run -p axion-cli -- doctor --manifest-path path/to/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path path/to/axion.toml --json
 cargo run -p axion-cli -- bundle --manifest-path path/to/axion.toml --build-executable
 cargo run -p axion-cli -- bundle --manifest-path path/to/axion.toml --build-executable --json --report-path target/axion/reports/app-bundle.json
+cargo run -p axion-cli -- release --manifest-path path/to/axion.toml --json --report-path target/axion/reports/app-release.json --bundle-report-path target/axion/reports/app-bundle.json --archive --archive-path target/axion/reports/app-bundle.tar
 ```
 
 Signing, notarization, auto-updates, and installer generation are deferred to later milestones.

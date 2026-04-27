@@ -11,6 +11,8 @@ The CLI report is generated through the shared `axion_runtime::DiagnosticsReport
 - `axion check --json`: prints aggregate validation output using `axion.check-report.v1`.
 - `axion bundle --json`: prints bundle staging and verification output using `axion.bundle-report.v1`.
 - `axion bundle --report-path <path>`: writes the same bundle report to disk.
+- `axion release --json`: prints the aggregate release artifact workflow using `axion.release-report.v1`.
+- `axion release --report-path <path>`: writes the same release report to disk.
 - `axion gui-smoke --report-path <path>`: runs a Servo-backed GUI smoke check and writes the returned GUI report.
 - `examples/bridge-diagnostics-demo`: exports a GUI-side report from app-data.
 - `window.__AXION__.diagnostics.reportSchema`: exposes the active schema string to frontends.
@@ -55,6 +57,17 @@ CLI-generated GUI smoke failure reports use `source = "axion-cli gui-smoke"` and
 `axion.check-report.v1` summarizes doctor gate status, readiness, quiet self-test, optional bundle preflight, `next_step`, and `result`.
 
 `axion.bundle-report.v1` summarizes the staged bundle target, layout, generated paths, platform metadata paths, copied icon and executable, verification counters, checked paths, readiness blockers, warnings, optional `report_path`, and `result`. It is intended for release automation that needs bundle-specific output rather than the broader diagnostics report schema.
+
+`axion.release-report.v1` summarizes the full preview artifact workflow: doctor gate, readiness, self-test, embedded bundle report, optional archive artifact metadata, artifact inventory, first failure diagnostics, `next_step`, and `result`.
+
+Release reports include:
+
+- `failure_phase`: `doctor`, `readiness`, `self_test`, `bundle`, `archive`, or `null`.
+- `failed_reasons`: stable strings explaining the first blocking phase.
+- `artifacts[]`: generated file inventory with `kind`, `path`, `exists`, `bytes`, optional `fnv1a64`, and optional `error`. Kinds include `release_report`, `bundle_report`, `bundle_manifest`, and `archive`.
+- `archive.verification`: `{ checked, passed, error }` for tar artifacts created with `--archive`.
+
+The release report artifact itself records only path and existence because report size or fingerprint would be self-referential. Other file artifacts include byte counts and `fnv1a64` when they exist and can be read.
 
 ## CI Usage
 

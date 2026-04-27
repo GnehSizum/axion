@@ -4,6 +4,7 @@ pub mod check;
 pub mod dev;
 pub mod doctor;
 pub mod gui_smoke;
+pub mod release;
 pub mod self_test;
 
 use std::path::{Path, PathBuf};
@@ -142,9 +143,10 @@ cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest
 ```sh
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable --json --report-path target/axion/reports/bundle.json
+cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
 ```
 
-Expected output includes `target`, `layout`, `bundle_dir`, `bundle_manifest`, `platform_metadata`, `verification: ok`, `checked_files`, `fingerprinted_files`, and `bundle_bytes`. JSON output uses `axion.bundle-report.v1` for scripted release checks and can be written with `--report-path`.
+Expected output includes `target`, `layout`, `bundle_dir`, `bundle_manifest`, `platform_metadata`, `verification: ok`, `checked_files`, `fingerprinted_files`, and `bundle_bytes`. JSON output uses `axion.bundle-report.v1` for scripted release checks and can be written with `--report-path`. Release JSON uses `axion.release-report.v1` and includes `artifacts[]`, `failure_phase`, `failed_reasons`, and archive verification details.
 
 ## Runtime Artifacts
 
@@ -169,6 +171,7 @@ cargo run -p axion-cli -- self-test --manifest-path {manifest}
 cargo run -p axion-cli -- gui-smoke --manifest-path {manifest} --report-path target/axion/reports/gui-smoke.json --timeout-ms 30000 --cargo-target-dir target --serial-build
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable --json --report-path target/axion/reports/bundle.json
+cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
 ```
 
 ## Project Layout
@@ -193,7 +196,7 @@ cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable -
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.1.15\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.1.16\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root

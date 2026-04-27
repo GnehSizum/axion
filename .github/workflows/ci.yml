@@ -10,6 +10,10 @@ on:
         description: Run optional Servo GUI smoke under xvfb
         required: false
         default: "false"
+      run_release_preview:
+        description: Run optional release preview and upload artifacts
+        required: false
+        default: "false"
 
 jobs:
   rust:
@@ -99,4 +103,42 @@ jobs:
         with:
           name: axion-gui-smoke
           path: target/axion/reports/*-gui-smoke.json
+          if-no-files-found: error
+
+  release-preview:
+    name: Optional release preview
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.run_release_preview == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.86.0
+      - name: Run hello release preview
+        run: |
+          cargo run -p axion-cli -- release \
+            --manifest-path examples/hello-axion/axion.toml \
+            --json \
+            --report-path target/axion/reports/hello-release.json \
+            --bundle-report-path target/axion/reports/hello-bundle.json \
+            --archive \
+            --archive-path target/axion/reports/hello-bundle.tar
+      - name: Check release preview report
+        run: |
+          test -s target/axion/reports/hello-release.json
+          test -s target/axion/reports/hello-bundle.json
+          test -s target/axion/reports/hello-bundle.tar
+          grep -q '"schema":"axion.release-report.v1"' target/axion/reports/hello-release.json
+          grep -q '"result":"ok"' target/axion/reports/hello-release.json
+          grep -q '"failure_phase":null' target/axion/reports/hello-release.json
+          grep -q '"artifacts":' target/axion/reports/hello-release.json
+          grep -q '"verification":{"checked":true,"passed":true' target/axion/reports/hello-release.json
+      - name: Upload release preview artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: axion-release-preview
+          path: |
+            target/axion/reports/hello-release.json
+            target/axion/reports/hello-bundle.json
+            target/axion/reports/hello-bundle.tar
           if-no-files-found: error

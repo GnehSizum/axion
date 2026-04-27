@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.1.16.0 - Preview
+
+Axion v0.1.16.0 adds a preview release workflow on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.16`.
+- Axion public release metadata is `v0.1.16.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion release` as an aggregate release-preview command for doctor gate, readiness, quiet self-test, bundle staging, optional archive generation, and machine-readable reporting.
+- Added stable `axion.release-report.v1` output with doctor, readiness, self-test, embedded bundle report, optional archive metadata, `next_step`, and final result.
+- Added `axion release --report-path <path>` and `--bundle-report-path <path>` for CI artifacts.
+- Added `axion release --archive` to generate a dependency-free `.tar` preview artifact with byte size and `fnv1a64` fingerprint reporting.
+- Added release report artifact inventory entries for release report, bundle report, bundle manifest, and archive outputs.
+- Added `failure_phase` and `failed_reasons` to release reports so CI can identify the first blocking release stage.
+- Added archive verification that re-reads the generated tar and checks byte count plus `fnv1a64` fingerprint before marking the archive passed.
+- Added an optional GitHub Actions `release-preview` workflow_dispatch job that uploads release, bundle, and archive artifacts.
+
+### Changed
+
+- Generated app documentation now includes the release-preview command path.
+- Release-check documentation now recommends `axion release` for the full local artifact workflow.
+- Release report output now includes artifact existence, byte counts, fingerprints where stable, and archive verification status.
+
 ## v0.1.15.0 - Preview
 
 Axion v0.1.15.0 strengthens bundle reporting and preview release validation on the current Servo `0.1` baseline.

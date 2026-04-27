@@ -14,20 +14,29 @@ use crate::commands::doctor::doctor_readiness_for_manifest;
 use crate::error::AxionCliError;
 
 pub fn run(args: BundleArgs) -> Result<(), AxionCliError> {
-    let readiness = doctor_readiness_for_manifest(&args.manifest_path)?;
-    if !readiness.ready_for_bundle() {
-        let report = BundleReport::readiness_failed(&args, readiness.blockers());
-        write_report_if_requested(args.report_path.as_deref(), &report)?;
-        if args.json {
-            println!("{}", report.to_json());
-        } else {
-            report.print_human();
-        }
+    let report = bundle_report(&args)?;
+    write_report_if_requested(args.report_path.as_deref(), &report)?;
+    if args.json {
+        println!("{}", report.to_json());
+    } else {
+        report.print_human();
+    }
+
+    if report.result() == "failed" {
         return Err(std::io::Error::other(format!(
             "manifest is not ready for bundle; run `cargo run -p axion-cli -- check --manifest-path {} --bundle`",
             args.manifest_path.display()
         ))
         .into());
+    }
+
+    Ok(())
+}
+
+pub(crate) fn bundle_report(args: &BundleArgs) -> Result<BundleReport, AxionCliError> {
+    let readiness = doctor_readiness_for_manifest(&args.manifest_path)?;
+    if !readiness.ready_for_bundle() {
+        return Ok(BundleReport::readiness_failed(args, readiness.blockers()));
     }
 
     let config = axion_manifest::load_app_config_from_path(&args.manifest_path)?;
@@ -76,14 +85,7 @@ pub fn run(args: BundleArgs) -> Result<(), AxionCliError> {
         report_path: args.report_path.as_deref(),
     });
 
-    write_report_if_requested(args.report_path.as_deref(), &report)?;
-    if args.json {
-        println!("{}", report.to_json());
-    } else {
-        report.print_human();
-    }
-
-    Ok(())
+    Ok(report)
 }
 
 fn resolve_executable_path(
@@ -154,7 +156,7 @@ fn build_release_executable(manifest_path: &Path, quiet: bool) -> Result<(), Axi
     Ok(())
 }
 
-fn write_report_if_requested(
+pub(crate) fn write_report_if_requested(
     report_path: Option<&Path>,
     report: &BundleReport,
 ) -> Result<(), AxionCliError> {
@@ -172,7 +174,7 @@ fn write_report_if_requested(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct BundleReport {
+pub(crate) struct BundleReport {
     manifest_path: String,
     app: Option<String>,
     identifier: Option<String>,
@@ -301,7 +303,23 @@ impl BundleReport {
         }
     }
 
-    fn print_human(&self) {
+    pub(crate) fn result(&self) -> &str {
+        &self.result
+    }
+
+    pub(crate) fn bundle_dir(&self) -> Option<&str> {
+        self.bundle_dir.as_deref()
+    }
+
+    pub(crate) fn bundle_manifest(&self) -> Option<&str> {
+        self.bundle_manifest.as_deref()
+    }
+
+    pub(crate) fn bundle_bytes(&self) -> u64 {
+        self.verification.bundle_bytes
+    }
+
+    pub(crate) fn print_human(&self) {
         println!("Axion bundle");
         println!("manifest: {}", self.manifest_path);
         if let Some(app) = &self.app {
@@ -378,7 +396,7 @@ impl BundleReport {
         println!("result: {}", self.result);
     }
 
-    fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         format!(
             "{{\"schema\":\"axion.bundle-report.v1\",\"manifest_path\":{},\"app\":{},\"identifier\":{},\"app_version\":{},\"target\":{},\"layout\":{},\"output_dir\":{},\"bundle_dir\":{},\"resources_app_dir\":{},\"entry_path\":{},\"asset_manifest\":{},\"metadata\":{},\"platform_metadata\":{},\"bundle_manifest\":{},\"icon\":{},\"executable\":{},\"build_executable\":{},\"report_path\":{},\"verification\":{},\"blockers\":{},\"warnings\":{},\"result\":{}}}",
             json_string_literal(&self.manifest_path),

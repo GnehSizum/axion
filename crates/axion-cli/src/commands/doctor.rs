@@ -1639,7 +1639,7 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.1.15.0"));
+        assert!(line.contains("release=v0.1.16.0"));
         assert!(line.contains("msrv="));
     }
 

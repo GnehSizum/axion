@@ -26,6 +26,7 @@ Use `doctor --deny-warnings --max-risk medium` when you need the full human-read
 Use `--json` in CI and read `diagnostics.readiness.ready_for_dev`, `ready_for_bundle`, `ready_for_gui_smoke`, `blockers`, and `warnings`.
 Use `check --json` when CI only needs the aggregate workflow result, `next_step`, and bundle preflight status.
 Use `bundle --json` when CI needs the generated bundle layout, platform metadata, copied icon/executable paths, verification counters, checked paths, and final `result`. Add `--report-path <path>` to upload the bundle report as an artifact.
+Use `release --json` when CI needs the full preview artifact workflow result in `axion.release-report.v1`. The report includes `failure_phase`, `failed_reasons`, an `artifacts[]` inventory, and archive verification details when `--archive` is used.
 
 ## Full Local Gate
 
@@ -46,6 +47,15 @@ cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.t
 cargo run -p axion-cli -- gui-smoke --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-gui-smoke.json --timeout-ms 30000 --cargo-target-dir target --serial-build
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --build-executable
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --build-executable --json --report-path target/axion/reports/hello-bundle.json
+cargo run -p axion-cli -- release --manifest-path examples/hello-axion/axion.toml --json --report-path target/axion/reports/hello-release.json --bundle-report-path target/axion/reports/hello-bundle.json --archive --archive-path target/axion/reports/hello-bundle.tar
 ```
 
 `gui-smoke` requires a Servo-capable local environment. If it cannot run locally, keep the `doctor` readiness output and Servo compile check in the release notes.
+
+## Optional CI Preview
+
+The GitHub Actions workflow includes a manual `workflow_dispatch` input named `run_release_preview`. It is intentionally not a default pull request gate. When enabled, it runs the hello release preview, checks `axion.release-report.v1`, verifies `result = "ok"`, confirms archive verification passed, and uploads:
+
+- `target/axion/reports/hello-release.json`
+- `target/axion/reports/hello-bundle.json`
+- `target/axion/reports/hello-bundle.tar`

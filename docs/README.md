@@ -20,7 +20,7 @@ This directory contains public, user-facing documentation for Axion.
 
 ## Current Version
 
-Axion is at **v0.1.15.0 developer preview**. The current preview focuses on the core desktop framework loop:
+Axion is at **v0.1.16.0 developer preview**. The current preview focuses on the core desktop framework loop:
 
 1. load an app manifest
 2. build a runtime plan
@@ -41,5 +41,6 @@ Axion is at **v0.1.15.0 developer preview**. The current preview focuses on the 
 17. inspect per-window capability risk, remote-navigation scope, protocol consistency, profile expansion, command categories, release readiness, and CI gate results through `axion doctor` or `doctor --json`
 18. run the default generated-app validation loop through `axion check`
 19. export stable bundle reports through `axion bundle --json` and `--report-path`
+20. run a preview artifact workflow through `axion release`, including artifact inventory and archive verification
 
 Project-internal milestone plans and release notes are intentionally not part of the public documentation set.
