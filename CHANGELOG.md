@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.1.13.0 - Preview
+
+Axion v0.1.13.0 adds capability profiles on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.13`.
+- Axion public release metadata is `v0.1.13.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added manifest `profiles` under `[capabilities.<window>]` to expand common permission sets.
+- Added built-in profiles: `minimal`, `app-info`, `app-events`, `window-control`, `multi-window`, `file-access`, and `dialog-access`.
+- Added profile visibility to human `doctor`, `doctor --json`, `self-test`, and diagnostics reports.
+- Added per-profile expansion details and redundant explicit permission notices to `doctor` security diagnostics.
+- Added `axion doctor --deny-warnings` and `--max-risk <low|medium|high>` gates for CI release checks.
+- Added structured `diagnostics.gate` output to `doctor --json`.
+
+### Changed
+
+- Updated examples and generated app manifests to use profiles plus explicit custom commands.
+- Security and manifest documentation now describe profile expansion and recommended profile usage.
+- Security diagnostics now warn when unrestricted remote navigation is combined with file or dialog capabilities.
+
 ## v0.1.12.0 - Preview
 
 Axion v0.1.12.0 tightens capability and security diagnostics on the current Servo `0.1` baseline.

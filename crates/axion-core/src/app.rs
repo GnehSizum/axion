@@ -302,11 +302,13 @@ mod tests {
             capabilities: BTreeMap::from([(
                 "main".to_owned(),
                 CapabilityConfig {
+                    profiles: Vec::new(),
                     commands: vec!["app.ping".to_owned()],
                     events: vec!["app.log".to_owned()],
                     protocols: vec!["axion".to_owned()],
                     allowed_navigation_origins: Vec::new(),
                     allow_remote_navigation: false,
+                    ..Default::default()
                 },
             )]),
         })

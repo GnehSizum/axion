@@ -13,7 +13,7 @@ pub use axion_bridge::{
     WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-pub const AXION_RELEASE_VERSION: &str = "v0.1.12.0";
+pub const AXION_RELEASE_VERSION: &str = "v0.1.13.0";
 pub const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 pub trait RuntimePlugin: Send + Sync {
@@ -104,6 +104,7 @@ pub struct DiagnosticsWindowReport {
     pub id: String,
     pub title: String,
     pub bridge_enabled: bool,
+    pub configured_profiles: Vec<String>,
     pub configured_commands: Vec<String>,
     pub configured_events: Vec<String>,
     pub configured_protocols: Vec<String>,
@@ -163,10 +164,11 @@ impl DiagnosticsReport {
 impl DiagnosticsWindowReport {
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"id\":{},\"title\":{},\"bridge_enabled\":{},\"configured_commands\":{},\"configured_events\":{},\"configured_protocols\":{},\"runtime_command_count\":{},\"runtime_event_count\":{},\"host_events\":{},\"trusted_origins\":{},\"allowed_navigation_origins\":{},\"allow_remote_navigation\":{}}}",
+            "{{\"id\":{},\"title\":{},\"bridge_enabled\":{},\"configured_profiles\":{},\"configured_commands\":{},\"configured_events\":{},\"configured_protocols\":{},\"runtime_command_count\":{},\"runtime_event_count\":{},\"host_events\":{},\"trusted_origins\":{},\"allowed_navigation_origins\":{},\"allow_remote_navigation\":{}}}",
             json_string_literal(&self.id),
             json_string_literal(&self.title),
             self.bridge_enabled,
+            json_string_array_literal(&self.configured_profiles),
             json_string_array_literal(&self.configured_commands),
             json_string_array_literal(&self.configured_events),
             json_string_array_literal(&self.configured_protocols),
@@ -1610,11 +1612,13 @@ mod tests {
         builder = builder.with_capability(
             "main",
             CapabilityConfig {
+                profiles: Vec::new(),
                 commands: vec!["app.ping".to_owned()],
                 events: vec!["app.log".to_owned()],
                 protocols: vec!["axion".to_owned()],
                 allowed_navigation_origins: Vec::new(),
                 allow_remote_navigation: false,
+                ..Default::default()
             },
         );
 
@@ -1636,21 +1640,25 @@ mod tests {
             .with_capability(
                 "main",
                 CapabilityConfig {
+                    profiles: Vec::new(),
                     commands: vec!["app.ping".to_owned()],
                     events: vec!["app.log".to_owned()],
                     protocols: vec!["axion".to_owned()],
                     allowed_navigation_origins: Vec::new(),
                     allow_remote_navigation: false,
+                    ..Default::default()
                 },
             )
             .with_capability(
                 "settings",
                 CapabilityConfig {
+                    profiles: Vec::new(),
                     commands: vec!["window.info".to_owned()],
                     events: vec!["app.log".to_owned()],
                     protocols: vec!["axion".to_owned()],
                     allowed_navigation_origins: vec!["https://docs.example".to_owned()],
                     allow_remote_navigation: true,
+                    ..Default::default()
                 },
             )
             .build()
@@ -1666,11 +1674,13 @@ mod tests {
             .with_capability(
                 "main",
                 CapabilityConfig {
+                    profiles: Vec::new(),
                     commands: vec!["app.ping".to_owned()],
                     events: vec!["app.log".to_owned()],
                     protocols: Vec::new(),
                     allowed_navigation_origins: Vec::new(),
                     allow_remote_navigation: false,
+                    ..Default::default()
                 },
             )
             .build()
@@ -1686,11 +1696,13 @@ mod tests {
             .with_capability(
                 "main",
                 CapabilityConfig {
+                    profiles: Vec::new(),
                     commands: vec!["app.ping".to_owned(), command.to_owned()],
                     events: vec!["app.log".to_owned(), "plugin.event".to_owned()],
                     protocols: vec!["axion".to_owned()],
                     allowed_navigation_origins: Vec::new(),
                     allow_remote_navigation: false,
+                    ..Default::default()
                 },
             )
             .build()
@@ -1706,6 +1718,7 @@ mod tests {
             .with_capability(
                 "main",
                 CapabilityConfig {
+                    profiles: Vec::new(),
                     commands: vec![
                         "app.version".to_owned(),
                         "fs.read_text".to_owned(),
@@ -1717,6 +1730,7 @@ mod tests {
                     protocols: vec!["axion".to_owned()],
                     allowed_navigation_origins: Vec::new(),
                     allow_remote_navigation: false,
+                    ..Default::default()
                 },
             )
             .build()
@@ -1733,11 +1747,13 @@ mod tests {
             .with_capability(
                 "main",
                 CapabilityConfig {
+                    profiles: Vec::new(),
                     commands: vec!["dialog.open".to_owned()],
                     events: Vec::new(),
                     protocols: vec!["axion".to_owned()],
                     allowed_navigation_origins: Vec::new(),
                     allow_remote_navigation: false,
+                    ..Default::default()
                 },
             )
             .build()
@@ -1753,6 +1769,7 @@ mod tests {
             .with_capability(
                 "main",
                 CapabilityConfig {
+                    profiles: Vec::new(),
                     commands: vec![
                         "window.list".to_owned(),
                         "window.info".to_owned(),
@@ -1767,6 +1784,7 @@ mod tests {
                     protocols: vec!["axion".to_owned()],
                     allowed_navigation_origins: Vec::new(),
                     allow_remote_navigation: false,
+                    ..Default::default()
                 },
             )
             .build()
@@ -2150,7 +2168,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.12.0\""));
+        assert!(version.contains("\"release\":\"v0.1.13.0\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
@@ -2208,6 +2226,7 @@ mod tests {
                 id: "main".to_owned(),
                 title: "Main".to_owned(),
                 bridge_enabled: true,
+                configured_profiles: vec!["app-info".to_owned()],
                 configured_commands: vec!["app.ping".to_owned()],
                 configured_events: vec!["app.ready".to_owned()],
                 configured_protocols: vec!["axion".to_owned()],
@@ -2235,6 +2254,7 @@ mod tests {
         assert!(json.contains("\"schema\":\"axion.diagnostics-report.v1\""));
         assert!(json.contains("\"source\":\"unit-test\""));
         assert!(json.contains("\"manifest_path\":\"axion.toml\""));
+        assert!(json.contains("\"configured_profiles\":[\"app-info\"]"));
         assert!(json.contains("\"configured_commands\":[\"app.ping\"]"));
         assert!(json.contains("\"artifacts_removed\":true"));
         assert!(json.contains("\"diagnostics\":{\"kind\":\"unit\"}"));

@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use axion_core::{
-    AppConfig, AppIdentity, BuildConfig, BundleConfig, CapabilityConfig, DevServerConfig,
-    DialogBackendConfig, DialogConfig, NativeConfig, WindowConfig, WindowId,
+    AppConfig, AppIdentity, BuildConfig, BundleConfig, CapabilityConfig, CapabilityProfileConfig,
+    DevServerConfig, DialogBackendConfig, DialogConfig, NativeConfig, WindowConfig, WindowId,
 };
 use url::Url;
 
@@ -47,6 +47,16 @@ pub enum ManifestError {
     InvalidWindowSize { path: PathBuf, window_id: String },
     #[error("manifest at {path} defines an empty command for window id '{window_id}'")]
     InvalidCapabilityCommand { path: PathBuf, window_id: String },
+    #[error("manifest at {path} defines an empty capability profile for window id '{window_id}'")]
+    InvalidCapabilityProfile { path: PathBuf, window_id: String },
+    #[error(
+        "manifest at {path} defines unknown capability profile '{value}' for window id '{window_id}'"
+    )]
+    UnknownCapabilityProfile {
+        path: PathBuf,
+        window_id: String,
+        value: String,
+    },
     #[error("manifest at {path} defines invalid command '{value}' for window id '{window_id}'")]
     InvalidCapabilityCommandName {
         path: PathBuf,
@@ -315,7 +325,21 @@ fn capability_config_from_manifest(
     window_id: &str,
     capability: crate::model::CapabilitySection,
 ) -> Result<CapabilityConfig, ManifestError> {
-    let commands = normalize_capability_values(
+    let profiles = normalize_capability_values(
+        path,
+        window_id,
+        capability.profiles,
+        is_known_capability_profile,
+        |path, window_id| ManifestError::InvalidCapabilityProfile { path, window_id },
+        |path, window_id, value| ManifestError::UnknownCapabilityProfile {
+            path,
+            window_id,
+            value,
+        },
+    )?;
+    let profile_expansions = capability_profile_expansions(&profiles);
+    let profile_capability = merge_profile_expansions(&profile_expansions);
+    let explicit_commands = normalize_capability_values(
         path,
         window_id,
         capability.commands,
@@ -327,7 +351,19 @@ fn capability_config_from_manifest(
             value,
         },
     )?;
-    let events = normalize_capability_values(
+    let commands = normalize_capability_values(
+        path,
+        window_id,
+        merge_capability_values(profile_capability.commands, explicit_commands.clone()),
+        is_valid_command_name,
+        |path, window_id| ManifestError::InvalidCapabilityCommand { path, window_id },
+        |path, window_id, value| ManifestError::InvalidCapabilityCommandName {
+            path,
+            window_id,
+            value,
+        },
+    )?;
+    let explicit_events = normalize_capability_values(
         path,
         window_id,
         capability.events,
@@ -339,10 +375,34 @@ fn capability_config_from_manifest(
             value,
         },
     )?;
-    let protocols = normalize_capability_values(
+    let events = normalize_capability_values(
+        path,
+        window_id,
+        merge_capability_values(profile_capability.events, explicit_events.clone()),
+        is_valid_event_name,
+        |path, window_id| ManifestError::InvalidCapabilityEvent { path, window_id },
+        |path, window_id, value| ManifestError::InvalidCapabilityEventName {
+            path,
+            window_id,
+            value,
+        },
+    )?;
+    let explicit_protocols = normalize_capability_values(
         path,
         window_id,
         capability.protocols,
+        is_valid_protocol_name,
+        |path, window_id| ManifestError::InvalidCapabilityProtocol { path, window_id },
+        |path, window_id, value| ManifestError::InvalidCapabilityProtocolName {
+            path,
+            window_id,
+            value,
+        },
+    )?;
+    let protocols = normalize_capability_values(
+        path,
+        window_id,
+        merge_capability_values(profile_capability.protocols, explicit_protocols.clone()),
         is_valid_protocol_name,
         |path, window_id| ManifestError::InvalidCapabilityProtocol { path, window_id },
         |path, window_id, value| ManifestError::InvalidCapabilityProtocolName {
@@ -364,12 +424,128 @@ fn capability_config_from_manifest(
     }
 
     Ok(CapabilityConfig {
+        profiles,
+        profile_expansions,
+        explicit_commands,
+        explicit_events,
+        explicit_protocols,
         commands,
         events,
         protocols,
         allowed_navigation_origins,
         allow_remote_navigation: capability.allow_remote_navigation,
     })
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CapabilityProfileExpansion {
+    commands: Vec<String>,
+    events: Vec<String>,
+    protocols: Vec<String>,
+}
+
+fn merge_profile_expansions(profiles: &[CapabilityProfileConfig]) -> CapabilityProfileExpansion {
+    let mut expansion = CapabilityProfileExpansion::default();
+    for profile in profiles {
+        expansion.commands.extend(profile.commands.iter().cloned());
+        expansion.events.extend(profile.events.iter().cloned());
+        expansion
+            .protocols
+            .extend(profile.protocols.iter().cloned());
+    }
+
+    expansion
+}
+
+fn capability_profile_expansions(profiles: &[String]) -> Vec<CapabilityProfileConfig> {
+    profiles
+        .iter()
+        .map(|profile| {
+            let mut commands = profile_commands(profile)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>();
+            commands.sort();
+            commands.dedup();
+            let mut events = profile_events(profile)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>();
+            events.sort();
+            events.dedup();
+            let mut protocols = profile_protocols(profile)
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>();
+            protocols.sort();
+            protocols.dedup();
+
+            CapabilityProfileConfig {
+                profile: profile.clone(),
+                commands,
+                events,
+                protocols,
+            }
+        })
+        .collect()
+}
+
+fn profile_commands(profile: &str) -> &'static [&'static str] {
+    match profile {
+        "app-info" => &["app.ping", "app.info", "app.version", "app.echo"],
+        "window-control" => &[
+            "window.info",
+            "window.reload",
+            "window.focus",
+            "window.set_title",
+            "window.set_size",
+            "window.show",
+            "window.hide",
+        ],
+        "multi-window" => &[
+            "window.list",
+            "window.info",
+            "window.reload",
+            "window.focus",
+            "window.set_title",
+        ],
+        "file-access" => &["fs.read_text", "fs.write_text"],
+        "dialog-access" => &["dialog.open", "dialog.save"],
+        _ => &[],
+    }
+}
+
+fn profile_events(profile: &str) -> &'static [&'static str] {
+    match profile {
+        "app-events" => &["app.log"],
+        _ => &[],
+    }
+}
+
+fn profile_protocols(profile: &str) -> &'static [&'static str] {
+    match profile {
+        "minimal" | "app-info" | "app-events" | "window-control" | "multi-window"
+        | "file-access" | "dialog-access" => &["axion"],
+        _ => &[],
+    }
+}
+
+fn is_known_capability_profile(value: &str) -> bool {
+    matches!(
+        value,
+        "minimal"
+            | "app-info"
+            | "app-events"
+            | "window-control"
+            | "multi-window"
+            | "file-access"
+            | "dialog-access"
+    )
+}
+
+fn merge_capability_values(mut first: Vec<String>, second: Vec<String>) -> Vec<String> {
+    first.extend(second);
+    first
 }
 
 fn normalize_navigation_origins(
@@ -990,10 +1166,130 @@ protocols = [" axion ", "axion"]
             vec!["app.ping", "window.info"]
         );
         assert_eq!(
+            config.capabilities["main"].explicit_commands,
+            vec!["app.ping", "window.info"]
+        );
+        assert_eq!(
             config.capabilities["main"].events,
             vec!["app.log", "window.resized"]
         );
+        assert_eq!(
+            config.capabilities["main"].explicit_events,
+            vec!["app.log", "window.resized"]
+        );
         assert_eq!(config.capabilities["main"].protocols, vec!["axion"]);
+        assert_eq!(
+            config.capabilities["main"].explicit_protocols,
+            vec!["axion"]
+        );
+    }
+
+    #[test]
+    fn manifest_loader_expands_capability_profiles() {
+        let manifest_path = write_manifest(
+            r#"
+[app]
+name = "hello"
+
+[window]
+id = "main"
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[capabilities.main]
+profiles = [" app-info ", "window-control", "file-access", "dialog-access", "app-events"]
+commands = ["demo.greet", "app.ping"]
+events = ["demo.ready"]
+allowed_navigation_origins = ["https://docs.example"]
+"#,
+        );
+
+        let config = load_app_config_from_path(&manifest_path).expect("manifest should load");
+        let capability = &config.capabilities["main"];
+
+        assert_eq!(
+            capability.profiles,
+            vec![
+                "app-events",
+                "app-info",
+                "dialog-access",
+                "file-access",
+                "window-control"
+            ]
+        );
+        assert_eq!(
+            capability.commands,
+            vec![
+                "app.echo",
+                "app.info",
+                "app.ping",
+                "app.version",
+                "demo.greet",
+                "dialog.open",
+                "dialog.save",
+                "fs.read_text",
+                "fs.write_text",
+                "window.focus",
+                "window.hide",
+                "window.info",
+                "window.reload",
+                "window.set_size",
+                "window.set_title",
+                "window.show",
+            ]
+        );
+        assert_eq!(capability.events, vec!["app.log", "demo.ready"]);
+        assert_eq!(capability.protocols, vec!["axion"]);
+        assert_eq!(capability.explicit_commands, vec!["app.ping", "demo.greet"]);
+        assert_eq!(capability.explicit_events, vec!["demo.ready"]);
+        assert!(capability.explicit_protocols.is_empty());
+        assert_eq!(
+            capability.profile_expansions[1].commands,
+            vec!["app.echo", "app.info", "app.ping", "app.version"]
+        );
+        assert_eq!(capability.profile_expansions[0].events, vec!["app.log"]);
+        assert_eq!(
+            capability.allowed_navigation_origins,
+            vec!["https://docs.example"]
+        );
+    }
+
+    #[test]
+    fn manifest_loader_rejects_invalid_capability_profiles() {
+        for profile in ["", "unknown", "app info"] {
+            let manifest_path = write_manifest(&format!(
+                r#"
+[app]
+name = "hello"
+
+[window]
+id = "main"
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[capabilities.main]
+profiles = [{profile:?}]
+"#
+            ));
+
+            let error =
+                load_app_config_from_path(&manifest_path).expect_err("manifest should fail");
+            if profile.is_empty() {
+                assert!(matches!(
+                    error,
+                    ManifestError::InvalidCapabilityProfile { .. }
+                ));
+            } else {
+                assert!(matches!(
+                    error,
+                    ManifestError::UnknownCapabilityProfile { .. }
+                ));
+            }
+        }
     }
 
     #[test]

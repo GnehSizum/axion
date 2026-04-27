@@ -25,8 +25,7 @@ icon = "icons/app.icns"
 backend = "headless"
 
 [capabilities.main]
-commands = ["app.ping", "app.info", "window.info", "fs.write_text", "fs.read_text", "dialog.open", "dialog.save"]
-events = ["app.log"]
-protocols = ["axion"]
+profiles = ["file-access", "dialog-access", "app-events"]
+commands = ["app.ping", "app.info", "window.info"]
 allowed_navigation_origins = []
 allow_remote_navigation = false

@@ -149,7 +149,20 @@ impl DialogBackendConfig {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CapabilityProfileConfig {
+    pub profile: String,
+    pub commands: Vec<String>,
+    pub events: Vec<String>,
+    pub protocols: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CapabilityConfig {
+    pub profiles: Vec<String>,
+    pub profile_expansions: Vec<CapabilityProfileConfig>,
+    pub explicit_commands: Vec<String>,
+    pub explicit_events: Vec<String>,
+    pub explicit_protocols: Vec<String>,
     pub commands: Vec<String>,
     pub events: Vec<String>,
     pub protocols: Vec<String>,

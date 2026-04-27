@@ -32,9 +32,7 @@ url = "http://127.0.0.1:3000"
 backend = "headless"
 
 [capabilities.main]
-commands = ["app.ping", "app.info", "app.version", "app.echo", "window.info", "window.reload", "window.set_title", "window.set_size"]
-events = ["app.log"]
-protocols = ["axion"]
+profiles = ["app-info", "window-control", "app-events"]
 allowed_navigation_origins = []
 allow_remote_navigation = false
 ```
@@ -74,14 +72,11 @@ title = "Settings"
 visible = true
 
 [capabilities.main]
-commands = ["app.ping", "app.info", "window.list", "window.info", "window.focus", "window.set_title"]
-events = ["app.log"]
-protocols = ["axion"]
+profiles = ["app-info", "multi-window", "app-events"]
 
 [capabilities.settings]
+profiles = ["app-events"]
 commands = ["window.info", "window.focus", "window.set_title"]
-events = ["app.log"]
-protocols = ["axion"]
 ```
 
 When a window has permission for a window command, frontend code can optionally pass `{ target: "<window-id>" }` in the command payload to operate on another runtime window.
@@ -145,13 +140,29 @@ Capabilities are scoped by window id:
 
 ```toml
 [capabilities.main]
-commands = ["app.ping", "app.version", "window.list", "window.info", "window.reload", "window.focus", "window.set_title", "window.set_size", "fs.read_text", "fs.write_text", "dialog.open", "dialog.save"]
-events = ["app.log"]
-protocols = ["axion"]
+profiles = ["app-info", "multi-window", "file-access", "dialog-access", "app-events"]
 allowed_navigation_origins = ["https://docs.example"]
 allow_remote_navigation = false
 ```
 
-Only declared commands, frontend events, protocols, and navigation origins are available to that window.
+Only declared commands, frontend events, protocols, and navigation origins are available to that window. Profiles expand during manifest loading and are merged with explicit lists. `axion doctor` reports each profile expansion and flags explicit permissions that are already supplied by a profile.
+
+Built-in profiles:
+
+- `minimal`: enables the `axion` bridge protocol without commands or events.
+- `app-info`: enables `app.ping`, `app.info`, `app.version`, and `app.echo`.
+- `app-events`: enables frontend `app.log` events.
+- `window-control`: enables current-window control commands such as `window.info`, `window.reload`, `window.focus`, `window.set_title`, and `window.set_size`.
+- `multi-window`: enables multi-window coordination commands including `window.list`, `window.info`, `window.reload`, `window.focus`, and `window.set_title`.
+- `file-access`: enables `fs.read_text` and `fs.write_text`.
+- `dialog-access`: enables `dialog.open` and `dialog.save`.
 
 Custom Rust commands use the same capability list as built-in commands. For example, a plugin command registered as `demo.greet` must appear in `commands` before frontend code can call `window.__AXION__.invoke("demo.greet", payload)`.
+
+Avoid duplicating profile-provided permissions in explicit lists:
+
+```toml
+[capabilities.main]
+profiles = ["app-info"]
+commands = ["demo.greet"] # app.ping/app.info/app.version/app.echo already come from app-info
+```

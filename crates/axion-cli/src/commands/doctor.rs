@@ -4,13 +4,19 @@ use std::process::Command;
 use axion_core::{AppConfig, Builder, RunMode};
 use axion_runtime::{DiagnosticsReport, DiagnosticsWindowReport, json_string_literal};
 
-use crate::cli::DoctorArgs;
+use crate::cli::{DoctorArgs, DoctorRisk};
 use crate::commands::dev::dev_server_is_reachable;
 use crate::error::AxionCliError;
 
 pub fn run(args: DoctorArgs) -> Result<(), AxionCliError> {
     if args.json {
-        println!("{}", doctor_report(&args.manifest_path)?.to_json());
+        let report = doctor_report(&args)?;
+        let gate_failed = report.result == "failed";
+        println!("{}", report.to_json());
+        if gate_failed {
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            return Err(std::io::Error::other("doctor gate failed").into());
+        }
         return Ok(());
     }
 
@@ -20,6 +26,14 @@ pub fn run(args: DoctorArgs) -> Result<(), AxionCliError> {
     print_rustc_status();
     print_manifest_status(&args.manifest_path)?;
     print_servo_status(servo_path_for_manifest(&args.manifest_path).as_deref());
+    let gate = doctor_gate_for_manifest(&args)?;
+    for line in gate.to_lines() {
+        println!("{line}");
+    }
+    if !gate.passed {
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        return Err(std::io::Error::other("doctor gate failed").into());
+    }
     Ok(())
 }
 
@@ -188,7 +202,8 @@ fn manifest_diagnostic_lines(config: &AppConfig) -> Vec<String> {
                         "disabled"
                     };
                     format!(
-                        "capabilities.{window_id}: bridge={bridge_status}, commands={}, events={}, protocols={}, navigation_origins={}, remote_navigation={}",
+                        "capabilities.{window_id}: bridge={bridge_status}, profiles={}, commands={}, events={}, protocols={}, navigation_origins={}, remote_navigation={}",
+                        list_or_none(&capability.profiles),
                         list_or_none(&capability.commands),
                         list_or_none(&capability.events),
                         list_or_none(&capability.protocols),
@@ -227,6 +242,8 @@ fn security_diagnostics(config: &AppConfig) -> SecurityDiagnostics {
                     .any(|protocol| protocol == "axion");
                 windows.push(SecurityWindowDiagnostic {
                     id: window_id.to_owned(),
+                    profiles: capability.profiles.clone(),
+                    profile_expansions: capability.profile_expansions.clone(),
                     bridge_enabled,
                     risk: capability_risk_level(capability, bridge_enabled).to_owned(),
                     command_count: capability.commands.len(),
@@ -289,10 +306,46 @@ fn security_diagnostics(config: &AppConfig) -> SecurityDiagnostics {
                         None,
                     ));
                 }
+
+                if capability
+                    .profiles
+                    .iter()
+                    .any(|profile| profile == "minimal")
+                    && capability.profiles.len() > 1
+                {
+                    findings.push(SecurityFinding::notice(
+                        window_id,
+                        "redundant_minimal_profile",
+                        "minimal is redundant when combined with another bridge capability profile",
+                    ));
+                }
+
+                add_redundant_profile_findings(&mut findings, window_id, capability);
+                add_profile_suggestion_findings(&mut findings, window_id, capability);
+
+                if capability.allow_remote_navigation
+                    && (capability
+                        .commands
+                        .iter()
+                        .any(|command| command.starts_with("fs."))
+                        || capability
+                            .commands
+                            .iter()
+                            .any(|command| command.starts_with("dialog.")))
+                {
+                    findings.push(SecurityFinding::warning(
+                        window_id,
+                        "remote_navigation_native_capability",
+                        "file or dialog capabilities are enabled on a window that allows unrestricted remote navigation",
+                        Some("split native capabilities into a packaged app window or restrict remote navigation origins".to_owned()),
+                    ));
+                }
             }
             None => {
                 windows.push(SecurityWindowDiagnostic {
                     id: window_id.to_owned(),
+                    profiles: Vec::new(),
+                    profile_expansions: Vec::new(),
                     bridge_enabled: false,
                     risk: "low".to_owned(),
                     command_count: 0,
@@ -314,6 +367,172 @@ fn security_diagnostics(config: &AppConfig) -> SecurityDiagnostics {
     }
 
     SecurityDiagnostics { windows, findings }
+}
+
+fn add_redundant_profile_findings(
+    findings: &mut Vec<SecurityFinding>,
+    window_id: &str,
+    capability: &axion_core::CapabilityConfig,
+) {
+    for command in &capability.explicit_commands {
+        let profiles = profiles_providing_value(
+            &capability.profile_expansions,
+            ProfileValue::Command,
+            command,
+        );
+        if !profiles.is_empty() {
+            findings.push(SecurityFinding::notice(
+                window_id,
+                "redundant_profile_command",
+                format!(
+                    "explicit command '{command}' is already provided by profile {}",
+                    list_or_none(&profiles)
+                ),
+            ));
+        }
+    }
+
+    for event in &capability.explicit_events {
+        let profiles =
+            profiles_providing_value(&capability.profile_expansions, ProfileValue::Event, event);
+        if !profiles.is_empty() {
+            findings.push(SecurityFinding::notice(
+                window_id,
+                "redundant_profile_event",
+                format!(
+                    "explicit event '{event}' is already provided by profile {}",
+                    list_or_none(&profiles)
+                ),
+            ));
+        }
+    }
+
+    for protocol in &capability.explicit_protocols {
+        let profiles = profiles_providing_value(
+            &capability.profile_expansions,
+            ProfileValue::Protocol,
+            protocol,
+        );
+        if !profiles.is_empty() {
+            findings.push(SecurityFinding::notice(
+                window_id,
+                "redundant_profile_protocol",
+                format!(
+                    "explicit protocol '{protocol}' is already provided by profile {}",
+                    list_or_none(&profiles)
+                ),
+            ));
+        }
+    }
+}
+
+fn add_profile_suggestion_findings(
+    findings: &mut Vec<SecurityFinding>,
+    window_id: &str,
+    capability: &axion_core::CapabilityConfig,
+) {
+    if !capability.profiles.is_empty() {
+        return;
+    }
+
+    for profile in suggested_profiles_for_explicit_capabilities(capability) {
+        findings.push(SecurityFinding::recommendation(
+            window_id,
+            "capability_profile_available",
+            format!("explicit capabilities match built-in profile '{profile}'"),
+        ));
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ProfileValue {
+    Command,
+    Event,
+    Protocol,
+}
+
+fn profiles_providing_value(
+    expansions: &[axion_core::CapabilityProfileConfig],
+    value_kind: ProfileValue,
+    value: &str,
+) -> Vec<String> {
+    expansions
+        .iter()
+        .filter(|expansion| match value_kind {
+            ProfileValue::Command => expansion.commands.iter().any(|item| item == value),
+            ProfileValue::Event => expansion.events.iter().any(|item| item == value),
+            ProfileValue::Protocol => expansion.protocols.iter().any(|item| item == value),
+        })
+        .map(|expansion| expansion.profile.clone())
+        .collect()
+}
+
+fn suggested_profiles_for_explicit_capabilities(
+    capability: &axion_core::CapabilityConfig,
+) -> Vec<String> {
+    let candidates = [
+        (
+            "app-info",
+            &["app.echo", "app.info", "app.ping", "app.version"][..],
+            &[][..],
+            &["axion"][..],
+        ),
+        ("app-events", &[][..], &["app.log"][..], &["axion"][..]),
+        (
+            "window-control",
+            &[
+                "window.focus",
+                "window.hide",
+                "window.info",
+                "window.reload",
+                "window.set_size",
+                "window.set_title",
+                "window.show",
+            ][..],
+            &[][..],
+            &["axion"][..],
+        ),
+        (
+            "multi-window",
+            &[
+                "window.focus",
+                "window.info",
+                "window.list",
+                "window.reload",
+                "window.set_title",
+            ][..],
+            &[][..],
+            &["axion"][..],
+        ),
+        (
+            "file-access",
+            &["fs.read_text", "fs.write_text"][..],
+            &[][..],
+            &["axion"][..],
+        ),
+        (
+            "dialog-access",
+            &["dialog.open", "dialog.save"][..],
+            &[][..],
+            &["axion"][..],
+        ),
+    ];
+
+    candidates
+        .iter()
+        .filter(|(_, commands, events, protocols)| {
+            contains_all(&capability.explicit_commands, commands)
+                && contains_all(&capability.explicit_events, events)
+                && contains_all(&capability.explicit_protocols, protocols)
+        })
+        .map(|(profile, _, _, _)| (*profile).to_owned())
+        .collect()
+}
+
+fn contains_all(values: &[String], expected: &[&str]) -> bool {
+    expected
+        .iter()
+        .all(|expected| values.iter().any(|value| value == expected))
 }
 
 fn capability_risk_level(
@@ -409,6 +628,8 @@ impl CommandCategoryCounts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SecurityWindowDiagnostic {
     id: String,
+    profiles: Vec<String>,
+    profile_expansions: Vec<axion_core::CapabilityProfileConfig>,
     bridge_enabled: bool,
     risk: String,
     command_count: usize,
@@ -503,6 +724,14 @@ impl SecurityDiagnostics {
             .count()
     }
 
+    fn max_risk(&self) -> DoctorRisk {
+        self.windows
+            .iter()
+            .map(|window| risk_from_str(&window.risk))
+            .max()
+            .unwrap_or(DoctorRisk::Low)
+    }
+
     fn to_lines(&self) -> Vec<String> {
         let mut lines = vec![format!(
             "security.summary: warnings={}",
@@ -521,6 +750,21 @@ impl SecurityDiagnostics {
                 window.navigation_origin_count,
                 window.allow_remote_navigation,
             ));
+            lines.push(format!(
+                "security.window.{}.profiles: {}",
+                window.id,
+                list_or_none(&window.profiles)
+            ));
+            for expansion in &window.profile_expansions {
+                lines.push(format!(
+                    "security.window.{}.profile.{}: commands={}, events={}, protocols={}",
+                    window.id,
+                    expansion.profile,
+                    list_or_none(&expansion.commands),
+                    list_or_none(&expansion.events),
+                    list_or_none(&expansion.protocols),
+                ));
+            }
             lines.push(format!(
                 "security.window.{}.commands: {}",
                 window.id,
@@ -552,9 +796,17 @@ impl SecurityDiagnostics {
             .windows
             .iter()
             .map(|window| {
+                let profile_expansions = window
+                    .profile_expansions
+                    .iter()
+                    .map(profile_expansion_json)
+                    .collect::<Vec<_>>()
+                    .join(",");
                 format!(
-                    "{{\"id\":{},\"bridge_enabled\":{},\"risk\":{},\"command_count\":{},\"event_count\":{},\"protocol_count\":{},\"navigation_origin_count\":{},\"allow_remote_navigation\":{},\"command_categories\":{}}}",
+                    "{{\"id\":{},\"profiles\":{},\"profile_expansions\":[{}],\"bridge_enabled\":{},\"risk\":{},\"command_count\":{},\"event_count\":{},\"protocol_count\":{},\"navigation_origin_count\":{},\"allow_remote_navigation\":{},\"command_categories\":{}}}",
                     json_string_literal(&window.id),
+                    json_string_array_literal(&window.profiles),
+                    profile_expansions,
                     window.bridge_enabled,
                     json_string_literal(&window.risk),
                     window.command_count,
@@ -579,6 +831,85 @@ impl SecurityDiagnostics {
             self.warning_count(),
             windows,
             findings
+        )
+    }
+}
+
+fn profile_expansion_json(expansion: &axion_core::CapabilityProfileConfig) -> String {
+    format!(
+        "{{\"profile\":{},\"commands\":{},\"events\":{},\"protocols\":{}}}",
+        json_string_literal(&expansion.profile),
+        json_string_array_literal(&expansion.commands),
+        json_string_array_literal(&expansion.events),
+        json_string_array_literal(&expansion.protocols),
+    )
+}
+
+fn risk_from_str(value: &str) -> DoctorRisk {
+    match value {
+        "high" => DoctorRisk::High,
+        "medium" => DoctorRisk::Medium,
+        _ => DoctorRisk::Low,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DoctorGate {
+    passed: bool,
+    failed_reasons: Vec<String>,
+}
+
+impl DoctorGate {
+    fn passed() -> Self {
+        Self {
+            passed: true,
+            failed_reasons: Vec::new(),
+        }
+    }
+
+    fn evaluate(security: &SecurityDiagnostics, args: &DoctorArgs) -> Self {
+        let mut failed_reasons = Vec::new();
+
+        if args.deny_warnings && security.warning_count() > 0 {
+            failed_reasons.push(format!(
+                "security warnings {} exceed allowed 0",
+                security.warning_count()
+            ));
+        }
+
+        if let Some(max_risk) = args.max_risk {
+            let actual = security.max_risk();
+            if actual > max_risk {
+                failed_reasons.push(format!(
+                    "security risk {} exceeds max {}",
+                    actual.as_str(),
+                    max_risk.as_str()
+                ));
+            }
+        }
+
+        Self {
+            passed: failed_reasons.is_empty(),
+            failed_reasons,
+        }
+    }
+
+    fn to_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!(
+            "gate.summary: {}",
+            if self.passed { "passed" } else { "failed" }
+        )];
+        for reason in &self.failed_reasons {
+            lines.push(format!("gate.failure: {reason}"));
+        }
+        lines
+    }
+
+    fn to_json(&self) -> String {
+        format!(
+            "{{\"passed\":{},\"failed_reasons\":{}}}",
+            self.passed,
+            json_string_array_literal(&self.failed_reasons)
         )
     }
 }
@@ -728,10 +1059,24 @@ fn servo_path_for_manifest(manifest_path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn doctor_report(manifest_path: &Path) -> Result<DiagnosticsReport, AxionCliError> {
+fn doctor_gate_for_manifest(args: &DoctorArgs) -> Result<DoctorGate, AxionCliError> {
+    if !args.manifest_path.exists() {
+        return Ok(DoctorGate::passed());
+    }
+
+    let config = axion_manifest::load_app_config_from_path(&args.manifest_path)?;
+    Ok(DoctorGate::evaluate(&security_diagnostics(&config), args))
+}
+
+fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> {
+    let manifest_path = &args.manifest_path;
     let cargo = tool_status("cargo", &["--version"]);
     let rustc = tool_status("rustc", &["--version"]);
     let servo_path = servo_path_for_manifest(manifest_path);
+    let missing_gate = DoctorGate {
+        passed: false,
+        failed_reasons: vec!["manifest is missing".to_owned()],
+    };
 
     if !manifest_path.exists() {
         return Ok(DiagnosticsReport {
@@ -761,6 +1106,7 @@ fn doctor_report(manifest_path: &Path) -> Result<DiagnosticsReport, AxionCliErro
                 rustc: &rustc,
                 rustc_msrv: "unknown",
                 security: None,
+                gate: &missing_gate,
                 servo_path: servo_path.as_deref(),
                 dev_server: None,
                 runtime: None,
@@ -773,6 +1119,7 @@ fn doctor_report(manifest_path: &Path) -> Result<DiagnosticsReport, AxionCliErro
     let app = Builder::new().apply_config(config.clone()).build()?;
     let runtime = axion_runtime::diagnostic_report(&app, RunMode::Production);
     let security = security_diagnostics(&config);
+    let gate = DoctorGate::evaluate(&security, args);
     let rustc_msrv = if rustc.status == "ok" {
         rustc_msrv_diagnostic_line(&rustc.detail)
     } else {
@@ -802,6 +1149,9 @@ fn doctor_report(manifest_path: &Path) -> Result<DiagnosticsReport, AxionCliErro
                 bridge_enabled: configured_protocols
                     .iter()
                     .any(|protocol| protocol == "axion"),
+                configured_profiles: capability
+                    .map(|capability| capability.profiles.clone())
+                    .unwrap_or_default(),
                 configured_commands: capability
                     .map(|capability| capability.commands.clone())
                     .unwrap_or_default(),
@@ -869,11 +1219,12 @@ fn doctor_report(manifest_path: &Path) -> Result<DiagnosticsReport, AxionCliErro
             rustc: &rustc,
             rustc_msrv: &rustc_msrv,
             security: Some(&security),
+            gate: &gate,
             servo_path: servo_path.as_deref(),
             dev_server: Some(dev_server_diagnostic_line(&config)),
             runtime: Some(&runtime),
         })),
-        result: "ok".to_owned(),
+        result: if gate.passed { "ok" } else { "failed" }.to_owned(),
     })
 }
 
@@ -882,6 +1233,7 @@ struct DoctorDiagnosticsInput<'a> {
     rustc: &'a ToolDiagnostic,
     rustc_msrv: &'a str,
     security: Option<&'a SecurityDiagnostics>,
+    gate: &'a DoctorGate,
     servo_path: Option<&'a Path>,
     dev_server: Option<String>,
     runtime: Option<&'a axion_runtime::RuntimeDiagnosticReport>,
@@ -917,7 +1269,7 @@ fn doctor_diagnostics_json(input: DoctorDiagnosticsInput<'_>) -> String {
         .unwrap_or_else(|| "null".to_owned());
 
     format!(
-        "{{\"framework\":{{\"cli_version\":{},\"release\":{},\"msrv\":{}}},\"tools\":[{},{}],\"rustc_msrv\":{},\"security\":{},\"servo\":{},\"dev_server\":{},\"runtime\":{}}}",
+        "{{\"framework\":{{\"cli_version\":{},\"release\":{},\"msrv\":{}}},\"tools\":[{},{}],\"rustc_msrv\":{},\"security\":{},\"gate\":{},\"servo\":{},\"dev_server\":{},\"runtime\":{}}}",
         json_string_literal(env!("CARGO_PKG_VERSION")),
         json_string_literal(axion_runtime::AXION_RELEASE_VERSION),
         json_string_literal(option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("unknown")),
@@ -925,6 +1277,7 @@ fn doctor_diagnostics_json(input: DoctorDiagnosticsInput<'_>) -> String {
         tool_diagnostic_json(input.rustc),
         json_string_literal(input.rustc_msrv),
         security,
+        input.gate.to_json(),
         servo,
         dev_server,
         runtime,
@@ -938,6 +1291,16 @@ fn tool_diagnostic_json(tool: &ToolDiagnostic) -> String {
         json_string_literal(&tool.status),
         json_string_literal(&tool.detail)
     )
+}
+
+fn json_string_array_literal(values: &[String]) -> String {
+    let values = values
+        .iter()
+        .map(|value| json_string_literal(value))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!("[{values}]")
 }
 
 fn current_unix_timestamp_secs() -> u64 {
@@ -960,11 +1323,14 @@ mod tests {
     };
     use url::Url;
 
+    use crate::cli::{DoctorArgs, DoctorRisk};
+
     use super::{
-        build_asset_diagnostic_lines, bundle_diagnostic_lines, dev_server_diagnostic_line,
-        dev_server_diagnostic_line_with, doctor_report, framework_diagnostic_line,
-        manifest_diagnostic_lines, parse_rustc_semver, parse_semver, runtime_diagnostic_lines,
-        rustc_msrv_diagnostic_line, security_diagnostics, servo_path_for_manifest,
+        DoctorGate, build_asset_diagnostic_lines, bundle_diagnostic_lines,
+        dev_server_diagnostic_line, dev_server_diagnostic_line_with, doctor_report,
+        framework_diagnostic_line, manifest_diagnostic_lines, parse_rustc_semver, parse_semver,
+        runtime_diagnostic_lines, rustc_msrv_diagnostic_line, security_diagnostics,
+        servo_path_for_manifest,
     };
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -996,7 +1362,7 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.1.12.0"));
+        assert!(line.contains("release=v0.1.13.0"));
         assert!(line.contains("msrv="));
     }
 
@@ -1041,11 +1407,13 @@ mod tests {
             capabilities: std::collections::BTreeMap::from([(
                 "main".to_owned(),
                 CapabilityConfig {
+                    profiles: Vec::new(),
                     commands: vec!["app.ping".to_owned(), "window.info".to_owned()],
                     events: vec!["app.log".to_owned()],
                     protocols: vec!["axion".to_owned()],
                     allowed_navigation_origins: vec!["https://docs.example".to_owned()],
                     allow_remote_navigation: false,
+                    ..Default::default()
                 },
             )]),
         };
@@ -1082,7 +1450,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "capabilities.main: bridge=enabled, commands=app.ping,window.info, events=app.log, protocols=axion, navigation_origins=https://docs.example, remote_navigation=false")
+                .any(|line| line == "capabilities.main: bridge=enabled, profiles=none, commands=app.ping,window.info, events=app.log, protocols=axion, navigation_origins=https://docs.example, remote_navigation=false")
         );
         assert!(
             lines
@@ -1108,6 +1476,7 @@ mod tests {
                 (
                     "main".to_owned(),
                     CapabilityConfig {
+                        profiles: Vec::new(),
                         commands: vec![
                             "app.ping".to_owned(),
                             "window.reload".to_owned(),
@@ -1119,16 +1488,19 @@ mod tests {
                         protocols: vec!["axion".to_owned()],
                         allowed_navigation_origins: vec!["https://docs.example".to_owned()],
                         allow_remote_navigation: false,
+                        ..Default::default()
                     },
                 ),
                 (
                     "viewer".to_owned(),
                     CapabilityConfig {
+                        profiles: Vec::new(),
                         commands: vec!["app.ping".to_owned()],
                         events: vec!["app.log".to_owned()],
                         protocols: vec!["preview".to_owned()],
                         allowed_navigation_origins: vec!["https://docs.example".to_owned()],
                         allow_remote_navigation: true,
+                        ..Default::default()
                     },
                 ),
             ]),
@@ -1188,28 +1560,188 @@ frontend_dist = "frontend"
 entry = "frontend/index.html"
 
 [capabilities.main]
-commands = ["app.ping", "fs.read_text"]
-events = ["app.log"]
-protocols = ["axion"]
+profiles = ["app-info", "file-access", "app-events"]
 allowed_navigation_origins = ["https://docs.example"]
 "#,
         )
         .unwrap();
 
-        let json = doctor_report(&manifest)
-            .expect("doctor report should build")
-            .to_json();
+        let json = doctor_report(&DoctorArgs {
+            manifest_path: manifest,
+            json: true,
+            deny_warnings: false,
+            max_risk: Some(DoctorRisk::Medium),
+        })
+        .expect("doctor report should build")
+        .to_json();
 
         assert!(json.contains("\"schema\":\"axion.diagnostics-report.v1\""));
         assert!(json.contains("\"source\":\"axion-cli doctor\""));
         assert!(json.contains("\"app_name\":\"doctor-json\""));
+        assert!(
+            json.contains("\"configured_profiles\":[\"app-events\",\"app-info\",\"file-access\"]")
+        );
         assert!(json.contains("\"security\":{\"warning_count\":0"));
+        assert!(json.contains("\"gate\":{\"passed\":true,\"failed_reasons\":[]}"));
+        assert!(json.contains("\"profiles\":[\"app-events\",\"app-info\",\"file-access\"]"));
         assert!(json.contains("\"risk\":\"medium\""));
         assert!(json.contains(
-            "\"command_categories\":{\"app\":1,\"window\":0,\"fs\":1,\"dialog\":0,\"custom\":0}"
+            "\"command_categories\":{\"app\":4,\"window\":0,\"fs\":2,\"dialog\":0,\"custom\":0}"
         ));
         assert!(json.contains("\"code\":\"limited_remote_navigation\""));
         assert!(json.contains("\"result\":\"ok\""));
+    }
+
+    #[test]
+    fn security_diagnostics_explain_profile_expansion_and_redundancy() {
+        let root = temp_dir();
+        let frontend = root.join("frontend");
+        fs::create_dir_all(&frontend).unwrap();
+        fs::write(frontend.join("index.html"), "<!doctype html><html></html>").unwrap();
+        let manifest = root.join("axion.toml");
+        fs::write(
+            &manifest,
+            r#"
+[app]
+name = "doctor-profiles"
+
+[window]
+id = "main"
+title = "Doctor Profiles"
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[capabilities.main]
+profiles = ["app-info", "app-events"]
+commands = ["app.ping"]
+events = ["app.log"]
+protocols = ["axion"]
+"#,
+        )
+        .unwrap();
+
+        let config =
+            axion_manifest::load_app_config_from_path(&manifest).expect("manifest should load");
+        let security = security_diagnostics(&config);
+        let lines = security.to_lines();
+        let json = security.to_json();
+        let gate = DoctorGate::evaluate(
+            &security,
+            &DoctorArgs {
+                manifest_path: manifest,
+                json: false,
+                deny_warnings: true,
+                max_risk: Some(DoctorRisk::Low),
+            },
+        );
+
+        assert_eq!(security.warning_count(), 0);
+        assert!(gate.passed);
+        assert!(lines.iter().any(|line| {
+            line == "security.window.main.profile.app-info: commands=app.echo,app.info,app.ping,app.version, events=none, protocols=axion"
+        }));
+        assert!(lines.iter().any(|line| {
+            line == "security.window.main.profile.app-events: commands=none, events=app.log, protocols=axion"
+        }));
+        assert!(lines.iter().any(|line| {
+            line == "security.notice.main: explicit command 'app.ping' is already provided by profile app-info"
+        }));
+        assert!(lines.iter().any(|line| {
+            line == "security.notice.main: explicit event 'app.log' is already provided by profile app-events"
+        }));
+        assert!(lines.iter().any(|line| {
+            line == "security.notice.main: explicit protocol 'axion' is already provided by profile app-events,app-info"
+        }));
+        assert!(json.contains("\"profile_expansions\":["));
+        assert!(json.contains("\"profile\":\"app-info\""));
+        assert!(json.contains("\"code\":\"redundant_profile_command\""));
+        assert!(json.contains("\"code\":\"redundant_profile_event\""));
+        assert!(json.contains("\"code\":\"redundant_profile_protocol\""));
+    }
+
+    #[test]
+    fn security_diagnostics_suggest_common_profiles_for_explicit_groups() {
+        let config = AppConfig {
+            identity: AppIdentity::new("doctor-profile-suggestion"),
+            windows: vec![WindowConfig::main("Main")],
+            dev: None,
+            build: BuildConfig::new("frontend", "frontend/index.html"),
+            bundle: Default::default(),
+            native: Default::default(),
+            capabilities: std::collections::BTreeMap::from([(
+                "main".to_owned(),
+                CapabilityConfig {
+                    explicit_commands: vec!["fs.read_text".to_owned(), "fs.write_text".to_owned()],
+                    explicit_protocols: vec!["axion".to_owned()],
+                    commands: vec!["fs.read_text".to_owned(), "fs.write_text".to_owned()],
+                    protocols: vec!["axion".to_owned()],
+                    allowed_navigation_origins: Vec::new(),
+                    allow_remote_navigation: false,
+                    ..Default::default()
+                },
+            )]),
+        };
+
+        let security = security_diagnostics(&config);
+        let json = security.to_json();
+
+        assert!(security.findings.iter().any(|finding| {
+            finding.severity == "recommendation"
+                && finding.code == "capability_profile_available"
+                && finding.message == "explicit capabilities match built-in profile 'file-access'"
+        }));
+        assert!(json.contains("\"code\":\"capability_profile_available\""));
+    }
+
+    #[test]
+    fn security_gate_fails_on_warnings_and_high_risk() {
+        let config = AppConfig {
+            identity: AppIdentity::new("doctor-gate"),
+            windows: vec![WindowConfig::main("Main")],
+            dev: None,
+            build: BuildConfig::new("frontend", "frontend/index.html"),
+            bundle: Default::default(),
+            native: Default::default(),
+            capabilities: std::collections::BTreeMap::from([(
+                "main".to_owned(),
+                CapabilityConfig {
+                    profiles: vec!["file-access".to_owned()],
+                    commands: vec!["fs.read_text".to_owned()],
+                    events: Vec::new(),
+                    protocols: vec!["axion".to_owned()],
+                    allowed_navigation_origins: Vec::new(),
+                    allow_remote_navigation: true,
+                    ..Default::default()
+                },
+            )]),
+        };
+
+        let security = security_diagnostics(&config);
+        let gate = DoctorGate::evaluate(
+            &security,
+            &DoctorArgs {
+                manifest_path: PathBuf::from("axion.toml"),
+                json: false,
+                deny_warnings: true,
+                max_risk: Some(DoctorRisk::Medium),
+            },
+        );
+
+        assert_eq!(security.warning_count(), 2);
+        assert!(!gate.passed);
+        assert!(
+            gate.failed_reasons
+                .iter()
+                .any(|reason| { reason == "security warnings 2 exceed allowed 0" })
+        );
+        assert!(
+            gate.failed_reasons
+                .iter()
+                .any(|reason| { reason == "security risk high exceeds max medium" })
+        );
+        assert!(gate.to_json().contains("\"passed\":false"));
     }
 
     #[test]
@@ -1298,11 +1830,13 @@ allowed_navigation_origins = ["https://docs.example"]
             capabilities: std::collections::BTreeMap::from([(
                 "main".to_owned(),
                 CapabilityConfig {
+                    profiles: Vec::new(),
                     commands: vec!["app.ping".to_owned()],
                     events: vec!["app.log".to_owned()],
                     protocols: vec!["axion".to_owned()],
                     allowed_navigation_origins: Vec::new(),
                     allow_remote_navigation: false,
+                    ..Default::default()
                 },
             )]),
         };
@@ -1349,16 +1883,19 @@ allowed_navigation_origins = ["https://docs.example"]
                 (
                     "main".to_owned(),
                     CapabilityConfig {
+                        profiles: Vec::new(),
                         commands: vec!["app.ping".to_owned(), "app.info".to_owned()],
                         events: vec!["app.log".to_owned()],
                         protocols: vec!["axion".to_owned()],
                         allowed_navigation_origins: Vec::new(),
                         allow_remote_navigation: false,
+                        ..Default::default()
                     },
                 ),
                 (
                     "settings".to_owned(),
                     CapabilityConfig {
+                        profiles: Vec::new(),
                         commands: vec![
                             "window.info".to_owned(),
                             "window.focus".to_owned(),
@@ -1368,6 +1905,7 @@ allowed_navigation_origins = ["https://docs.example"]
                         protocols: vec!["axion".to_owned()],
                         allowed_navigation_origins: vec!["https://docs.example".to_owned()],
                         allow_remote_navigation: false,
+                        ..Default::default()
                     },
                 ),
             ]),
