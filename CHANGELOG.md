@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.1.14.0 - Preview
+
+Axion v0.1.14.0 tightens developer workflow readiness on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.14`.
+- Axion public release metadata is `v0.1.14.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion doctor` release-readiness summaries for development, bundle, and GUI smoke readiness.
+- Added structured `diagnostics.readiness` output to `doctor --json`.
+- Added readiness checks for build assets, runtime diagnostics, security warnings, bundle icons, Servo source discovery, bridge enablement, and GUI smoke hooks.
+- Added `axion check` as a lightweight aggregate command for doctor gate, readiness, self-test staging, optional bundle preflight, human `next_step`, and `--json` CI output.
+
+### Changed
+
+- Updated generated app Cargo version metadata for v0.1.14.0.
+- Updated `axion new` success output and generated README validation commands to point at `axion check`.
+- Added `axion new --run-check` for an immediate generated-app validation pass.
+- `axion bundle` now checks bundle readiness before running heavier staging/build work.
+- Documented readiness output as the recommended pre-release workflow summary.
+
 ## v0.1.13.0 - Preview
 
 Axion v0.1.13.0 adds capability profiles on the current Servo `0.1` baseline.

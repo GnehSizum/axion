@@ -8,9 +8,22 @@ use axion_packager::{
 };
 
 use crate::cli::BundleArgs;
+use crate::commands::doctor::doctor_readiness_for_manifest;
 use crate::error::AxionCliError;
 
 pub fn run(args: BundleArgs) -> Result<(), AxionCliError> {
+    let readiness = doctor_readiness_for_manifest(&args.manifest_path)?;
+    if !readiness.ready_for_bundle() {
+        for blocker in readiness.blockers() {
+            println!("readiness.blocker: {blocker}");
+        }
+        return Err(std::io::Error::other(format!(
+            "manifest is not ready for bundle; run `cargo run -p axion-cli -- check --manifest-path {} --bundle`",
+            args.manifest_path.display()
+        ))
+        .into());
+    }
+
     let config = axion_manifest::load_app_config_from_path(&args.manifest_path)?;
     let app = Builder::new().apply_config(config).build()?;
     let launch_config = app.runtime_launch_config(RunMode::Production);

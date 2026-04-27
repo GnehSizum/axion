@@ -107,9 +107,17 @@ cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml
 
 `doctor` prints `axion: cli_version=..., release=..., msrv=...` and `rustc.msrv: ok|failed` so CI and local environments can quickly confirm the active compiler satisfies the workspace `rust-version`.
 
-It also prints capability security diagnostics. Use `security.summary: warnings=0` as the simple CI gate. Per-window lines report declared profiles, profile expansions, bridge status, risk level, command category counts, protocol count, remote-navigation settings, redundant explicit permissions, and recommendations for unsafe or contradictory capability declarations.
+It also prints capability security diagnostics and release-readiness summaries. Use `security.summary: warnings=0` as the simple CI gate. Per-window lines report declared profiles, profile expansions, bridge status, risk level, command category counts, protocol count, remote-navigation settings, redundant explicit permissions, and recommendations for unsafe or contradictory capability declarations.
 
-Use `--json` to emit the stable `axion.diagnostics-report.v1` schema with structured `diagnostics.security` data:
+Readiness lines summarize whether the manifest is ready for local development, bundle staging, and GUI smoke validation:
+
+```text
+readiness.summary: dev=true, bundle=true, gui_smoke=true
+```
+
+If a workflow is not ready, `readiness.blocker` explains the specific missing asset, runtime error, security issue, bundle icon problem, Servo source discovery issue, or missing `window.__AXION_GUI_SMOKE__` hook.
+
+Use `--json` to emit the stable `axion.diagnostics-report.v1` schema with structured `diagnostics.security`, `diagnostics.gate`, and `diagnostics.readiness` data:
 
 ```sh
 cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml --json
@@ -124,7 +132,20 @@ cargo run -p axion-cli -- doctor \
   --max-risk medium
 ```
 
-`--deny-warnings` fails when security warnings are present. `--max-risk` fails when any window exceeds the selected risk level. JSON output includes `diagnostics.gate.passed` and `diagnostics.gate.failed_reasons`.
+`--deny-warnings` fails when security warnings are present. `--max-risk` fails when any window exceeds the selected risk level. JSON output includes `diagnostics.gate.passed`, `diagnostics.gate.failed_reasons`, and readiness booleans for downstream CI.
+
+## `check`
+
+Run the recommended lightweight application validation loop. `check` applies the `doctor` security gate, reads release readiness, runs quiet `self-test` staging, and can optionally verify bundle preflight conditions:
+
+```sh
+cargo run -p axion-cli -- check --manifest-path examples/hello-axion/axion.toml --bundle
+cargo run -p axion-cli -- check --manifest-path examples/hello-axion/axion.toml --bundle --json
+```
+
+By default `check` fails on security warnings and requires risk no higher than `medium`. Use `--max-risk low|medium|high` to tune the gate. Pass `--keep-artifacts` to keep the self-test staging directory for inspection. `--bundle` validates that bundle readiness is true and verifies web assets plus the configured icon before you run the heavier `bundle --build-executable` command.
+
+Human output ends with `next_step`, which tells you whether to fix blockers, run `gui-smoke`, or proceed to `bundle --build-executable`. JSON output uses `axion.check-report.v1` and includes `doctor`, `readiness`, `self_test`, `bundle_preflight`, `next_step`, and `result`.
 
 ## `self-test`
 
@@ -192,7 +213,7 @@ cargo run -p axion-cli -- build --manifest-path examples/hello-axion/axion.toml
 
 ## `bundle`
 
-Create a platform bundle scaffold and copy staged app resources. App metadata from `[app]` and icon configuration from `[bundle]` are written into bundle metadata files where supported. Each bundle also includes `axion-bundle-manifest.json`, a deterministic integrity manifest listing bundle paths, byte sizes, and `fnv1a64` content fingerprints. After staging, `bundle` verifies the generated entry, metadata, asset manifest, bundle manifest, icon, executable references, sizes, and fingerprints.
+Create a platform bundle scaffold and copy staged app resources. App metadata from `[app]` and icon configuration from `[bundle]` are written into bundle metadata files where supported. Each bundle also includes `axion-bundle-manifest.json`, a deterministic integrity manifest listing bundle paths, byte sizes, and `fnv1a64` content fingerprints. Before staging, `bundle` checks bundle readiness and points back to `axion check --bundle` when blockers remain. After staging, `bundle` verifies the generated entry, metadata, asset manifest, bundle manifest, icon, executable references, sizes, and fingerprints.
 
 ```sh
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml

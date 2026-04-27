@@ -25,7 +25,7 @@ The CLI report is generated through the shared `axion_runtime::DiagnosticsReport
 - `icon`: validated bundle icon path when available.
 - `host_events`: merged host event allowlist.
 - `staged_app_dir`, `asset_manifest_path`, `artifacts_removed`: CLI staging results.
-- `diagnostics`: optional producer-specific object. `doctor --json` uses `diagnostics.security.warning_count`, `diagnostics.security.windows`, `diagnostics.security.windows[].profile_expansions`, `diagnostics.security.findings`, and `diagnostics.gate`.
+- `diagnostics`: optional producer-specific object. `doctor --json` uses `diagnostics.security.warning_count`, `diagnostics.security.windows`, `diagnostics.security.windows[].profile_expansions`, `diagnostics.security.findings`, `diagnostics.gate`, and `diagnostics.readiness`.
 - `result`: `ok` or `failed`.
 
 ## Window Fields
@@ -44,6 +44,8 @@ GUI reports may include an additional `diagnostics` object with bridge snapshots
 Each `diagnostics.smoke_checks[]` entry should include stable `id`, user-facing `label`, `status` (`pass`, `fail`, or `skip`), and optional `detail`. Check ids use dotted lower-case names such as `bridge.bootstrap`, `app.ping`, `fs.roundtrip`, `dialog.preview`, and `input.snapshot`.
 
 CLI-generated GUI smoke failure reports use `source = "axion-cli gui-smoke"` and put process context under `diagnostics`: `failure_phase`, `help`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr`. The `failure_phase` value is one of `build`, `runtime`, or `report`.
+
+`doctor --json` readiness output contains `ready_for_dev`, `ready_for_bundle`, `ready_for_gui_smoke`, `blockers`, and `warnings`. Use these fields to decide which release workflow can run next before invoking heavier commands such as `gui-smoke` or `bundle`.
 
 ## CI Usage
 

@@ -148,4 +148,4 @@ cargo run -p axion-cli -- doctor \
   --max-risk medium
 ```
 
-For tooling, prefer `--json` and read `diagnostics.security.warning_count`, `diagnostics.security.windows[].profile_expansions`, `diagnostics.security.findings`, and `diagnostics.gate` from the `axion.diagnostics-report.v1` output.
+For tooling, prefer `--json` and read `diagnostics.security.warning_count`, `diagnostics.security.windows[].profile_expansions`, `diagnostics.security.findings`, `diagnostics.gate`, and `diagnostics.readiness` from the `axion.diagnostics-report.v1` output.

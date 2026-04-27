@@ -101,11 +101,13 @@ With `--launch`, Axion keeps that frontend process alive while the window runs a
 ## Create a New App
 
 ```sh
-cargo run -p axion-cli -- new demo-app --template vanilla --path /tmp/demo-app
+cargo run -p axion-cli -- new demo-app --template vanilla --path /tmp/demo-app --run-check
 cd /tmp/demo-app
 cargo run -- --plan
 cargo run --features servo-runtime
 ```
+
+`--run-check` immediately runs `axion check --bundle` against the generated manifest. Omit it if you only want to create files.
 
 Generated projects contain:
 
@@ -134,7 +136,8 @@ Generated apps install Axion panic reporting by default. Crash reports are writt
 From the Axion repository root:
 
 ```sh
-cargo run -p axion-cli -- doctor --manifest-path /tmp/demo-app/axion.toml
+cargo run -p axion-cli -- check --manifest-path /tmp/demo-app/axion.toml --bundle
+cargo run -p axion-cli -- doctor --manifest-path /tmp/demo-app/axion.toml --deny-warnings --max-risk medium
 cargo run -p axion-cli -- self-test --manifest-path /tmp/demo-app/axion.toml
 cargo run -p axion-cli -- gui-smoke \
   --manifest-path /tmp/demo-app/axion.toml \
@@ -145,6 +148,8 @@ cargo run -p axion-cli -- gui-smoke \
 cargo run -p axion-cli -- build --manifest-path /tmp/demo-app/axion.toml
 cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml --build-executable
 ```
+
+`check` is the fastest default validation loop: it runs the doctor gate, readiness, quiet self-test staging, and optional bundle preflight. Use `check --json` for CI and `doctor` when you need the full diagnostics detail. Continue when development, bundle, and GUI smoke readiness are all `true`; otherwise resolve the printed `readiness.blocker` lines first.
 
 `self-test` prints app metadata, native dialog backend, each window's configured commands/events/protocols, runtime command/event counts, host events, navigation origins, and staged asset paths. Add `--json` to print an `axion.diagnostics-report.v1` report, or `--report-path <path>` to write that report while keeping the default text output. Add `--quiet` with `--report-path` in CI when only the exit code and report file are needed.
 
