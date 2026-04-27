@@ -129,7 +129,7 @@ cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest
 
 - Bridge availability, allowed commands, frontend events, and host lifecycle events such as `window.ready`.
 - Built-in app/window commands: `app.info`, `app.version`, `app.echo`, `window.info`, `window.reload`, `window.set_title`, and `window.set_size`.
-- Native preview APIs: `fs.write_text`, `fs.read_text`, `dialog.open`, and `dialog.save`.
+- Native preview APIs: `clipboard.write_text`, `clipboard.read_text`, `fs.write_text`, `fs.read_text`, `dialog.open`, and `dialog.save`.
 - A custom Rust command, `demo.greet`, registered in `src/main.rs`.
 - Capability denial behavior through an intentional `demo.missing` call.
 - Bundle icon validation through `[bundle] icon = "icons/app.icns"`.
@@ -196,7 +196,7 @@ cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-pat
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.1.16\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.1.17\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root
@@ -221,7 +221,7 @@ cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-pat
 
     fn manifest(&self) -> String {
         format!(
-            "[app]\nname = {name:?}\nidentifier = \"dev.axion.{identifier}\"\nversion = \"0.1.0\"\ndescription = \"Generated Axion application\"\nauthors = [\"Axion Developer\"]\nhomepage = \"https://example.dev/{name}\"\n\n[window]\nid = \"main\"\ntitle = {title:?}\nwidth = 960\nheight = 720\nresizable = true\nvisible = true\n\n[build]\nfrontend_dist = \"frontend\"\nentry = \"frontend/index.html\"\n\n# To use `axion dev --launch` with a frontend dev server, uncomment and update:\n# [dev]\n# url = \"http://127.0.0.1:3000\"\n# command = \"python3 -m http.server 3000 --bind 127.0.0.1 --directory frontend\"\n# timeout_ms = 15000\n\n[bundle]\nicon = \"icons/app.icns\"\n\n[native.dialog]\nbackend = \"headless\"\n\n[capabilities.main]\nprofiles = [\"app-info\", \"window-control\", \"file-access\", \"dialog-access\", \"app-events\"]\ncommands = [\"demo.greet\"]\nallowed_navigation_origins = []\nallow_remote_navigation = false\n",
+            "[app]\nname = {name:?}\nidentifier = \"dev.axion.{identifier}\"\nversion = \"0.1.0\"\ndescription = \"Generated Axion application\"\nauthors = [\"Axion Developer\"]\nhomepage = \"https://example.dev/{name}\"\n\n[window]\nid = \"main\"\ntitle = {title:?}\nwidth = 960\nheight = 720\nresizable = true\nvisible = true\n\n[build]\nfrontend_dist = \"frontend\"\nentry = \"frontend/index.html\"\n\n# To use `axion dev --launch` with a frontend dev server, uncomment and update:\n# [dev]\n# url = \"http://127.0.0.1:3000\"\n# command = \"python3 -m http.server 3000 --bind 127.0.0.1 --directory frontend\"\n# timeout_ms = 15000\n\n[bundle]\nicon = \"icons/app.icns\"\n\n[native.dialog]\nbackend = \"headless\"\n\n[native.clipboard]\nbackend = \"memory\"\n\n[capabilities.main]\nprofiles = [\"app-info\", \"window-control\", \"clipboard-access\", \"file-access\", \"dialog-access\", \"app-events\"]\ncommands = [\"demo.greet\"]\nallowed_navigation_origins = []\nallow_remote_navigation = false\n",
             name = self.name,
             identifier = self.name.replace('-', "."),
             title = title_case(&self.name),
@@ -586,6 +586,7 @@ textarea {
     let appVersion = null;
     let windowInfo = null;
     let greeting = null;
+    let clipboardRead = null;
 
     try {
       ping = await axion.invoke('app.ping', { from: `${appName}-gui-smoke` });
@@ -620,6 +621,19 @@ textarea {
       pushCheck('demo.greet', 'demo.greet', greeting?.message ? 'pass' : 'fail', greeting?.message ?? 'missing greeting');
     } catch (error) {
       pushCheck('demo.greet', 'demo.greet', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      await axion.invoke('clipboard.write_text', { text: `${appName} clipboard smoke` });
+      clipboardRead = await axion.invoke('clipboard.read_text', null);
+      pushCheck(
+        'clipboard.roundtrip',
+        'clipboard roundtrip',
+        clipboardRead?.text === `${appName} clipboard smoke` ? 'pass' : 'fail',
+        clipboardRead?.backend ?? 'missing backend',
+      );
+    } catch (error) {
+      pushCheck('clipboard.roundtrip', 'clipboard roundtrip', 'fail', error instanceof Error ? error.message : String(error));
     }
 
     const inputSnapshot =
@@ -673,6 +687,8 @@ textarea {
       entry: bridgeInfo?.locationHref ?? window.location.href,
       configured_dialog_backend: null,
       dialog_backend: null,
+      configured_clipboard_backend: clipboardRead?.backend ?? null,
+      clipboard_backend: clipboardRead?.backend ?? null,
       icon: null,
       host_events: [...axion.hostEvents],
       staged_app_dir: null,
@@ -683,6 +699,7 @@ textarea {
         bridge: bridgeInfo,
         app_version: appVersion,
         greeting,
+        clipboard: clipboardRead,
         smoke_checks: checks,
         compat_input: inputSnapshot,
       },
@@ -729,6 +746,10 @@ textarea {
       contents: `${appName} wrote this through the Axion bridge`,
     });
     const fsRead = await axion.invoke('fs.read_text', { path: 'notes/hello.txt' });
+    const clipboardWrite = await axion.invoke('clipboard.write_text', {
+      text: `${appName} clipboard ${new Date().toISOString()}`,
+    });
+    const clipboardRead = await axion.invoke('clipboard.read_text', null);
     const dialogOpen = await axion.invoke('dialog.open', {
       title: 'Select files for the Axion preview',
       multiple: true,
@@ -741,7 +762,7 @@ textarea {
       title: 'Choose a save path for the Axion preview',
       defaultPath: 'notes/export.txt',
     });
-    renderJson('native-api', { fsWrite, fsRead, dialogOpen, dialogSave });
+    renderJson('native-api', { clipboardWrite, clipboardRead, fsWrite, fsRead, dialogOpen, dialogSave });
 
     const [greeting, pluginEvent] = await Promise.all([
       axion.invoke('demo.greet', { from: `${appName}-frontend` }),
@@ -886,6 +907,9 @@ mod tests {
         assert!(project.app_js().contains("textarea-tab-handler"));
         assert!(project.app_js().contains("window.set_title"));
         assert!(project.app_js().contains("window.set_size"));
+        assert!(project.app_js().contains("clipboard.write_text"));
+        assert!(project.app_js().contains("clipboard.read_text"));
+        assert!(project.app_js().contains("clipboard.roundtrip"));
         assert!(project.app_js().contains("dialog.open"));
         assert!(project.app_js().contains("dialog.save"));
         assert!(project.app_js().contains("window.__AXION_GUI_SMOKE__"));
@@ -911,6 +935,7 @@ mod tests {
         assert!(project.manifest().contains("\"demo.greet\""));
         assert!(project.manifest().contains("\"app-info\""));
         assert!(project.manifest().contains("\"window-control\""));
+        assert!(project.manifest().contains("\"clipboard-access\""));
         assert!(project.manifest().contains("\"file-access\""));
         assert!(project.manifest().contains("\"dialog-access\""));
         assert!(project.manifest().contains("\"app-events\""));
@@ -918,6 +943,8 @@ mod tests {
         assert!(project.manifest().contains("icon = \"icons/app.icns\""));
         assert!(project.manifest().contains("[native.dialog]"));
         assert!(project.manifest().contains("backend = \"headless\""));
+        assert!(project.manifest().contains("[native.clipboard]"));
+        assert!(project.manifest().contains("backend = \"memory\""));
         assert!(project.manifest().contains("# [dev]"));
         assert!(
             project

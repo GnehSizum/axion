@@ -24,6 +24,9 @@ icon = "icons/app.icns"
 [native.dialog]
 backend = "headless"
 
+[native.clipboard]
+backend = "memory"
+
 [capabilities.main]
 profiles = ["file-access", "dialog-access", "app-events"]
 commands = ["app.ping", "app.info", "window.info"]

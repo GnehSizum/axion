@@ -112,6 +112,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     let appVersion = null;
     let windowInfo = null;
     let greeting = null;
+    let clipboardRead = null;
 
     try {
       ping = await bridge.invoke('app.ping', { from: 'hello-axion-gui-smoke' });
@@ -146,6 +147,19 @@ window.addEventListener('DOMContentLoaded', async () => {
       pushCheck('demo.greet', 'demo.greet', greeting?.appName === 'hello-axion' ? 'pass' : 'fail', greeting?.appName ?? 'missing appName');
     } catch (error) {
       pushCheck('demo.greet', 'demo.greet', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      await bridge.invoke('clipboard.write_text', { text: 'hello-axion clipboard smoke' });
+      clipboardRead = await bridge.invoke('clipboard.read_text', null);
+      pushCheck(
+        'clipboard.roundtrip',
+        'clipboard roundtrip',
+        clipboardRead?.text === 'hello-axion clipboard smoke' ? 'pass' : 'fail',
+        clipboardRead?.backend ?? 'missing backend',
+      );
+    } catch (error) {
+      pushCheck('clipboard.roundtrip', 'clipboard roundtrip', 'fail', error instanceof Error ? error.message : String(error));
     }
 
     const inputSnapshot =
@@ -199,6 +213,8 @@ window.addEventListener('DOMContentLoaded', async () => {
       entry: bridgeInfo?.locationHref ?? window.location.href,
       configured_dialog_backend: null,
       dialog_backend: null,
+      configured_clipboard_backend: clipboardRead?.backend ?? clipboardWrite?.backend ?? null,
+      clipboard_backend: clipboardRead?.backend ?? clipboardWrite?.backend ?? null,
       icon: null,
       host_events: [...bridge.hostEvents],
       staged_app_dir: null,
@@ -209,6 +225,7 @@ window.addEventListener('DOMContentLoaded', async () => {
         bridge: bridgeInfo,
         app_version: appVersion,
         greeting,
+        clipboard: clipboardRead,
         smoke_checks: checks,
         compat_input: inputSnapshot,
       },
@@ -251,6 +268,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       contents: 'hello-axion wrote this through the Axion bridge',
     });
     const fsRead = await bridge.invoke('fs.read_text', { path: 'notes/hello.txt' });
+    const clipboardWrite = await bridge.invoke('clipboard.write_text', {
+      text: `Hello from ${appInfo.appName} at ${new Date().toISOString()}`,
+    });
+    const clipboardRead = await bridge.invoke('clipboard.read_text', null);
     const dialogOpen = await bridge.invoke('dialog.open', {
       title: 'Select files for the Axion preview',
       multiple: true,
@@ -285,6 +306,8 @@ window.addEventListener('DOMContentLoaded', async () => {
           pluginEvent,
           fsWrite,
           fsRead,
+          clipboardWrite,
+          clipboardRead,
           dialogOpen,
           dialogSave,
           hostLog,

@@ -241,6 +241,8 @@ fn failed_report(input: FailedReportInput<'_>) -> String {
         entry: Some(input.launch_config.packaged_entry.clone()),
         configured_dialog_backend: None,
         dialog_backend: None,
+        configured_clipboard_backend: None,
+        clipboard_backend: None,
         icon: None,
         host_events: Vec::new(),
         staged_app_dir: None,

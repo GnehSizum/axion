@@ -27,6 +27,7 @@ The CLI report is generated through the shared `axion_runtime::DiagnosticsReport
 - `window_count`, `windows`: declared windows and capability/runtime summaries.
 - `frontend_dist`, `entry`: packaged frontend paths or GUI entry URL.
 - `configured_dialog_backend`, `dialog_backend`: manifest backend and effective backend.
+- `configured_clipboard_backend`, `clipboard_backend`: manifest backend and effective backend.
 - `icon`: validated bundle icon path when available.
 - `host_events`: merged host event allowlist.
 - `staged_app_dir`, `asset_manifest_path`, `artifacts_removed`: CLI staging results.
@@ -46,7 +47,7 @@ Each `windows[]` entry includes:
 
 GUI reports may include an additional `diagnostics` object with bridge snapshots, smoke checks, recent host events, dialog previews, export metadata, and text-control snapshots. GUI window entries may also include preview native state fields such as `width`, `height`, `resizable`, `visible`, and `focused`.
 
-Each `diagnostics.smoke_checks[]` entry should include stable `id`, user-facing `label`, `status` (`pass`, `fail`, or `skip`), and optional `detail`. Check ids use dotted lower-case names such as `bridge.bootstrap`, `app.ping`, `fs.roundtrip`, `dialog.preview`, and `input.snapshot`.
+Each `diagnostics.smoke_checks[]` entry should include stable `id`, user-facing `label`, `status` (`pass`, `fail`, or `skip`), and optional `detail`. Check ids use dotted lower-case names such as `bridge.bootstrap`, `app.ping`, `clipboard.roundtrip`, `fs.roundtrip`, `dialog.preview`, and `input.snapshot`.
 
 CLI-generated GUI smoke failure reports use `source = "axion-cli gui-smoke"` and put process context under `diagnostics`: `failure_phase`, `help`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr`. The `failure_phase` value is one of `build`, `runtime`, or `report`.
 

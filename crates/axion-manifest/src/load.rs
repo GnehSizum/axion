@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use axion_core::{
     AppConfig, AppIdentity, BuildConfig, BundleConfig, CapabilityConfig, CapabilityProfileConfig,
-    DevServerConfig, DialogBackendConfig, DialogConfig, NativeConfig, WindowConfig, WindowId,
+    ClipboardBackendConfig, ClipboardConfig, DevServerConfig, DialogBackendConfig, DialogConfig,
+    NativeConfig, WindowConfig, WindowId,
 };
 use url::Url;
 
@@ -99,6 +100,8 @@ pub enum ManifestError {
     InvalidBundleIconPath { path: PathBuf, value: PathBuf },
     #[error("manifest at {path} defines invalid native.dialog.backend '{value}'")]
     InvalidNativeDialogBackend { path: PathBuf, value: String },
+    #[error("manifest at {path} defines invalid native.clipboard.backend '{value}'")]
+    InvalidNativeClipboardBackend { path: PathBuf, value: String },
 }
 
 pub fn load_from_path(path: impl AsRef<Path>) -> Result<ManifestDocument, ManifestError> {
@@ -204,25 +207,41 @@ fn native_config_from_manifest(
     let Some(native) = native else {
         return Ok(NativeConfig::new());
     };
-    let Some(dialog) = native.dialog else {
-        return Ok(NativeConfig::new());
-    };
-    let Some(backend) = clean_optional_string(dialog.backend) else {
-        return Ok(NativeConfig::new());
-    };
+    let mut config = NativeConfig::new();
 
-    let backend = match backend.as_str() {
-        "headless" => DialogBackendConfig::Headless,
-        "system" => DialogBackendConfig::System,
-        _ => {
-            return Err(ManifestError::InvalidNativeDialogBackend {
-                path: path.to_path_buf(),
-                value: backend,
-            });
+    if let Some(dialog) = native.dialog {
+        if let Some(backend) = clean_optional_string(dialog.backend) {
+            let backend = match backend.as_str() {
+                "headless" => DialogBackendConfig::Headless,
+                "system" => DialogBackendConfig::System,
+                _ => {
+                    return Err(ManifestError::InvalidNativeDialogBackend {
+                        path: path.to_path_buf(),
+                        value: backend,
+                    });
+                }
+            };
+            config = config.with_dialog(DialogConfig { backend });
         }
-    };
+    }
 
-    Ok(NativeConfig::new().with_dialog(DialogConfig { backend }))
+    if let Some(clipboard) = native.clipboard {
+        if let Some(backend) = clean_optional_string(clipboard.backend) {
+            let backend = match backend.as_str() {
+                "memory" => ClipboardBackendConfig::Memory,
+                "system" => ClipboardBackendConfig::System,
+                _ => {
+                    return Err(ManifestError::InvalidNativeClipboardBackend {
+                        path: path.to_path_buf(),
+                        value: backend,
+                    });
+                }
+            };
+            config = config.with_clipboard(ClipboardConfig { backend });
+        }
+    }
+
+    Ok(config)
 }
 
 fn bundle_config_from_manifest(
@@ -509,6 +528,7 @@ fn profile_commands(profile: &str) -> &'static [&'static str] {
             "window.focus",
             "window.set_title",
         ],
+        "clipboard-access" => &["clipboard.read_text", "clipboard.write_text"],
         "file-access" => &["fs.read_text", "fs.write_text"],
         "dialog-access" => &["dialog.open", "dialog.save"],
         _ => &[],
@@ -525,7 +545,7 @@ fn profile_events(profile: &str) -> &'static [&'static str] {
 fn profile_protocols(profile: &str) -> &'static [&'static str] {
     match profile {
         "minimal" | "app-info" | "app-events" | "window-control" | "multi-window"
-        | "file-access" | "dialog-access" => &["axion"],
+        | "clipboard-access" | "file-access" | "dialog-access" => &["axion"],
         _ => &[],
     }
 }
@@ -538,6 +558,7 @@ fn is_known_capability_profile(value: &str) -> bool {
             | "app-events"
             | "window-control"
             | "multi-window"
+            | "clipboard-access"
             | "file-access"
             | "dialog-access"
     )
@@ -761,7 +782,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use axion_core::DialogBackendConfig;
+    use axion_core::{ClipboardBackendConfig, DialogBackendConfig};
 
     use super::{ManifestError, load_app_config_from_path};
 
@@ -814,6 +835,9 @@ icon = "icons/app.icns"
 [native.dialog]
 backend = "headless"
 
+[native.clipboard]
+backend = "memory"
+
 [capabilities.main]
 commands = ["app.ping"]
 events = ["app.log"]
@@ -855,6 +879,10 @@ allow_remote_navigation = false
             Some(manifest_path.parent().unwrap().join("icons/app.icns"))
         );
         assert_eq!(config.native.dialog.backend, DialogBackendConfig::Headless);
+        assert_eq!(
+            config.native.clipboard.backend,
+            ClipboardBackendConfig::Memory
+        );
         assert_eq!(config.capabilities["main"].commands, vec!["app.ping"]);
         assert_eq!(config.capabilities["main"].events, vec!["app.log"]);
         assert_eq!(
@@ -885,6 +913,30 @@ backend = "system"
     }
 
     #[test]
+    fn manifest_loader_accepts_system_clipboard_backend() {
+        let manifest_path = write_manifest(
+            r#"
+[app]
+name = "hello"
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[native.clipboard]
+backend = "system"
+"#,
+        );
+
+        let config = load_app_config_from_path(&manifest_path).expect("manifest should load");
+
+        assert_eq!(
+            config.native.clipboard.backend,
+            ClipboardBackendConfig::System
+        );
+    }
+
+    #[test]
     fn manifest_loader_rejects_invalid_dialog_backend() {
         let manifest_path = write_manifest(
             r#"
@@ -905,6 +957,30 @@ backend = "portal"
         assert!(matches!(
             error,
             ManifestError::InvalidNativeDialogBackend { .. }
+        ));
+    }
+
+    #[test]
+    fn manifest_loader_rejects_invalid_clipboard_backend() {
+        let manifest_path = write_manifest(
+            r#"
+[app]
+name = "hello"
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[native.clipboard]
+backend = "portal"
+"#,
+        );
+
+        let error = load_app_config_from_path(&manifest_path).expect_err("manifest should fail");
+
+        assert!(matches!(
+            error,
+            ManifestError::InvalidNativeClipboardBackend { .. }
         ));
     }
 
@@ -1199,7 +1275,7 @@ frontend_dist = "frontend"
 entry = "frontend/index.html"
 
 [capabilities.main]
-profiles = [" app-info ", "window-control", "file-access", "dialog-access", "app-events"]
+profiles = [" app-info ", "window-control", "clipboard-access", "file-access", "dialog-access", "app-events"]
 commands = ["demo.greet", "app.ping"]
 events = ["demo.ready"]
 allowed_navigation_origins = ["https://docs.example"]
@@ -1214,6 +1290,7 @@ allowed_navigation_origins = ["https://docs.example"]
             vec![
                 "app-events",
                 "app-info",
+                "clipboard-access",
                 "dialog-access",
                 "file-access",
                 "window-control"
@@ -1226,6 +1303,8 @@ allowed_navigation_origins = ["https://docs.example"]
                 "app.info",
                 "app.ping",
                 "app.version",
+                "clipboard.read_text",
+                "clipboard.write_text",
                 "demo.greet",
                 "dialog.open",
                 "dialog.save",

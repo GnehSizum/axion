@@ -92,10 +92,18 @@ pub struct BundleSection {
 pub struct NativeSection {
     #[serde(default)]
     pub dialog: Option<DialogSection>,
+    #[serde(default)]
+    pub clipboard: Option<ClipboardSection>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct DialogSection {
+    #[serde(default)]
+    pub backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ClipboardSection {
     #[serde(default)]
     pub backend: Option<String>,
 }

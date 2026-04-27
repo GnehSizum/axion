@@ -95,6 +95,7 @@ impl BundleConfig {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NativeConfig {
     pub dialog: DialogConfig,
+    pub clipboard: ClipboardConfig,
 }
 
 impl NativeConfig {
@@ -104,6 +105,11 @@ impl NativeConfig {
 
     pub fn with_dialog(mut self, dialog: DialogConfig) -> Self {
         self.dialog = dialog;
+        self
+    }
+
+    pub fn with_clipboard(mut self, clipboard: ClipboardConfig) -> Self {
+        self.clipboard = clipboard;
         self
     }
 }
@@ -143,6 +149,46 @@ impl DialogBackendConfig {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Headless => "headless",
+            Self::System => "system",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipboardConfig {
+    pub backend: ClipboardBackendConfig,
+}
+
+impl Default for ClipboardConfig {
+    fn default() -> Self {
+        Self {
+            backend: ClipboardBackendConfig::Memory,
+        }
+    }
+}
+
+impl ClipboardConfig {
+    pub fn memory() -> Self {
+        Self::default()
+    }
+
+    pub fn system() -> Self {
+        Self {
+            backend: ClipboardBackendConfig::System,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipboardBackendConfig {
+    Memory,
+    System,
+}
+
+impl ClipboardBackendConfig {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
             Self::System => "system",
         }
     }

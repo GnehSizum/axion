@@ -406,6 +406,8 @@ window.addEventListener('DOMContentLoaded', async () => {
       entry: bridgeInfo?.locationHref ?? window.location.href,
       configured_dialog_backend: dialogOpen?.backend ?? dialogSave?.backend ?? null,
       dialog_backend: dialogOpen?.backend ?? dialogSave?.backend ?? null,
+      configured_clipboard_backend: null,
+      clipboard_backend: null,
       icon: null,
       host_events: [...bridge.hostEvents],
       staged_app_dir: null,

@@ -97,7 +97,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.16", release: "v0.1.16.0", framework: "axion" }
+// { version: "0.1.17", release: "v0.1.17.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -209,6 +209,37 @@ window.__AXION__.listen("window.focused", (payload) => {
 });
 ```
 
+## Clipboard Commands
+
+Clipboard commands are capability-gated text commands. The default backend is runtime-local `memory` for deterministic tests. Apps can opt into the preview macOS system clipboard backend:
+
+```toml
+[native.clipboard]
+backend = "system"
+```
+
+`system` uses `pbcopy` / `pbpaste` on macOS. Unsupported platforms or command failures fall back to `memory`, and command responses include the effective `backend`.
+
+### `clipboard.write_text`
+
+Stores UTF-8 text in the configured clipboard backend.
+
+```js
+await window.__AXION__.invoke("clipboard.write_text", {
+  text: "Hello from Axion",
+});
+// { bytes: 16, backend: "memory" }
+```
+
+### `clipboard.read_text`
+
+Reads the current clipboard text from the configured backend.
+
+```js
+await window.__AXION__.invoke("clipboard.read_text", null);
+// { text: "Hello from Axion", backend: "memory" }
+```
+
 ## File Commands
 
 File commands operate only inside Axion's app-data directory:
@@ -293,5 +324,5 @@ Response shape:
 
 ```toml
 [capabilities.main]
-profiles = ["app-info", "multi-window", "file-access", "dialog-access", "app-events"]
+profiles = ["app-info", "multi-window", "clipboard-access", "file-access", "dialog-access", "app-events"]
 ```

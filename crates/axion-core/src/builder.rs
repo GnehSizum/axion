@@ -160,8 +160,8 @@ fn is_path_empty(path: &Path) -> bool {
 mod tests {
     use super::Builder;
     use crate::{
-        AppConfig, AppIdentity, AxionError, BuildConfig, BundleConfig, DialogConfig, NativeConfig,
-        WindowConfig, WindowId,
+        AppConfig, AppIdentity, AxionError, BuildConfig, BundleConfig, ClipboardConfig,
+        DialogConfig, NativeConfig, WindowConfig, WindowId,
     };
 
     fn valid_builder() -> Builder {
@@ -247,10 +247,15 @@ mod tests {
     fn builder_preserves_native_config() {
         let app = valid_builder()
             .with_window(WindowConfig::new(WindowId::main(), "Main", 960, 720))
-            .with_native(NativeConfig::new().with_dialog(DialogConfig::system()))
+            .with_native(
+                NativeConfig::new()
+                    .with_dialog(DialogConfig::system())
+                    .with_clipboard(ClipboardConfig::system()),
+            )
             .build()
             .expect("native config should build");
 
         assert_eq!(app.config().native.dialog, DialogConfig::system());
+        assert_eq!(app.config().native.clipboard, ClipboardConfig::system());
     }
 }

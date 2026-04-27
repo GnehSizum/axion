@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.1.17.0 - Preview
+
+Axion v0.1.17.0 adds capability-gated clipboard text commands and configurable clipboard backend diagnostics on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.17`.
+- Axion public release metadata is `v0.1.17.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `clipboard.write_text` and `clipboard.read_text` built-in bridge commands using a deterministic runtime-local text clipboard backend.
+- Added `[native.clipboard] backend = "memory" | "system"` with macOS `pbcopy` / `pbpaste` system clipboard support and memory fallback elsewhere.
+- Added the `clipboard-access` capability profile.
+- Added configured/effective clipboard backend reporting to runtime diagnostics, `axion doctor`, self-test reports, and GUI smoke reports.
+- Added clipboard command categorization and remote-navigation security diagnostics to `axion doctor`.
+- Added clipboard smoke checks to `hello-axion`, `bridge-diagnostics-demo`, and generated vanilla apps.
+
+### Changed
+
+- Updated native API, manifest, security, architecture, and generated app documentation for clipboard capabilities.
+
+### Deferred
+
+- Cross-platform native clipboard integrations beyond macOS are deferred; unsupported platforms use the CI-safe memory fallback.
+
 ## v0.1.16.0 - Preview
 
 Axion v0.1.16.0 adds a preview release workflow on the current Servo `0.1` baseline.

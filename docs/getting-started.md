@@ -123,7 +123,7 @@ Generated projects contain:
 
 The generated `demo.greet` command is registered in Rust, allowed in `[capabilities.main]`, and invoked from frontend JavaScript. See `custom-commands.md` for the pattern.
 
-Generated manifests also include optional app metadata (`version`, `description`, `authors`, and `homepage`), `[bundle] icon = "icons/app.icns"`, and `[native.dialog] backend = "headless"`. These values appear in `app.info`, `axion doctor`, self-test output, and bundle metadata scaffolds. The generated frontend also demonstrates `dialog.open` with multi-select and filter metadata plus `dialog.save` with `defaultPath`.
+Generated manifests also include optional app metadata (`version`, `description`, `authors`, and `homepage`), `[bundle] icon = "icons/app.icns"`, `[native.dialog] backend = "headless"`, and `[native.clipboard] backend = "memory"`. These values appear in `app.info`, `axion doctor`, self-test output, and bundle metadata scaffolds. The generated frontend also demonstrates clipboard read/write, `dialog.open` with multi-select and filter metadata, and `dialog.save` with `defaultPath`.
 
 Generated manifests include commented `[dev]` lines. Uncomment them when you attach a frontend toolchain such as Vite, Trunk, or another static server. You can start that server separately before running `axion dev --launch`, or set `[dev] command` / pass `--frontend-command` so Axion starts it for you.
 

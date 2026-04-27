@@ -27,8 +27,11 @@ icon = "icons/app.icns"
 [native.dialog]
 backend = "headless"
 
+[native.clipboard]
+backend = "memory"
+
 [capabilities.main]
-profiles = ["app-info", "window-control", "file-access", "dialog-access", "app-events"]
+profiles = ["app-info", "window-control", "clipboard-access", "file-access", "dialog-access", "app-events"]
 commands = ["demo.greet"]
 allowed_navigation_origins = ["https://docs.example"]
 allow_remote_navigation = false

@@ -99,7 +99,7 @@ After the window opens, edit a file under `examples/hello-axion/frontend/`. A su
 
 ## `doctor`
 
-Validate Axion version metadata, local tooling, manifest configuration, app metadata, native dialog backend configuration, effective runtime dialog backend, frontend assets, runtime diagnostics, and Servo path availability.
+Validate Axion version metadata, local tooling, manifest configuration, app metadata, native dialog and clipboard backend configuration, effective runtime native backends, frontend assets, runtime diagnostics, capability categories including clipboard access, and Servo path availability.
 
 ```sh
 cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml
