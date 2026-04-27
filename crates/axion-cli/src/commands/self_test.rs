@@ -63,6 +63,11 @@ fn print_human_report(report: &SelfTestReport, report_path: Option<&Path>) {
             window.runtime_event_count,
         );
         println!(
+            "window.{}.profiles: {}",
+            window.id,
+            list_or_none(&window.configured_profiles)
+        );
+        println!(
             "window.{}.host_events: {}",
             window.id,
             list_or_none(&window.host_events)
@@ -128,6 +133,7 @@ struct SelfTestWindowReport {
     id: String,
     title: String,
     bridge_enabled: bool,
+    configured_profiles: Vec<String>,
     configured_commands: Vec<String>,
     configured_events: Vec<String>,
     configured_protocols: Vec<String>,
@@ -196,6 +202,9 @@ fn run_self_test(args: &SelfTestArgs) -> Result<SelfTestReport, AxionCliError> {
                 bridge_enabled: configured_protocols
                     .iter()
                     .any(|protocol| protocol == "axion"),
+                configured_profiles: capability
+                    .map(|capability| capability.profiles.clone())
+                    .unwrap_or_default(),
                 configured_commands: capability
                     .map(|capability| capability.commands.clone())
                     .unwrap_or_default(),
@@ -269,6 +278,7 @@ impl SelfTestReport {
                 id: window.id.clone(),
                 title: window.title.clone(),
                 bridge_enabled: window.bridge_enabled,
+                configured_profiles: window.configured_profiles.clone(),
                 configured_commands: window.configured_commands.clone(),
                 configured_events: window.configured_events.clone(),
                 configured_protocols: window.configured_protocols.clone(),
@@ -620,6 +630,7 @@ allowed_navigation_origins = ["https://docs.example"]
         assert!(json.contains("\"source\":\"axion-cli self-test\""));
         assert!(json.contains("\"app_name\":\"self-test-app\""));
         assert!(json.contains("\"window_count\":1"));
+        assert!(json.contains("\"configured_profiles\":[]"));
         assert!(json.contains("\"configured_commands\":[\"app.ping\"]"));
         assert!(json.contains("\"result\":\"ok\""));
     }

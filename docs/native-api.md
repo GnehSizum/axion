@@ -97,7 +97,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.12", release: "v0.1.12.0", framework: "axion" }
+// { version: "0.1.13", release: "v0.1.13.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -293,21 +293,5 @@ Response shape:
 
 ```toml
 [capabilities.main]
-commands = [
-  "app.ping",
-  "app.info",
-  "app.version",
-  "app.echo",
-  "window.list",
-  "window.info",
-  "window.reload",
-  "window.focus",
-  "window.set_title",
-  "fs.write_text",
-  "fs.read_text",
-  "dialog.open",
-  "dialog.save",
-]
-events = ["app.log"]
-protocols = ["axion"]
+profiles = ["app-info", "multi-window", "file-access", "dialog-access", "app-events"]
 ```

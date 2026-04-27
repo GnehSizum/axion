@@ -25,7 +25,7 @@ The CLI report is generated through the shared `axion_runtime::DiagnosticsReport
 - `icon`: validated bundle icon path when available.
 - `host_events`: merged host event allowlist.
 - `staged_app_dir`, `asset_manifest_path`, `artifacts_removed`: CLI staging results.
-- `diagnostics`: optional producer-specific object. `doctor --json` uses `diagnostics.security.warning_count`, `diagnostics.security.windows`, and `diagnostics.security.findings`.
+- `diagnostics`: optional producer-specific object. `doctor --json` uses `diagnostics.security.warning_count`, `diagnostics.security.windows`, `diagnostics.security.windows[].profile_expansions`, `diagnostics.security.findings`, and `diagnostics.gate`.
 - `result`: `ok` or `failed`.
 
 ## Window Fields
@@ -34,7 +34,7 @@ Each `windows[]` entry includes:
 
 - `id`, `title`
 - `bridge_enabled`
-- `configured_commands`, `configured_events`, `configured_protocols`
+- `configured_profiles`, `configured_commands`, `configured_events`, `configured_protocols`
 - `runtime_command_count`, `runtime_event_count`
 - `host_events`
 - `trusted_origins`, `allowed_navigation_origins`, `allow_remote_navigation`

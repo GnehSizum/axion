@@ -103,6 +103,8 @@ pub struct DialogSection {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CapabilitySection {
     #[serde(default)]
+    pub profiles: Vec<String>,
+    #[serde(default)]
     pub commands: Vec<String>,
     #[serde(default)]
     pub events: Vec<String>,

@@ -206,6 +206,7 @@ mod tests {
         allow_remote_navigation: bool,
     ) -> CapabilityConfig {
         CapabilityConfig {
+            profiles: Vec::new(),
             commands: commands.iter().map(|item| (*item).to_owned()).collect(),
             events: events.iter().map(|item| (*item).to_owned()).collect(),
             protocols: protocols.iter().map(|item| (*item).to_owned()).collect(),
@@ -214,6 +215,7 @@ mod tests {
                 .map(|item| (*item).to_owned())
                 .collect(),
             allow_remote_navigation,
+            ..Default::default()
         }
     }
 

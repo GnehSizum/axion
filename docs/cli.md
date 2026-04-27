@@ -107,13 +107,24 @@ cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml
 
 `doctor` prints `axion: cli_version=..., release=..., msrv=...` and `rustc.msrv: ok|failed` so CI and local environments can quickly confirm the active compiler satisfies the workspace `rust-version`.
 
-It also prints capability security diagnostics. Use `security.summary: warnings=0` as the simple CI gate. Per-window lines report bridge status, risk level, command category counts, protocol count, remote-navigation settings, and recommendations for unsafe or contradictory capability declarations.
+It also prints capability security diagnostics. Use `security.summary: warnings=0` as the simple CI gate. Per-window lines report declared profiles, profile expansions, bridge status, risk level, command category counts, protocol count, remote-navigation settings, redundant explicit permissions, and recommendations for unsafe or contradictory capability declarations.
 
 Use `--json` to emit the stable `axion.diagnostics-report.v1` schema with structured `diagnostics.security` data:
 
 ```sh
 cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml --json
 ```
+
+Use gate options in CI:
+
+```sh
+cargo run -p axion-cli -- doctor \
+  --manifest-path examples/hello-axion/axion.toml \
+  --deny-warnings \
+  --max-risk medium
+```
+
+`--deny-warnings` fails when security warnings are present. `--max-risk` fails when any window exceeds the selected risk level. JSON output includes `diagnostics.gate.passed` and `diagnostics.gate.failed_reasons`.
 
 ## `self-test`
 

@@ -6,9 +6,7 @@ Use the smallest capability set that can support the page:
 
 ```toml
 [capabilities.main]
-commands = ["app.info", "app.version"]
-events = []
-protocols = ["axion"]
+profiles = ["app-info"]
 allowed_navigation_origins = []
 allow_remote_navigation = false
 ```
@@ -21,9 +19,7 @@ Capabilities are scoped to a window id:
 
 ```toml
 [capabilities.main]
-commands = ["app.ping", "window.list", "window.info", "window.set_title", "fs.read_text", "fs.write_text", "dialog.open"]
-events = ["app.log"]
-protocols = ["axion"]
+profiles = ["app-info", "multi-window", "file-access", "dialog-access", "app-events"]
 allowed_navigation_origins = []
 allow_remote_navigation = false
 ```
@@ -36,6 +32,34 @@ Higher-risk command groups should stay local to trusted packaged UI:
 - `fs.*`: restricted to app-data paths, but still reads or writes user-visible data.
 - `dialog.*`: opens native file dialogs and can expose selected paths to the app.
 - `window.close` and `window.reload`: affect runtime control flow and user state.
+
+## Capability Profiles
+
+Profiles reduce repetitive manifest entries but do not bypass the deny-by-default model. Axion expands profiles into explicit commands, events, and protocols while loading `axion.toml`.
+
+- `minimal`: bridge protocol only.
+- `app-info`: app metadata, version, ping, and echo commands.
+- `app-events`: frontend `app.log` events.
+- `window-control`: current-window control commands.
+- `multi-window`: multi-window coordination commands.
+- `file-access`: app-data file read/write commands.
+- `dialog-access`: native open/save dialog commands.
+
+Prefer profiles for common groups and explicit `commands` only for custom or unusual permissions:
+
+```toml
+[capabilities.main]
+profiles = ["app-info", "window-control", "app-events"]
+commands = ["demo.greet"]
+```
+
+`axion doctor` explains the effective expansion, for example:
+
+```text
+security.window.main.profile.app-info: commands=app.echo,app.info,app.ping,app.version, events=none, protocols=axion
+```
+
+If a manifest also lists a permission already supplied by a profile, `doctor` emits a non-failing notice such as `redundant_profile_command`, `redundant_profile_event`, or `redundant_profile_protocol`.
 
 ## Bridge Commands
 
@@ -69,7 +93,7 @@ Prefer origin allowlists:
 
 ```toml
 [capabilities.docs]
-protocols = ["axion"]
+profiles = ["minimal"]
 allowed_navigation_origins = ["https://docs.example"]
 allow_remote_navigation = false
 ```
@@ -93,6 +117,8 @@ Key lines:
 
 - `security.summary: warnings=N`: total capability warnings.
 - `security.window.<id>`: bridge status, risk level, command count, event count, protocol count, navigation allowlist count, and remote-navigation flag.
+- `security.window.<id>.profiles`: declared capability profiles, or `none`.
+- `security.window.<id>.profile.<profile>`: commands, events, and protocols supplied by that profile.
 - `security.window.<id>.commands`: command categories: `app`, `window`, `fs`, `dialog`, and `custom`.
 - `security.notice.<id>`: non-failing notes such as restricted remote navigation.
 - `security.warning.<id>`: configuration that weakens or contradicts the deny-by-default model.
@@ -104,6 +130,7 @@ Common warnings:
 - A nonstandard bridge protocol is declared.
 - `allow_remote_navigation = true` allows every remote origin.
 - `allowed_navigation_origins` is set while `allow_remote_navigation = true`.
+- File or dialog capabilities are enabled on a window with unrestricted remote navigation.
 
 CI can fail on newly introduced warnings with a simple grep:
 
@@ -112,4 +139,13 @@ cargo run -p axion-cli -- doctor --manifest-path axion.toml > target/axion-docto
 grep -q "security.summary: warnings=0" target/axion-doctor.txt
 ```
 
-For tooling, prefer `--json` and read `diagnostics.security.warning_count`, `diagnostics.security.windows`, and `diagnostics.security.findings` from the `axion.diagnostics-report.v1` output.
+For stricter CI, use built-in gates:
+
+```sh
+cargo run -p axion-cli -- doctor \
+  --manifest-path axion.toml \
+  --deny-warnings \
+  --max-risk medium
+```
+
+For tooling, prefer `--json` and read `diagnostics.security.warning_count`, `diagnostics.security.windows[].profile_expansions`, `diagnostics.security.findings`, and `diagnostics.gate` from the `axion.diagnostics-report.v1` output.

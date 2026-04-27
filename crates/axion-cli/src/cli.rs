@@ -81,6 +81,29 @@ pub struct DoctorArgs {
 
     #[arg(long, default_value_t = false)]
     pub json: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub deny_warnings: bool,
+
+    #[arg(long, value_enum)]
+    pub max_risk: Option<DoctorRisk>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+pub enum DoctorRisk {
+    Low,
+    Medium,
+    High,
+}
+
+impl DoctorRisk {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Args)]
