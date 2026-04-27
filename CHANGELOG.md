@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.1.15.0 - Preview
+
+Axion v0.1.15.0 strengthens bundle reporting and preview release validation on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.15`.
+- Axion public release metadata is `v0.1.15.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion bundle --json` with stable `axion.bundle-report.v1` output for CI and release automation.
+- Added `axion bundle --report-path <path>` to write the same bundle report to disk for CI artifacts.
+- Added structured bundle report fields for target, layout, metadata paths, platform metadata paths, entry paths, icon, executable, report path, verification counters, checked paths, blockers, warnings, and final result.
+- Added JSON failure output when `bundle` is blocked by release-readiness checks.
+- Added explicit platform metadata artifacts to bundle verification: macOS `PkgInfo`, Linux `.desktop`, and Windows preview metadata.
+
+### Changed
+
+- `axion bundle --json` suppresses local build progress text before emitting JSON so downstream tools can parse stdout reliably.
+- Generated app documentation now includes `bundle --json` in the release validation path.
+- Packaging and release-check documentation now describe bundle report usage.
+
 ## v0.1.14.0 - Preview
 
 Axion v0.1.14.0 tightens developer workflow readiness on the current Servo `0.1` baseline.

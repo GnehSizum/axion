@@ -8,6 +8,9 @@ The CLI report is generated through the shared `axion_runtime::DiagnosticsReport
 - `axion self-test --json`: prints a non-GUI report to stdout.
 - `axion self-test --report-path <path>`: writes the same non-GUI report to disk.
 - `axion doctor --json`: prints environment, manifest, runtime, and structured security diagnostics.
+- `axion check --json`: prints aggregate validation output using `axion.check-report.v1`.
+- `axion bundle --json`: prints bundle staging and verification output using `axion.bundle-report.v1`.
+- `axion bundle --report-path <path>`: writes the same bundle report to disk.
 - `axion gui-smoke --report-path <path>`: runs a Servo-backed GUI smoke check and writes the returned GUI report.
 - `examples/bridge-diagnostics-demo`: exports a GUI-side report from app-data.
 - `window.__AXION__.diagnostics.reportSchema`: exposes the active schema string to frontends.
@@ -46,6 +49,12 @@ Each `diagnostics.smoke_checks[]` entry should include stable `id`, user-facing 
 CLI-generated GUI smoke failure reports use `source = "axion-cli gui-smoke"` and put process context under `diagnostics`: `failure_phase`, `help`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr`. The `failure_phase` value is one of `build`, `runtime`, or `report`.
 
 `doctor --json` readiness output contains `ready_for_dev`, `ready_for_bundle`, `ready_for_gui_smoke`, `blockers`, and `warnings`. Use these fields to decide which release workflow can run next before invoking heavier commands such as `gui-smoke` or `bundle`.
+
+## Aggregate CLI Reports
+
+`axion.check-report.v1` summarizes doctor gate status, readiness, quiet self-test, optional bundle preflight, `next_step`, and `result`.
+
+`axion.bundle-report.v1` summarizes the staged bundle target, layout, generated paths, platform metadata paths, copied icon and executable, verification counters, checked paths, readiness blockers, warnings, optional `report_path`, and `result`. It is intended for release automation that needs bundle-specific output rather than the broader diagnostics report schema.
 
 ## CI Usage
 

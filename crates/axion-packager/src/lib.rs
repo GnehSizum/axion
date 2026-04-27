@@ -25,9 +25,13 @@ impl BundleTarget {
 
     pub const fn layout_summary(self) -> &'static str {
         match self {
-            Self::MacOsApp => ".app bundle with Contents/MacOS and Contents/Resources/app",
-            Self::LinuxDir => "directory bundle with bin/ and resources/app",
-            Self::WindowsDir => "directory bundle with bin/*.exe and resources/app",
+            Self::MacOsApp => {
+                ".app bundle with Contents/MacOS, Contents/Resources/app, and Info.plist"
+            }
+            Self::LinuxDir => "directory bundle with bin/, resources/app, and .desktop metadata",
+            Self::WindowsDir => {
+                "directory bundle with bin/*.exe, resources/app, and Windows metadata"
+            }
         }
     }
 }
@@ -87,6 +91,7 @@ pub struct BundleArtifact {
     pub entry_path: PathBuf,
     pub asset_manifest_path: PathBuf,
     pub metadata_path: PathBuf,
+    pub platform_metadata_paths: Vec<PathBuf>,
     pub bundle_manifest_path: PathBuf,
     pub icon_path: Option<PathBuf>,
 }
@@ -226,7 +231,7 @@ pub fn stage_bundle_from_web_assets_with_metadata(
         &metadata.app_name,
     )?;
     let copied_icon_path = copy_bundle_icon(icon_path.as_deref(), &bundle_dir, bundle_plan.target)?;
-    let metadata_path = write_bundle_metadata(
+    let metadata_files = write_bundle_metadata(
         &bundle_dir,
         bundle_plan.target,
         metadata,
@@ -241,7 +246,7 @@ pub fn stage_bundle_from_web_assets_with_metadata(
         resources_app_dir: &resources_app_dir,
         entry_path: &entry_path,
         asset_manifest_path: &asset_manifest_path,
-        metadata_path: &metadata_path,
+        metadata_path: &metadata_files.metadata_path,
         executable_path: copied_executable_path.as_deref(),
         icon_path: copied_icon_path.as_deref(),
     })?;
@@ -254,7 +259,8 @@ pub fn stage_bundle_from_web_assets_with_metadata(
         executable_path: copied_executable_path,
         entry_path,
         asset_manifest_path,
-        metadata_path,
+        metadata_path: metadata_files.metadata_path,
+        platform_metadata_paths: metadata_files.platform_metadata_paths,
         bundle_manifest_path,
         icon_path: copied_icon_path,
     })
@@ -269,6 +275,9 @@ pub fn verify_bundle_artifact(
     require_bundle_file(&artifact.entry_path, &mut checked_paths)?;
     require_bundle_file(&artifact.asset_manifest_path, &mut checked_paths)?;
     require_bundle_file(&artifact.metadata_path, &mut checked_paths)?;
+    for path in &artifact.platform_metadata_paths {
+        require_bundle_file(path, &mut checked_paths)?;
+    }
     require_bundle_file(&artifact.bundle_manifest_path, &mut checked_paths)?;
 
     if let Some(path) = &artifact.executable_path {
@@ -532,24 +541,28 @@ fn bundle_executable_path(bundle_dir: &Path, target: BundleTarget, app_name: &st
     }
 }
 
+struct BundleMetadataFiles {
+    metadata_path: PathBuf,
+    platform_metadata_paths: Vec<PathBuf>,
+}
+
 fn write_bundle_metadata(
     bundle_dir: &Path,
     target: BundleTarget,
     metadata: &BundleMetadata,
     executable_path: Option<&Path>,
     icon_path: Option<&Path>,
-) -> Result<PathBuf, PackagerError> {
+) -> Result<BundleMetadataFiles, PackagerError> {
     match target {
         BundleTarget::MacOsApp => {
             write_macos_metadata(bundle_dir, metadata, executable_path, icon_path)
         }
-        BundleTarget::LinuxDir | BundleTarget::WindowsDir => write_directory_bundle_metadata(
-            bundle_dir,
-            target,
-            metadata,
-            executable_path,
-            icon_path,
-        ),
+        BundleTarget::LinuxDir => {
+            write_linux_metadata(bundle_dir, metadata, executable_path, icon_path)
+        }
+        BundleTarget::WindowsDir => {
+            write_windows_metadata(bundle_dir, metadata, executable_path, icon_path)
+        }
     }
 }
 
@@ -558,10 +571,11 @@ fn write_macos_metadata(
     metadata: &BundleMetadata,
     executable_path: Option<&Path>,
     icon_path: Option<&Path>,
-) -> Result<PathBuf, PackagerError> {
+) -> Result<BundleMetadataFiles, PackagerError> {
     let contents_dir = bundle_dir.join("Contents");
     fs::create_dir_all(&contents_dir)?;
-    fs::write(contents_dir.join("PkgInfo"), "APPL????\n")?;
+    let pkg_info_path = contents_dir.join("PkgInfo");
+    fs::write(&pkg_info_path, "APPL????\n")?;
 
     let executable_name = executable_path
         .and_then(Path::file_name)
@@ -627,7 +641,83 @@ fn write_macos_metadata(
     );
     let metadata_path = contents_dir.join("Info.plist");
     fs::write(&metadata_path, info_plist)?;
-    Ok(metadata_path)
+    Ok(BundleMetadataFiles {
+        metadata_path,
+        platform_metadata_paths: vec![pkg_info_path],
+    })
+}
+
+fn write_linux_metadata(
+    bundle_dir: &Path,
+    metadata: &BundleMetadata,
+    executable_path: Option<&Path>,
+    icon_path: Option<&Path>,
+) -> Result<BundleMetadataFiles, PackagerError> {
+    fs::create_dir_all(bundle_dir)?;
+    let metadata_path = write_directory_bundle_metadata(
+        bundle_dir,
+        BundleTarget::LinuxDir,
+        metadata,
+        executable_path,
+        icon_path,
+    )?;
+    let desktop_path = bundle_dir.join(format!("{}.desktop", metadata.app_name));
+    let executable = executable_path
+        .map(|path| bundle_relative_path(bundle_dir, path))
+        .unwrap_or_else(|| format!("bin/{}", metadata.app_name));
+    let icon = icon_path
+        .map(|path| bundle_relative_path(bundle_dir, path))
+        .unwrap_or_default();
+    fs::write(
+        &desktop_path,
+        format!(
+            "[Desktop Entry]\nType=Application\nName={}\nExec={}\nIcon={}\nComment={}\nCategories=Utility;\nTerminal=false\n",
+            metadata.app_name,
+            executable,
+            icon,
+            metadata.description.as_deref().unwrap_or(""),
+        ),
+    )?;
+
+    Ok(BundleMetadataFiles {
+        metadata_path,
+        platform_metadata_paths: vec![desktop_path],
+    })
+}
+
+fn write_windows_metadata(
+    bundle_dir: &Path,
+    metadata: &BundleMetadata,
+    executable_path: Option<&Path>,
+    icon_path: Option<&Path>,
+) -> Result<BundleMetadataFiles, PackagerError> {
+    fs::create_dir_all(bundle_dir)?;
+    let metadata_path = write_directory_bundle_metadata(
+        bundle_dir,
+        BundleTarget::WindowsDir,
+        metadata,
+        executable_path,
+        icon_path,
+    )?;
+    let windows_metadata_path = bundle_dir.join("axion-windows-metadata.txt");
+    fs::write(
+        &windows_metadata_path,
+        format!(
+            "name={}\nidentifier={}\nversion={}\ndescription={}\n",
+            metadata.app_name,
+            metadata.identifier.as_deref().unwrap_or(""),
+            metadata
+                .version
+                .as_deref()
+                .unwrap_or(env!("CARGO_PKG_VERSION")),
+            metadata.description.as_deref().unwrap_or(""),
+        ),
+    )?;
+
+    Ok(BundleMetadataFiles {
+        metadata_path,
+        platform_metadata_paths: vec![windows_metadata_path],
+    })
 }
 
 fn write_directory_bundle_metadata(
@@ -637,7 +727,6 @@ fn write_directory_bundle_metadata(
     executable_path: Option<&Path>,
     icon_path: Option<&Path>,
 ) -> Result<PathBuf, PackagerError> {
-    fs::create_dir_all(bundle_dir)?;
     let executable = executable_path
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "none".to_owned());
@@ -1252,6 +1341,11 @@ mod tests {
             output.join("hello-axion").join("axion-bundle.txt")
         );
         assert_eq!(
+            artifact.platform_metadata_paths,
+            vec![output.join("hello-axion").join("hello-axion.desktop")]
+        );
+        assert!(artifact.platform_metadata_paths[0].exists());
+        assert_eq!(
             artifact.bundle_manifest_path,
             output
                 .join("hello-axion")
@@ -1264,6 +1358,7 @@ mod tests {
         assert!(bundle_manifest.contains("\"metadata\": \"axion-bundle.txt\""));
         assert!(bundle_manifest.contains("\"icon\": null"));
         assert!(bundle_manifest.contains("\"path\": \"resources/app/index.html\""));
+        assert!(bundle_manifest.contains("\"path\": \"hello-axion.desktop\""));
         assert!(bundle_manifest.contains("\"fnv1a64\":"));
 
         let verification = verify_bundle_artifact(&artifact).unwrap();
@@ -1383,6 +1478,16 @@ mod tests {
                 .join("Info.plist")
         );
         assert!(artifact.metadata_path.exists());
+        assert_eq!(
+            artifact.platform_metadata_paths,
+            vec![
+                output
+                    .join("hello-axion.app")
+                    .join("Contents")
+                    .join("PkgInfo")
+            ]
+        );
+        assert!(artifact.platform_metadata_paths[0].exists());
         assert!(
             fs::read_to_string(&artifact.metadata_path)
                 .unwrap()
@@ -1424,6 +1529,47 @@ mod tests {
         assert!(metadata.contains("description=Hello metadata"));
         assert!(metadata.contains("authors=Axion Maintainers"));
         assert!(metadata.contains("homepage=https://example.dev/hello"));
+    }
+
+    #[test]
+    fn stage_bundle_from_web_assets_writes_windows_metadata() {
+        let source = temp_dir("bundle-windows-metadata-source");
+        let output = temp_dir("bundle-windows-metadata-output");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("index.html"), "<html>Hello</html>").unwrap();
+
+        let artifact = stage_bundle_from_web_assets_with_metadata(
+            source.clone(),
+            source.join("index.html"),
+            BundlePlan {
+                target: BundleTarget::WindowsDir,
+                output_dir: output.clone(),
+                executable_path: None,
+            },
+            &BundleMetadata {
+                app_name: "hello-axion".to_owned(),
+                identifier: Some("dev.axion.hello".to_owned()),
+                version: Some("1.2.3".to_owned()),
+                description: Some("Hello metadata".to_owned()),
+                authors: Vec::new(),
+                homepage: None,
+                icon: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            artifact.platform_metadata_paths,
+            vec![
+                output
+                    .join("hello-axion")
+                    .join("axion-windows-metadata.txt")
+            ]
+        );
+        let metadata = fs::read_to_string(&artifact.platform_metadata_paths[0]).unwrap();
+        assert!(metadata.contains("name=hello-axion"));
+        assert!(metadata.contains("identifier=dev.axion.hello"));
+        assert!(metadata.contains("version=1.2.3"));
     }
 
     #[test]

@@ -71,8 +71,14 @@ pub struct BundleArgs {
     #[arg(long)]
     pub executable: Option<PathBuf>,
 
+    #[arg(long)]
+    pub report_path: Option<PathBuf>,
+
     #[arg(long, default_value_t = false)]
     pub build_executable: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]

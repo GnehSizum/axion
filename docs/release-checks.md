@@ -25,6 +25,7 @@ result: ok
 Use `doctor --deny-warnings --max-risk medium` when you need the full human-readable diagnostics, including per-window security details and `readiness.summary`.
 Use `--json` in CI and read `diagnostics.readiness.ready_for_dev`, `ready_for_bundle`, `ready_for_gui_smoke`, `blockers`, and `warnings`.
 Use `check --json` when CI only needs the aggregate workflow result, `next_step`, and bundle preflight status.
+Use `bundle --json` when CI needs the generated bundle layout, platform metadata, copied icon/executable paths, verification counters, checked paths, and final `result`. Add `--report-path <path>` to upload the bundle report as an artifact.
 
 ## Full Local Gate
 
@@ -44,6 +45,7 @@ cargo run -p axion-cli -- check --manifest-path examples/hello-axion/axion.toml 
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- gui-smoke --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-gui-smoke.json --timeout-ms 30000 --cargo-target-dir target --serial-build
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --build-executable
+cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --build-executable --json --report-path target/axion/reports/hello-bundle.json
 ```
 
 `gui-smoke` requires a Servo-capable local environment. If it cannot run locally, keep the `doctor` readiness output and Servo compile check in the release notes.

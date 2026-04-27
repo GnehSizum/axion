@@ -217,6 +217,8 @@ Create a platform bundle scaffold and copy staged app resources. App metadata fr
 
 ```sh
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml
+cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --json
+cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-bundle.json
 ```
 
 Executable handling:
@@ -225,11 +227,15 @@ Executable handling:
 - If no executable is passed, Axion searches nearby `target/release/` and `target/debug/` directories for a binary matching the app name.
 - Pass `--build-executable` to run `cargo build --release` for the app before bundling.
 - Use the printed `layout`, `bundle_dir`, and `bundle_manifest` values to inspect the generated platform structure.
+- Use `--json` to emit `axion.bundle-report.v1` with the same paths, copied icon/executable references, platform metadata, verification counters, checked paths, readiness blockers, warnings, and final result.
+- Use `--report-path <path>` to write `axion.bundle-report.v1` to disk while keeping the normal stdout mode.
 - `verification: ok` means every referenced bundle path exists and the manifest file list matches generated file sizes and `fnv1a64` fingerprints.
 - `checked_dirs`, `checked_files`, `fingerprinted_files`, and `bundle_bytes` summarize the verification pass.
 
 ```sh
 cargo run -p axion-cli -- bundle \
   --manifest-path examples/hello-axion/axion.toml \
-  --build-executable
+  --build-executable \
+  --json \
+  --report-path target/axion/reports/hello-bundle.json
 ```

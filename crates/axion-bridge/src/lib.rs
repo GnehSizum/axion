@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 pub const BRIDGE_MAX_NAME_BYTES: usize = 128;
 pub const BRIDGE_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const BRIDGE_MAX_REQUEST_ID_BYTES: usize = 128;
-const AXION_RELEASE_VERSION: &str = "v0.1.14.0";
+const AXION_RELEASE_VERSION: &str = "v0.1.15.0";
 const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

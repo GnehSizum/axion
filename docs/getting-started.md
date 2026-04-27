@@ -147,6 +147,7 @@ cargo run -p axion-cli -- gui-smoke \
   --serial-build
 cargo run -p axion-cli -- build --manifest-path /tmp/demo-app/axion.toml
 cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml --build-executable
+cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml --build-executable --json --report-path target/axion/reports/demo-app-bundle.json
 ```
 
 `check` is the fastest default validation loop: it runs the doctor gate, readiness, quiet self-test staging, and optional bundle preflight. Use `check --json` for CI and `doctor` when you need the full diagnostics detail. Continue when development, bundle, and GUI smoke readiness are all `true`; otherwise resolve the printed `readiness.blocker` lines first.
@@ -155,6 +156,6 @@ cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml --buil
 
 `gui-smoke` launches the generated app with `servo-runtime`, calls the generated `window.__AXION_GUI_SMOKE__()` hook, and writes a GUI diagnostics report. Use `--cargo-target-dir target` from the Axion checkout to reuse Servo build artifacts, and `--serial-build` when the local machine is resource-constrained.
 
-To customize an application icon in bundle scaffolds, update `[bundle] icon = "icons/app.icns"` in `axion.toml` and keep the icon file inside the project directory. Bundle output includes `target`, `layout`, `bundle_dir`, `bundle_manifest`, `checked_files`, `fingerprinted_files`, `bundle_bytes`, and `axion-bundle-manifest.json`, which records the generated entry, metadata, icon, executable, file sizes, and `fnv1a64` fingerprints. The `bundle` command prints `verification: ok` after checking those references against the generated files.
+To customize an application icon in bundle scaffolds, update `[bundle] icon = "icons/app.icns"` in `axion.toml` and keep the icon file inside the project directory. Bundle output includes `target`, `layout`, `bundle_dir`, `bundle_manifest`, `platform_metadata`, `checked_files`, `fingerprinted_files`, `bundle_bytes`, and `axion-bundle-manifest.json`, which records the generated entry, metadata, icon, executable, file sizes, and `fnv1a64` fingerprints. The `bundle` command prints `verification: ok` after checking those references against the generated files. Use `bundle --json` to emit `axion.bundle-report.v1`, and `--report-path` to write it for CI or scripted release checks.
 
 `build` and `bundle` produce staging output, not signed production installers. To include an app executable, build it first or pass `--build-executable` to `bundle`.

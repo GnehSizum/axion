@@ -2,7 +2,7 @@
 
 Axion is a Rust desktop application framework built on a vendored Servo engine. It provides an explicit manifest, capability-gated JavaScript bridge, packaged app assets, runtime diagnostics, and a `winit` desktop backend.
 
-Axion is currently at the **v0.1.14.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
+Axion is currently at the **v0.1.15.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
 
 ## What Works Today
 
@@ -17,7 +17,7 @@ Axion is currently at the **v0.1.14.0 developer preview**. It is suitable for fr
 - Invoke built-in bridge commands from frontend JavaScript.
 - Use capability-gated native commands for app metadata, app-data text files, and preview file dialogs with explicit backend diagnostics.
 - Use capability-gated window control commands such as `window.list`, `window.reload`, `window.set_title`, and `window.set_size`, including targeted multi-window control.
-- Stage and verify bundle scaffolds with app icon, executable, metadata, platform layout summaries, and fingerprinted bundle manifest output.
+- Stage and verify bundle scaffolds with app icon, executable, metadata, platform layout summaries, fingerprinted manifests, and JSON bundle reports.
 - Inspect per-window capabilities and targeted window control with the `multi-window` example.
 - Reduce manifest boilerplate with capability profiles such as `app-info`, `window-control`, `file-access`, and `dialog-access`.
 - Inspect per-window security risk, remote navigation, profile expansion, capability consistency, release readiness, and CI gates through `axion-cli doctor` and `doctor --json`.
@@ -100,6 +100,8 @@ cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- gui-smoke --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-gui-smoke.json --timeout-ms 30000
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml
+cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --json
+cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-bundle.json
 cargo run -p axion-cli -- doctor --manifest-path examples/file-access-demo/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/file-access-demo/axion.toml
 cargo run -p axion-cli -- gui-smoke --manifest-path examples/file-access-demo/axion.toml --report-path target/axion/reports/file-access-gui-smoke.json --timeout-ms 30000
@@ -116,4 +118,4 @@ Servo warnings from the vendored `servo/` subtree are not Axion release blockers
 
 ## Versioning
 
-Axion public releases use four-part tags such as `v0.1.14.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.14`. See `docs/versioning.md`.
+Axion public releases use four-part tags such as `v0.1.15.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.15`. See `docs/versioning.md`.
