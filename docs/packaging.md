@@ -1,6 +1,6 @@
 # Packaging
 
-Axion v0.1.13.0 provides bundle scaffolds for local validation and early distribution experiments. These bundles are not signed installers yet.
+Axion v0.1.14.0 provides bundle scaffolds for local validation and early distribution experiments. These bundles are not signed installers yet.
 
 ## Bundle Command
 

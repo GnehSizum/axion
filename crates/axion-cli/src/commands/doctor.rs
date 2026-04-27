@@ -24,8 +24,9 @@ pub fn run(args: DoctorArgs) -> Result<(), AxionCliError> {
     println!("{}", framework_diagnostic_line());
     print_tool_status("cargo", &["--version"]);
     print_rustc_status();
-    print_manifest_status(&args.manifest_path)?;
-    print_servo_status(servo_path_for_manifest(&args.manifest_path).as_deref());
+    let servo_path = servo_path_for_manifest(&args.manifest_path);
+    print_manifest_status(&args.manifest_path, servo_path.as_deref())?;
+    print_servo_status(servo_path.as_deref());
     let gate = doctor_gate_for_manifest(&args)?;
     for line in gate.to_lines() {
         println!("{line}");
@@ -125,7 +126,10 @@ fn parse_semver(value: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-fn print_manifest_status(manifest_path: &Path) -> Result<(), AxionCliError> {
+fn print_manifest_status(
+    manifest_path: &Path,
+    servo_path: Option<&Path>,
+) -> Result<(), AxionCliError> {
     if !manifest_path.exists() {
         println!("manifest: missing ({})", manifest_path.display());
         return Ok(());
@@ -140,7 +144,8 @@ fn print_manifest_status(manifest_path: &Path) -> Result<(), AxionCliError> {
     for line in manifest_diagnostic_lines(&config) {
         println!("{line}");
     }
-    for line in security_diagnostics(&config).to_lines() {
+    let security = security_diagnostics(&config);
+    for line in security.to_lines() {
         println!("{line}");
     }
     for line in build_asset_diagnostic_lines(&config) {
@@ -149,7 +154,17 @@ fn print_manifest_status(manifest_path: &Path) -> Result<(), AxionCliError> {
     for line in bundle_diagnostic_lines(&config) {
         println!("{line}");
     }
-    for line in runtime_diagnostic_lines(&config) {
+    let runtime = runtime_diagnostic_report(&config);
+    match &runtime {
+        Ok(runtime) => {
+            for line in runtime_diagnostic_lines_from_report(runtime) {
+                println!("{line}");
+            }
+        }
+        Err(error) => println!("runtime: invalid ({error})"),
+    }
+    let readiness = readiness_diagnostics(&config, &security, runtime.as_ref().ok(), servo_path);
+    for line in readiness.to_lines() {
         println!("{line}");
     }
     println!("{}", dev_server_diagnostic_line(&config));
@@ -854,7 +869,7 @@ fn risk_from_str(value: &str) -> DoctorRisk {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DoctorGate {
+pub(crate) struct DoctorGate {
     passed: bool,
     failed_reasons: Vec<String>,
 }
@@ -912,6 +927,231 @@ impl DoctorGate {
             json_string_array_literal(&self.failed_reasons)
         )
     }
+
+    pub(crate) const fn passed_status(&self) -> bool {
+        self.passed
+    }
+
+    pub(crate) fn failed_reasons(&self) -> &[String] {
+        &self.failed_reasons
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DoctorReadiness {
+    ready_for_dev: bool,
+    ready_for_bundle: bool,
+    ready_for_gui_smoke: bool,
+    blockers: Vec<String>,
+    warnings: Vec<String>,
+}
+
+impl DoctorReadiness {
+    fn missing_manifest() -> Self {
+        Self {
+            ready_for_dev: false,
+            ready_for_bundle: false,
+            ready_for_gui_smoke: false,
+            blockers: vec!["manifest is missing".to_owned()],
+            warnings: Vec::new(),
+        }
+    }
+
+    fn to_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!(
+            "readiness.summary: dev={}, bundle={}, gui_smoke={}",
+            self.ready_for_dev, self.ready_for_bundle, self.ready_for_gui_smoke
+        )];
+
+        for blocker in &self.blockers {
+            lines.push(format!("readiness.blocker: {blocker}"));
+        }
+        for warning in &self.warnings {
+            lines.push(format!("readiness.warning: {warning}"));
+        }
+
+        lines
+    }
+
+    fn to_json(&self) -> String {
+        format!(
+            "{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}}",
+            self.ready_for_dev,
+            self.ready_for_bundle,
+            self.ready_for_gui_smoke,
+            json_string_array_literal(&self.blockers),
+            json_string_array_literal(&self.warnings),
+        )
+    }
+
+    pub(crate) const fn ready_for_dev(&self) -> bool {
+        self.ready_for_dev
+    }
+
+    pub(crate) const fn ready_for_bundle(&self) -> bool {
+        self.ready_for_bundle
+    }
+
+    pub(crate) const fn ready_for_gui_smoke(&self) -> bool {
+        self.ready_for_gui_smoke
+    }
+
+    pub(crate) fn blockers(&self) -> &[String] {
+        &self.blockers
+    }
+
+    pub(crate) fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+}
+
+fn readiness_diagnostics(
+    config: &AppConfig,
+    security: &SecurityDiagnostics,
+    runtime: Option<&axion_runtime::RuntimeDiagnosticReport>,
+    servo_path: Option<&Path>,
+) -> DoctorReadiness {
+    let mut dev_blockers = Vec::new();
+    let mut bundle_blockers = Vec::new();
+    let mut gui_blockers = Vec::new();
+    let mut warnings = Vec::new();
+
+    match axion_packager::validate_web_assets(&config.build.frontend_dist, &config.build.entry) {
+        Ok(_) => {}
+        Err(error) => {
+            let blocker = format!("build assets are invalid: {error}");
+            dev_blockers.push(blocker.clone());
+            bundle_blockers.push(blocker.clone());
+            gui_blockers.push(blocker);
+        }
+    }
+
+    match runtime {
+        Some(runtime) if runtime.has_errors() => {
+            let blocker = "runtime diagnostics contain errors".to_owned();
+            dev_blockers.push(blocker.clone());
+            bundle_blockers.push(blocker.clone());
+            gui_blockers.push(blocker);
+        }
+        Some(_) => {}
+        None => {
+            let blocker = "runtime diagnostics could not be built".to_owned();
+            dev_blockers.push(blocker.clone());
+            bundle_blockers.push(blocker.clone());
+            gui_blockers.push(blocker);
+        }
+    }
+
+    if security.warning_count() > 0 {
+        let blocker = format!(
+            "security warnings must be resolved ({})",
+            security.warning_count()
+        );
+        bundle_blockers.push(blocker.clone());
+        gui_blockers.push(blocker);
+    }
+
+    if security.max_risk() > DoctorRisk::Medium {
+        let blocker = format!(
+            "security risk {} exceeds medium",
+            security.max_risk().as_str()
+        );
+        bundle_blockers.push(blocker.clone());
+        gui_blockers.push(blocker);
+    }
+
+    match config.bundle.icon.as_deref() {
+        Some(icon) => {
+            if let Err(error) = axion_packager::validate_bundle_icon(Some(icon)) {
+                bundle_blockers.push(format!("bundle icon is invalid: {error}"));
+            }
+        }
+        None => bundle_blockers.push("bundle icon is not configured".to_owned()),
+    }
+
+    if servo_path.is_none() {
+        gui_blockers.push(
+            "servo source was not found near the manifest; run GUI smoke from an Axion checkout"
+                .to_owned(),
+        );
+    }
+
+    if !frontend_contains_gui_smoke_hook(&config.build.frontend_dist, &config.build.entry) {
+        gui_blockers.push("frontend assets do not reference window.__AXION_GUI_SMOKE__".to_owned());
+    }
+
+    if !config.capabilities.values().any(|capability| {
+        capability
+            .protocols
+            .iter()
+            .any(|protocol| protocol == "axion")
+    }) {
+        gui_blockers.push("no window enables the axion bridge protocol".to_owned());
+    }
+
+    if config.dev.is_some() && !dev_server_is_reachable(config) {
+        warnings.push("configured dev server is currently unreachable".to_owned());
+    }
+
+    let ready_for_dev = dev_blockers.is_empty();
+    let ready_for_bundle = ready_for_dev && bundle_blockers.is_empty();
+    let ready_for_gui_smoke = ready_for_dev && gui_blockers.is_empty();
+    let mut blockers = Vec::new();
+    append_labeled_blockers(&mut blockers, "dev", dev_blockers);
+    append_labeled_blockers(&mut blockers, "bundle", bundle_blockers);
+    append_labeled_blockers(&mut blockers, "gui_smoke", gui_blockers);
+    blockers.sort();
+    blockers.dedup();
+    warnings.sort();
+    warnings.dedup();
+
+    DoctorReadiness {
+        ready_for_dev,
+        ready_for_bundle,
+        ready_for_gui_smoke,
+        blockers,
+        warnings,
+    }
+}
+
+fn append_labeled_blockers(target: &mut Vec<String>, label: &str, blockers: Vec<String>) {
+    target.extend(
+        blockers
+            .into_iter()
+            .map(|blocker| format!("{label}: {blocker}")),
+    );
+}
+
+fn frontend_contains_gui_smoke_hook(frontend_dist: &Path, entry: &Path) -> bool {
+    source_contains_gui_smoke_hook(entry) || frontend_sources_contain_gui_smoke_hook(frontend_dist)
+}
+
+fn frontend_sources_contain_gui_smoke_hook(frontend_dist: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(frontend_dist) else {
+        return false;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if frontend_sources_contain_gui_smoke_hook(&path) {
+                return true;
+            }
+            continue;
+        }
+
+        if source_contains_gui_smoke_hook(&path) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn source_contains_gui_smoke_hook(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|source| source.contains("__AXION_GUI_SMOKE__"))
+        .unwrap_or(false)
 }
 
 fn build_asset_diagnostic_lines(config: &AppConfig) -> Vec<String> {
@@ -977,12 +1217,24 @@ fn bundle_icon_format(path: &Path) -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
+fn runtime_diagnostic_report(
+    config: &AppConfig,
+) -> Result<axion_runtime::RuntimeDiagnosticReport, AxionCliError> {
+    let app = Builder::new().apply_config(config.clone()).build()?;
+    Ok(axion_runtime::diagnostic_report(&app, RunMode::Production))
+}
+
+#[cfg(test)]
 fn runtime_diagnostic_lines(config: &AppConfig) -> Vec<String> {
-    let app = match Builder::new().apply_config(config.clone()).build() {
-        Ok(app) => app,
-        Err(error) => return vec![format!("runtime: invalid ({error})")],
-    };
-    let report = axion_runtime::diagnostic_report(&app, RunMode::Production);
+    match runtime_diagnostic_report(config) {
+        Ok(report) => runtime_diagnostic_lines_from_report(&report),
+        Err(error) => vec![format!("runtime: invalid ({error})")],
+    }
+}
+
+fn runtime_diagnostic_lines_from_report(
+    report: &axion_runtime::RuntimeDiagnosticReport,
+) -> Vec<String> {
     let mut lines = vec![format!(
         "runtime: app={}, mode={}, windows={}, errors={}, configured_dialog_backend={}, dialog_backend={}, resource_policy={}",
         report.app_name,
@@ -993,7 +1245,7 @@ fn runtime_diagnostic_lines(config: &AppConfig) -> Vec<String> {
         report.dialog_backend.as_str(),
         report.resource_policy
     )];
-    for window in report.windows {
+    for window in &report.windows {
         lines.push(format!(
             "runtime.window.{}: bridge={}, commands={}, events={}, frontend_events={}, host_events={}, startup_events={}, lifecycle_events={}, trusted_origins={}, navigation_origins={}, remote_navigation={}, csp={}",
             window.window_id,
@@ -1010,7 +1262,7 @@ fn runtime_diagnostic_lines(config: &AppConfig) -> Vec<String> {
             window.content_security_policy,
         ));
     }
-    for issue in report.issues {
+    for issue in &report.issues {
         lines.push(format!(
             "runtime.issue.{:?}: {}",
             issue.severity, issue.message
@@ -1059,13 +1311,31 @@ fn servo_path_for_manifest(manifest_path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn doctor_gate_for_manifest(args: &DoctorArgs) -> Result<DoctorGate, AxionCliError> {
+pub(crate) fn doctor_gate_for_manifest(args: &DoctorArgs) -> Result<DoctorGate, AxionCliError> {
     if !args.manifest_path.exists() {
         return Ok(DoctorGate::passed());
     }
 
     let config = axion_manifest::load_app_config_from_path(&args.manifest_path)?;
     Ok(DoctorGate::evaluate(&security_diagnostics(&config), args))
+}
+
+pub(crate) fn doctor_readiness_for_manifest(
+    manifest_path: &Path,
+) -> Result<DoctorReadiness, AxionCliError> {
+    if !manifest_path.exists() {
+        return Ok(DoctorReadiness::missing_manifest());
+    }
+
+    let config = axion_manifest::load_app_config_from_path(manifest_path)?;
+    let runtime = runtime_diagnostic_report(&config)?;
+    let security = security_diagnostics(&config);
+    Ok(readiness_diagnostics(
+        &config,
+        &security,
+        Some(&runtime),
+        servo_path_for_manifest(manifest_path).as_deref(),
+    ))
 }
 
 fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> {
@@ -1077,6 +1347,7 @@ fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> 
         passed: false,
         failed_reasons: vec!["manifest is missing".to_owned()],
     };
+    let missing_readiness = DoctorReadiness::missing_manifest();
 
     if !manifest_path.exists() {
         return Ok(DiagnosticsReport {
@@ -1107,6 +1378,7 @@ fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> 
                 rustc_msrv: "unknown",
                 security: None,
                 gate: &missing_gate,
+                readiness: &missing_readiness,
                 servo_path: servo_path.as_deref(),
                 dev_server: None,
                 runtime: None,
@@ -1120,6 +1392,8 @@ fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> 
     let runtime = axion_runtime::diagnostic_report(&app, RunMode::Production);
     let security = security_diagnostics(&config);
     let gate = DoctorGate::evaluate(&security, args);
+    let readiness =
+        readiness_diagnostics(&config, &security, Some(&runtime), servo_path.as_deref());
     let rustc_msrv = if rustc.status == "ok" {
         rustc_msrv_diagnostic_line(&rustc.detail)
     } else {
@@ -1220,6 +1494,7 @@ fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> 
             rustc_msrv: &rustc_msrv,
             security: Some(&security),
             gate: &gate,
+            readiness: &readiness,
             servo_path: servo_path.as_deref(),
             dev_server: Some(dev_server_diagnostic_line(&config)),
             runtime: Some(&runtime),
@@ -1234,6 +1509,7 @@ struct DoctorDiagnosticsInput<'a> {
     rustc_msrv: &'a str,
     security: Option<&'a SecurityDiagnostics>,
     gate: &'a DoctorGate,
+    readiness: &'a DoctorReadiness,
     servo_path: Option<&'a Path>,
     dev_server: Option<String>,
     runtime: Option<&'a axion_runtime::RuntimeDiagnosticReport>,
@@ -1269,7 +1545,7 @@ fn doctor_diagnostics_json(input: DoctorDiagnosticsInput<'_>) -> String {
         .unwrap_or_else(|| "null".to_owned());
 
     format!(
-        "{{\"framework\":{{\"cli_version\":{},\"release\":{},\"msrv\":{}}},\"tools\":[{},{}],\"rustc_msrv\":{},\"security\":{},\"gate\":{},\"servo\":{},\"dev_server\":{},\"runtime\":{}}}",
+        "{{\"framework\":{{\"cli_version\":{},\"release\":{},\"msrv\":{}}},\"tools\":[{},{}],\"rustc_msrv\":{},\"security\":{},\"gate\":{},\"readiness\":{},\"servo\":{},\"dev_server\":{},\"runtime\":{}}}",
         json_string_literal(env!("CARGO_PKG_VERSION")),
         json_string_literal(axion_runtime::AXION_RELEASE_VERSION),
         json_string_literal(option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("unknown")),
@@ -1278,6 +1554,7 @@ fn doctor_diagnostics_json(input: DoctorDiagnosticsInput<'_>) -> String {
         json_string_literal(input.rustc_msrv),
         security,
         input.gate.to_json(),
+        input.readiness.to_json(),
         servo,
         dev_server,
         runtime,
@@ -1362,7 +1639,7 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.1.13.0"));
+        assert!(line.contains("release=v0.1.14.0"));
         assert!(line.contains("msrv="));
     }
 
@@ -1583,12 +1860,76 @@ allowed_navigation_origins = ["https://docs.example"]
         );
         assert!(json.contains("\"security\":{\"warning_count\":0"));
         assert!(json.contains("\"gate\":{\"passed\":true,\"failed_reasons\":[]}"));
+        assert!(json.contains("\"readiness\":{"));
+        assert!(json.contains("\"ready_for_dev\":true"));
         assert!(json.contains("\"profiles\":[\"app-events\",\"app-info\",\"file-access\"]"));
         assert!(json.contains("\"risk\":\"medium\""));
         assert!(json.contains(
             "\"command_categories\":{\"app\":4,\"window\":0,\"fs\":2,\"dialog\":0,\"custom\":0}"
         ));
         assert!(json.contains("\"code\":\"limited_remote_navigation\""));
+        assert!(json.contains("\"result\":\"ok\""));
+    }
+
+    #[test]
+    fn doctor_report_serializes_release_readiness_json() {
+        let root = temp_dir();
+        let app_dir = root.join("apps").join("ready");
+        let frontend = app_dir.join("frontend");
+        fs::create_dir_all(&frontend).unwrap();
+        fs::create_dir_all(app_dir.join("icons")).unwrap();
+        fs::create_dir_all(root.join("servo").join("components").join("servo")).unwrap();
+        fs::write(
+            frontend.join("index.html"),
+            "<!doctype html><script src=\"app.js\"></script>",
+        )
+        .unwrap();
+        fs::write(
+            frontend.join("app.js"),
+            "window.__AXION_GUI_SMOKE__ = async () => ({ result: 'ok' });",
+        )
+        .unwrap();
+        fs::write(app_dir.join("icons").join("app.icns"), "icon").unwrap();
+        let manifest = app_dir.join("axion.toml");
+        fs::write(
+            &manifest,
+            r#"
+[app]
+name = "doctor-ready"
+identifier = "dev.axion.doctor-ready"
+version = "1.2.3"
+
+[window]
+id = "main"
+title = "Doctor Ready"
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[bundle]
+icon = "icons/app.icns"
+
+[capabilities.main]
+profiles = ["app-info"]
+"#,
+        )
+        .unwrap();
+
+        let json = doctor_report(&DoctorArgs {
+            manifest_path: manifest,
+            json: true,
+            deny_warnings: true,
+            max_risk: Some(DoctorRisk::Medium),
+        })
+        .expect("doctor report should build")
+        .to_json();
+
+        assert!(json.contains("\"readiness\":{\"ready_for_dev\":true"));
+        assert!(json.contains("\"ready_for_bundle\":true"));
+        assert!(json.contains("\"ready_for_gui_smoke\":true"));
+        assert!(json.contains("\"blockers\":[]"));
+        assert!(json.contains("\"warnings\":[]"));
         assert!(json.contains("\"result\":\"ok\""));
     }
 

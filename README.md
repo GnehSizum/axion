@@ -2,11 +2,12 @@
 
 Axion is a Rust desktop application framework built on a vendored Servo engine. It provides an explicit manifest, capability-gated JavaScript bridge, packaged app assets, runtime diagnostics, and a `winit` desktop backend.
 
-Axion is currently at the **v0.1.13.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
+Axion is currently at the **v0.1.14.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
 
 ## What Works Today
 
-- Generate a guided Axion application with `axion-cli new --template vanilla`.
+- Generate a guided Axion application with `axion-cli new --template vanilla`, optionally using `--run-check` for immediate validation.
+- Run the lightweight application validation loop with `axion-cli check`, including `--json` output for CI.
 - Inspect development-server readiness, run external frontend commands, watch frontend files with debounce/ignore rules, reload live windows when launched, and use packaged fallback through `axion-cli dev`.
 - Reuse bridge-provided text-input compatibility helpers in generated apps and custom frontends.
 - Load and validate `axion.toml` manifests.
@@ -19,7 +20,7 @@ Axion is currently at the **v0.1.13.0 developer preview**. It is suitable for fr
 - Stage and verify bundle scaffolds with app icon, executable, metadata, platform layout summaries, and fingerprinted bundle manifest output.
 - Inspect per-window capabilities and targeted window control with the `multi-window` example.
 - Reduce manifest boilerplate with capability profiles such as `app-info`, `window-control`, `file-access`, and `dialog-access`.
-- Inspect per-window security risk, remote navigation, profile expansion, capability consistency, and CI gates through `axion-cli doctor` and `doctor --json`.
+- Inspect per-window security risk, remote navigation, profile expansion, capability consistency, release readiness, and CI gates through `axion-cli doctor` and `doctor --json`.
 - Try controlled filesystem and dialog capabilities with the `file-access-demo` example.
 - Use the `bridge-diagnostics-demo` example to inspect bridge snapshots, host lifecycle events, input compatibility, frontend self-checks, a visual smoke checklist, and export or reload diagnostics reports.
 - Run non-GUI CI checks for formatting, workspace tests, and example self-tests.
@@ -115,4 +116,4 @@ Servo warnings from the vendored `servo/` subtree are not Axion release blockers
 
 ## Versioning
 
-Axion public releases use four-part tags such as `v0.1.13.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.13`. See `docs/versioning.md`.
+Axion public releases use four-part tags such as `v0.1.14.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.14`. See `docs/versioning.md`.

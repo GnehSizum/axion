@@ -20,6 +20,7 @@ fn run() -> Result<(), AxionCliError> {
         Command::Dev(args) => commands::dev::run(args),
         Command::Build(args) => commands::build::run(args),
         Command::Bundle(args) => commands::bundle::run(args),
+        Command::Check(args) => commands::check::run(args),
         Command::Doctor(args) => commands::doctor::run(args),
         Command::GuiSmoke(args) => commands::gui_smoke::run(args),
         Command::New(args) => commands::run_new(args),

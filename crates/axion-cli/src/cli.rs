@@ -14,6 +14,7 @@ pub enum Command {
     Dev(DevArgs),
     Build(BuildArgs),
     Bundle(BundleArgs),
+    Check(CheckArgs),
     Doctor(DoctorArgs),
     GuiSmoke(GuiSmokeArgs),
     New(NewArgs),
@@ -72,6 +73,24 @@ pub struct BundleArgs {
 
     #[arg(long, default_value_t = false)]
     pub build_executable: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CheckArgs {
+    #[arg(long, default_value = "axion.toml")]
+    pub manifest_path: PathBuf,
+
+    #[arg(long, value_enum, default_value_t = DoctorRisk::Medium)]
+    pub max_risk: DoctorRisk,
+
+    #[arg(long, default_value_t = false)]
+    pub bundle: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub keep_artifacts: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -161,6 +180,9 @@ pub struct NewArgs {
 
     #[arg(long, value_enum, default_value_t = NewTemplate::Vanilla)]
     pub template: NewTemplate,
+
+    #[arg(long, default_value_t = false)]
+    pub run_check: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
