@@ -184,6 +184,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       state.dialogPreview?.dialogOpen?.backend ??
       state.dialogPreview?.dialogSave?.backend ??
       null;
+    const clipboardBackend =
+      state.lastSelfCheck?.clipboardRead?.backend ??
+      state.lastSelfCheck?.clipboardWrite?.backend ??
+      null;
 
     const result =
       state.lastSelfCheck?.ok === false ||
@@ -213,6 +217,8 @@ window.addEventListener('DOMContentLoaded', async () => {
       entry: bridgeInfo.locationHref ?? window.location.href,
       configured_dialog_backend: dialogBackend,
       dialog_backend: dialogBackend,
+      configured_clipboard_backend: clipboardBackend,
+      clipboard_backend: clipboardBackend,
       icon: null,
       host_events: uniqueStrings(bridgeInfo.hostEvents ?? bridge.hostEvents),
       staged_app_dir: null,
@@ -406,6 +412,10 @@ window.addEventListener('DOMContentLoaded', async () => {
       const fsRead = await bridge.invoke('fs.read_text', {
         path: 'notes/diagnostics.txt',
       });
+      const clipboardWrite = await bridge.invoke('clipboard.write_text', {
+        text: `bridge-diagnostics-demo clipboard ${new Date().toISOString()}`,
+      });
+      const clipboardRead = await bridge.invoke('clipboard.read_text', null);
 
       state.appInfo = appInfo;
       state.appVersion = appVersion;
@@ -425,6 +435,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         windowList,
         fsWrite,
         fsRead,
+        clipboardWrite,
+        clipboardRead,
       };
       status.textContent = `Diagnostics ready: ${ping.message} from ${ping.appName}`;
       actionFeedback.textContent = 'Diagnostics self-check passed.';
@@ -527,6 +539,26 @@ window.addEventListener('DOMContentLoaded', async () => {
       pushCheck(
         'app.echo',
         'app.echo',
+        'fail',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+
+    try {
+      await bridge.invoke('clipboard.write_text', {
+        text: 'bridge-diagnostics clipboard smoke',
+      });
+      const clipboardRead = await bridge.invoke('clipboard.read_text', null);
+      pushCheck(
+        'clipboard.roundtrip',
+        'clipboard roundtrip',
+        clipboardRead?.text === 'bridge-diagnostics clipboard smoke' ? 'pass' : 'fail',
+        clipboardRead?.backend ?? 'missing backend',
+      );
+    } catch (error) {
+      pushCheck(
+        'clipboard.roundtrip',
+        'clipboard roundtrip',
         'fail',
         error instanceof Error ? error.message : String(error),
       );

@@ -86,6 +86,14 @@ fn print_human_report(report: &SelfTestReport, report_path: Option<&Path>) {
         "native_dialog_backend: {} (configured={})",
         report.dialog_backend, report.configured_dialog_backend
     );
+    println!(
+        "native_clipboard_backend: {} (configured={})",
+        report.clipboard_backend, report.configured_clipboard_backend
+    );
+    println!(
+        "native_lifecycle_close_timeout_ms: {}",
+        report.close_timeout_ms
+    );
     match &report.icon {
         Some(icon) => println!("bundle_icon: {}", icon.display()),
         None => println!("bundle_icon: not configured"),
@@ -121,6 +129,9 @@ struct SelfTestReport {
     entry: PathBuf,
     configured_dialog_backend: String,
     dialog_backend: String,
+    configured_clipboard_backend: String,
+    clipboard_backend: String,
+    close_timeout_ms: u64,
     icon: Option<PathBuf>,
     host_events: Vec<String>,
     staged_app_dir: PathBuf,
@@ -257,6 +268,9 @@ fn run_self_test(args: &SelfTestArgs) -> Result<SelfTestReport, AxionCliError> {
         entry: launch_config.packaged_entry.clone(),
         configured_dialog_backend: diagnostics.configured_dialog_backend.as_str().to_owned(),
         dialog_backend: diagnostics.dialog_backend.as_str().to_owned(),
+        configured_clipboard_backend: diagnostics.configured_clipboard_backend.as_str().to_owned(),
+        clipboard_backend: diagnostics.clipboard_backend.as_str().to_owned(),
+        close_timeout_ms: diagnostics.close_timeout_ms,
         icon,
         host_events,
         staged_app_dir,
@@ -308,6 +322,8 @@ impl SelfTestReport {
             entry: Some(self.entry.clone()),
             configured_dialog_backend: Some(self.configured_dialog_backend.clone()),
             dialog_backend: Some(self.dialog_backend.clone()),
+            configured_clipboard_backend: Some(self.configured_clipboard_backend.clone()),
+            clipboard_backend: Some(self.clipboard_backend.clone()),
             icon: self.icon.clone(),
             host_events: self.host_events.clone(),
             staged_app_dir: Some(self.staged_app_dir.clone()),

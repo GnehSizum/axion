@@ -1,5 +1,107 @@
 # Changelog
 
+## v0.1.18.0 - Preview
+
+Axion v0.1.18.0 adds explicit application exit and window close lifecycle controls on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.18`.
+- Axion public release metadata is `v0.1.18.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added the capability-gated `app.exit` bridge command for runtime-wide application shutdown.
+- Added `app-control` as a built-in capability profile for `app.exit`.
+- Expanded `window-control` and `multi-window` profiles to include `window.close`.
+- Added `window.confirm_close` and `window.prevent_close` for preview close confirmation, with timeout defaulting to allow close.
+- Added `[native.lifecycle] close_timeout_ms` to configure preview close-confirmation timeout behavior.
+- Added close/exit controls and an unsaved-change prevention demo to `multi-window`, plus lifecycle capability checks to `hello-axion` and generated vanilla apps.
+- Added doctor risk handling for `app.exit`, `window.close`, and remote-navigation windows with runtime-control capabilities.
+
+### Changed
+
+- Updated lifecycle, manifest, native API, security, versioning, and generated app documentation for close/exit behavior.
+
+## v0.1.17.0 - Preview
+
+Axion v0.1.17.0 adds capability-gated clipboard text commands and configurable clipboard backend diagnostics on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.17`.
+- Axion public release metadata is `v0.1.17.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `clipboard.write_text` and `clipboard.read_text` built-in bridge commands using a deterministic runtime-local text clipboard backend.
+- Added `[native.clipboard] backend = "memory" | "system"` with macOS `pbcopy` / `pbpaste` system clipboard support and memory fallback elsewhere.
+- Added the `clipboard-access` capability profile.
+- Added configured/effective clipboard backend reporting to runtime diagnostics, `axion doctor`, self-test reports, and GUI smoke reports.
+- Added clipboard command categorization and remote-navigation security diagnostics to `axion doctor`.
+- Added clipboard smoke checks to `hello-axion`, `bridge-diagnostics-demo`, and generated vanilla apps.
+
+### Changed
+
+- Updated native API, manifest, security, architecture, and generated app documentation for clipboard capabilities.
+
+### Deferred
+
+- Cross-platform native clipboard integrations beyond macOS are deferred; unsupported platforms use the CI-safe memory fallback.
+
+## v0.1.16.0 - Preview
+
+Axion v0.1.16.0 adds a preview release workflow on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.16`.
+- Axion public release metadata is `v0.1.16.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion release` as an aggregate release-preview command for doctor gate, readiness, quiet self-test, bundle staging, optional archive generation, and machine-readable reporting.
+- Added stable `axion.release-report.v1` output with doctor, readiness, self-test, embedded bundle report, optional archive metadata, `next_step`, and final result.
+- Added `axion release --report-path <path>` and `--bundle-report-path <path>` for CI artifacts.
+- Added `axion release --archive` to generate a dependency-free `.tar` preview artifact with byte size and `fnv1a64` fingerprint reporting.
+- Added release report artifact inventory entries for release report, bundle report, bundle manifest, and archive outputs.
+- Added `failure_phase` and `failed_reasons` to release reports so CI can identify the first blocking release stage.
+- Added archive verification that re-reads the generated tar and checks byte count plus `fnv1a64` fingerprint before marking the archive passed.
+- Added an optional GitHub Actions `release-preview` workflow_dispatch job that uploads release, bundle, and archive artifacts.
+
+### Changed
+
+- Generated app documentation now includes the release-preview command path.
+- Release-check documentation now recommends `axion release` for the full local artifact workflow.
+- Release report output now includes artifact existence, byte counts, fingerprints where stable, and archive verification status.
+
+## v0.1.15.0 - Preview
+
+Axion v0.1.15.0 strengthens bundle reporting and preview release validation on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.15`.
+- Axion public release metadata is `v0.1.15.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion bundle --json` with stable `axion.bundle-report.v1` output for CI and release automation.
+- Added `axion bundle --report-path <path>` to write the same bundle report to disk for CI artifacts.
+- Added structured bundle report fields for target, layout, metadata paths, platform metadata paths, entry paths, icon, executable, report path, verification counters, checked paths, blockers, warnings, and final result.
+- Added JSON failure output when `bundle` is blocked by release-readiness checks.
+- Added explicit platform metadata artifacts to bundle verification: macOS `PkgInfo`, Linux `.desktop`, and Windows preview metadata.
+
+### Changed
+
+- `axion bundle --json` suppresses local build progress text before emitting JSON so downstream tools can parse stdout reliably.
+- Generated app documentation now includes `bundle --json` in the release validation path.
+- Packaging and release-check documentation now describe bundle report usage.
+
 ## v0.1.14.0 - Preview
 
 Axion v0.1.14.0 tightens developer workflow readiness on the current Servo `0.1` baseline.

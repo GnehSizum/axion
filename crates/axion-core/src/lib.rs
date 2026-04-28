@@ -9,7 +9,8 @@ pub use app::{LaunchEntrypoint, RuntimeLaunchConfig, WindowLaunchConfig};
 pub use builder::Builder;
 pub use config::{
     AppConfig, AppIdentity, BuildConfig, BundleConfig, CapabilityConfig, CapabilityProfileConfig,
-    DevServerConfig, DialogBackendConfig, DialogConfig, NativeConfig,
+    ClipboardBackendConfig, ClipboardConfig, DevServerConfig, DialogBackendConfig, DialogConfig,
+    LifecycleConfig, NativeConfig,
 };
 pub use error::AxionError;
 pub use window::{WindowConfig, WindowId};

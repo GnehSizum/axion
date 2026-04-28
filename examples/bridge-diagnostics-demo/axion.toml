@@ -24,8 +24,11 @@ icon = "icons/app.icns"
 [native.dialog]
 backend = "headless"
 
+[native.clipboard]
+backend = "memory"
+
 [capabilities.main]
-commands = ["app.ping", "app.info", "app.version", "app.echo", "window.list", "window.info", "fs.write_text", "fs.read_text", "dialog.open", "dialog.save"]
+commands = ["app.ping", "app.info", "app.version", "app.echo", "window.list", "window.info", "clipboard.write_text", "clipboard.read_text", "fs.write_text", "fs.read_text", "dialog.open", "dialog.save"]
 events = ["app.log"]
 protocols = ["axion"]
 allowed_navigation_origins = []

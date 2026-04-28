@@ -97,7 +97,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.14", release: "v0.1.14.0", framework: "axion" }
+// { version: "0.1.18", release: "v0.1.18.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -189,6 +189,47 @@ await window.__AXION__.invoke("window.reload", null);
 await window.__AXION__.invoke("window.reload", { target: "settings" });
 ```
 
+### `window.close`
+
+Requests the target native window to close. The command returns a pending close request. Closing one window does not exit the application while other windows remain open.
+
+```js
+await window.__AXION__.invoke("window.close", null);
+await window.__AXION__.invoke("window.close", { target: "settings" });
+// { pending: true, requestId: "axion-close-1", window: { id: "settings", ... } }
+```
+
+### `window.confirm_close`
+
+Accepts a pending close request and lets the runtime remove the window.
+
+```js
+await window.__AXION__.invoke("window.confirm_close", {
+  requestId: payload.requestId,
+});
+```
+
+### `window.prevent_close`
+
+Rejects a pending close request. Use this for unsaved-change prompts or other guarded flows.
+
+```js
+await window.__AXION__.invoke("window.prevent_close", {
+  requestId: payload.requestId,
+});
+```
+
+## App Lifecycle Commands
+
+### `app.exit`
+
+Requests application shutdown by asking all runtime windows to close. If windows do not answer, the preview backend defaults to allowing close after the reported timeout from `[native.lifecycle] close_timeout_ms`.
+
+```js
+await window.__AXION__.invoke("app.exit", null);
+// { pending: true, windowCount: 2, requestCount: 2 }
+```
+
 ### Host Lifecycle Events
 
 Axion host events are listen-only and come from the native runtime. Window lifecycle events currently include:
@@ -203,10 +244,43 @@ Axion host events are listen-only and come from the native runtime. Window lifec
 - `window.moved`
 - `window.redraw_failed`
 
+`window.close_requested` is emitted before a window is removed and includes `requestId`, `reason`, `defaultAction`, and `timeoutMs`. Frontend code can call `window.confirm_close` or `window.prevent_close` with that `requestId`. If no decision arrives before `timeoutMs`, the preview backend applies `defaultAction = "allow"`. The timeout defaults to `3000` and can be configured with `[native.lifecycle] close_timeout_ms`. `window.closed` is emitted after the close has been accepted.
+
 ```js
 window.__AXION__.listen("window.focused", (payload) => {
   console.log("focused", payload);
 });
+```
+
+## Clipboard Commands
+
+Clipboard commands are capability-gated text commands. The default backend is runtime-local `memory` for deterministic tests. Apps can opt into the preview macOS system clipboard backend:
+
+```toml
+[native.clipboard]
+backend = "system"
+```
+
+`system` uses `pbcopy` / `pbpaste` on macOS. Unsupported platforms or command failures fall back to `memory`, and command responses include the effective `backend`.
+
+### `clipboard.write_text`
+
+Stores UTF-8 text in the configured clipboard backend.
+
+```js
+await window.__AXION__.invoke("clipboard.write_text", {
+  text: "Hello from Axion",
+});
+// { bytes: 16, backend: "memory" }
+```
+
+### `clipboard.read_text`
+
+Reads the current clipboard text from the configured backend.
+
+```js
+await window.__AXION__.invoke("clipboard.read_text", null);
+// { text: "Hello from Axion", backend: "memory" }
 ```
 
 ## File Commands
@@ -293,5 +367,5 @@ Response shape:
 
 ```toml
 [capabilities.main]
-profiles = ["app-info", "multi-window", "file-access", "dialog-access", "app-events"]
+profiles = ["app-info", "app-control", "multi-window", "clipboard-access", "file-access", "dialog-access", "app-events"]
 ```

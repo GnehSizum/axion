@@ -20,7 +20,7 @@ This directory contains public, user-facing documentation for Axion.
 
 ## Current Version
 
-Axion is at **v0.1.14.0 developer preview**. The current preview focuses on the core desktop framework loop:
+Axion is at **v0.1.18.0 developer preview**. The current preview focuses on the core desktop framework loop:
 
 1. load an app manifest
 2. build a runtime plan
@@ -28,8 +28,8 @@ Axion is at **v0.1.14.0 developer preview**. The current preview focuses on the 
 4. inject a controlled JavaScript bridge
 5. launch a Servo-backed `winit` window when `servo-runtime` is enabled
 6. generate, validate, fingerprint, bundle, and inspect release-ready application scaffolds through `axion-cli`
-7. configure headless or preview system file-dialog behavior through `[native.dialog]`
-8. validate controlled app-data filesystem and dialog flows through `examples/file-access-demo`
+7. configure preview file-dialog and clipboard backends through `[native.dialog]` and `[native.clipboard]`
+8. validate controlled clipboard, app-data filesystem, and dialog flows through examples and generated apps
 9. reuse bridge-provided text-input compatibility helpers in examples and generated apps
 10. inspect bridge snapshots and run frontend diagnostics through `examples/bridge-diagnostics-demo`
 11. export machine-readable diagnostics through GUI examples and `axion self-test --json`
@@ -38,7 +38,10 @@ Axion is at **v0.1.14.0 developer preview**. The current preview focuses on the 
 14. optionally run Servo-backed GUI smoke in GitHub Actions through `workflow_dispatch`
 15. inspect frontend dev-server readiness, run external frontend commands, watch frontend assets with debounce/ignore rules, reload live windows during `--launch`, use packaged fallback, and inspect reserved devtools behavior through `axion-cli dev`
 16. observe built-in host lifecycle events such as `app.ready`, `window.created`, `window.ready`, focus, resize, move, and close events from frontend code
-17. inspect per-window capability risk, remote-navigation scope, protocol consistency, profile expansion, command categories, release readiness, and CI gate results through `axion doctor` or `doctor --json`
-18. run the default generated-app validation loop through `axion check`
+17. close windows and request application shutdown through capability-gated lifecycle commands
+18. inspect per-window capability risk, remote-navigation scope, protocol consistency, profile expansion, command categories, release readiness, and CI gate results through `axion doctor` or `doctor --json`
+19. run the default generated-app validation loop through `axion check`
+20. export stable bundle reports through `axion bundle --json` and `--report-path`
+21. run a preview artifact workflow through `axion release`, including artifact inventory and archive verification
 
 Project-internal milestone plans and release notes are intentionally not part of the public documentation set.

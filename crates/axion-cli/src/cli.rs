@@ -18,6 +18,7 @@ pub enum Command {
     Doctor(DoctorArgs),
     GuiSmoke(GuiSmokeArgs),
     New(NewArgs),
+    Release(ReleaseArgs),
     SelfTest(SelfTestArgs),
 }
 
@@ -71,8 +72,14 @@ pub struct BundleArgs {
     #[arg(long)]
     pub executable: Option<PathBuf>,
 
+    #[arg(long)]
+    pub report_path: Option<PathBuf>,
+
     #[arg(long, default_value_t = false)]
     pub build_executable: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -168,6 +175,42 @@ pub struct SelfTestArgs {
 
     #[arg(long, default_value_t = false)]
     pub keep_artifacts: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ReleaseArgs {
+    #[arg(long, default_value = "axion.toml")]
+    pub manifest_path: PathBuf,
+
+    #[arg(long)]
+    pub output_dir: Option<PathBuf>,
+
+    #[arg(long)]
+    pub executable: Option<PathBuf>,
+
+    #[arg(long)]
+    pub report_path: Option<PathBuf>,
+
+    #[arg(long)]
+    pub bundle_report_path: Option<PathBuf>,
+
+    #[arg(long, value_enum, default_value_t = DoctorRisk::Medium)]
+    pub max_risk: DoctorRisk,
+
+    #[arg(long, default_value_t = false)]
+    pub skip_build_executable: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub archive: bool,
+
+    #[arg(long)]
+    pub archive_path: Option<PathBuf>,
+
+    #[arg(long, default_value_t = false)]
+    pub keep_artifacts: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone, Args)]

@@ -1,6 +1,9 @@
 window.addEventListener('DOMContentLoaded', async () => {
   const status = document.getElementById('bridge-status');
   const details = document.getElementById('bridge-details');
+  const closeSettingsButton = document.getElementById('close-settings');
+  const appExitButton = document.getElementById('app-exit');
+  const preventCloseCheckbox = document.getElementById('prevent-close');
   if (!window.__AXION__) {
     status.textContent = 'Axion bootstrap was not injected.';
     details.textContent = 'Bridge unavailable';
@@ -71,11 +74,20 @@ window.addEventListener('DOMContentLoaded', async () => {
   };
 
   for (const name of bridge.hostEvents) {
-    bridge.listen(name, (payload) => {
+    bridge.listen(name, async (payload) => {
       if (name === 'app.ready') {
         results.ready = payload;
       } else if (name.startsWith('window.')) {
         results.lifecycleEvents.push({ name, payload });
+      }
+      if (name === 'window.close_requested' && payload?.requestId) {
+        const shouldPrevent = preventCloseCheckbox?.checked === true;
+        const command = shouldPrevent ? 'window.prevent_close' : 'window.confirm_close';
+        if (bridge.commands.includes(command)) {
+          results.allowedCalls.lastCloseDecision = await bridge.invoke(command, {
+            requestId: payload.requestId,
+          });
+        }
       }
       render();
     });
@@ -124,13 +136,48 @@ window.addEventListener('DOMContentLoaded', async () => {
         target: 'settings',
       });
     }
+    if (closeSettingsButton) {
+      closeSettingsButton.disabled = !(
+        bridge.commands.includes('window.close') && bridge.commands.includes('window.list')
+      );
+      closeSettingsButton.addEventListener('click', async () => {
+        try {
+          results.allowedCalls.closedSettings = await bridge.invoke('window.close', {
+            target: 'settings',
+          });
+          if (bridge.commands.includes('window.list')) {
+            results.allowedCalls.windowListAfterClose = await bridge.invoke('window.list', null);
+          }
+          render();
+        } catch (error) {
+          results.deniedProbes['window.close'] =
+            error instanceof Error ? error.message : String(error);
+          render();
+        }
+      });
+    }
+    if (appExitButton) {
+      appExitButton.disabled = !bridge.commands.includes('app.exit');
+      appExitButton.addEventListener('click', async () => {
+        try {
+          results.allowedCalls.appExit = await bridge.invoke('app.exit', null);
+          render();
+        } catch (error) {
+          results.deniedProbes['app.exit'] =
+            error instanceof Error ? error.message : String(error);
+          render();
+        }
+      });
+    }
 
     const deniedProbeCommands = [
       'app.ping',
       'app.info',
       'app.echo',
+      'app.exit',
       'window.list',
       'window.info',
+      'window.close',
       'window.focus',
       'window.set_title',
     ].filter((command) => !bridge.commands.includes(command));

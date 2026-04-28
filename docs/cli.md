@@ -99,7 +99,7 @@ After the window opens, edit a file under `examples/hello-axion/frontend/`. A su
 
 ## `doctor`
 
-Validate Axion version metadata, local tooling, manifest configuration, app metadata, native dialog backend configuration, effective runtime dialog backend, frontend assets, runtime diagnostics, and Servo path availability.
+Validate Axion version metadata, local tooling, manifest configuration, app metadata, native dialog and clipboard backend configuration, effective runtime native backends, frontend assets, runtime diagnostics, capability categories including clipboard access, and Servo path availability.
 
 ```sh
 cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml
@@ -217,6 +217,8 @@ Create a platform bundle scaffold and copy staged app resources. App metadata fr
 
 ```sh
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml
+cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --json
+cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-bundle.json
 ```
 
 Executable handling:
@@ -225,11 +227,38 @@ Executable handling:
 - If no executable is passed, Axion searches nearby `target/release/` and `target/debug/` directories for a binary matching the app name.
 - Pass `--build-executable` to run `cargo build --release` for the app before bundling.
 - Use the printed `layout`, `bundle_dir`, and `bundle_manifest` values to inspect the generated platform structure.
+- Use `--json` to emit `axion.bundle-report.v1` with the same paths, copied icon/executable references, platform metadata, verification counters, checked paths, readiness blockers, warnings, and final result.
+- Use `--report-path <path>` to write `axion.bundle-report.v1` to disk while keeping the normal stdout mode.
 - `verification: ok` means every referenced bundle path exists and the manifest file list matches generated file sizes and `fnv1a64` fingerprints.
 - `checked_dirs`, `checked_files`, `fingerprinted_files`, and `bundle_bytes` summarize the verification pass.
 
 ```sh
 cargo run -p axion-cli -- bundle \
   --manifest-path examples/hello-axion/axion.toml \
-  --build-executable
+  --build-executable \
+  --json \
+  --report-path target/axion/reports/hello-bundle.json
 ```
+
+## `release`
+
+Run the preview release artifact workflow. `release` applies the doctor gate, checks readiness, runs quiet `self-test`, stages a bundle, embeds the bundle report, and can optionally create a dependency-free `.tar` artifact:
+
+```sh
+cargo run -p axion-cli -- release \
+  --manifest-path examples/hello-axion/axion.toml \
+  --json \
+  --report-path target/axion/reports/hello-release.json \
+  --bundle-report-path target/axion/reports/hello-bundle.json
+```
+
+Useful options:
+
+- `--archive`: create a `.tar` archive next to the generated bundle and report its bytes plus `fnv1a64` fingerprint.
+- `--archive-path <path>`: choose the archive output path.
+- `--skip-build-executable`: skip the default release executable build and use an existing or discovered executable.
+- `--max-risk low|medium|high`: tune the doctor security gate; default is `medium`.
+
+JSON output uses `axion.release-report.v1` and includes `doctor`, `readiness`, `self_test`, embedded `bundle.report`, optional `archive`, `artifacts[]`, `failure_phase`, `failed_reasons`, `next_step`, and `result`.
+
+When `--archive` is used, `archive.verification` confirms the tar file still exists, is non-empty, and matches the byte count plus `fnv1a64` fingerprint recorded during generation. `artifacts[]` lists generated release outputs for CI upload; the release report itself records only path and existence because size or fingerprint would otherwise be self-referential.

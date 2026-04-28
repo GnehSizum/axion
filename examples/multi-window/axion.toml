@@ -32,13 +32,19 @@ icon = "icons/app.icns"
 [native.dialog]
 backend = "headless"
 
+[native.clipboard]
+backend = "memory"
+
+[native.lifecycle]
+close_timeout_ms = 3000
+
 [capabilities.main]
-profiles = ["app-info", "multi-window", "app-events"]
+profiles = ["app-info", "app-control", "multi-window", "app-events"]
 allowed_navigation_origins = []
 allow_remote_navigation = false
 
 [capabilities.settings]
 profiles = ["app-events"]
-commands = ["window.info", "window.reload", "window.focus", "window.set_title"]
+commands = ["window.info", "window.reload", "window.focus", "window.set_title", "window.close", "window.confirm_close", "window.prevent_close"]
 allowed_navigation_origins = ["https://docs.example"]
 allow_remote_navigation = false

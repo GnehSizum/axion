@@ -195,6 +195,10 @@ fn manifest_diagnostic_lines(config: &AppConfig) -> Vec<String> {
         "native.dialog.backend: {}",
         config.native.dialog.backend.as_str()
     ));
+    lines.push(format!(
+        "native.clipboard.backend: {}",
+        config.native.clipboard.backend.as_str()
+    ));
 
     lines.extend(config
         .windows
@@ -346,13 +350,23 @@ fn security_diagnostics(config: &AppConfig) -> SecurityDiagnostics {
                         || capability
                             .commands
                             .iter()
-                            .any(|command| command.starts_with("dialog.")))
+                            .any(|command| command.starts_with("clipboard."))
+                        || capability
+                            .commands
+                            .iter()
+                            .any(|command| command.starts_with("dialog."))
+                        || capability.commands.iter().any(|command| {
+                            matches!(
+                                command.as_str(),
+                                "app.exit" | "window.close" | "window.reload"
+                            )
+                        }))
                 {
                     findings.push(SecurityFinding::warning(
                         window_id,
                         "remote_navigation_native_capability",
-                        "file or dialog capabilities are enabled on a window that allows unrestricted remote navigation",
-                        Some("split native capabilities into a packaged app window or restrict remote navigation origins".to_owned()),
+                        "native or runtime-control capabilities are enabled on a window that allows unrestricted remote navigation",
+                        Some("split native/control capabilities into a packaged app window or restrict remote navigation origins".to_owned()),
                     ));
                 }
             }
@@ -492,13 +506,17 @@ fn suggested_profiles_for_explicit_capabilities(
             &[][..],
             &["axion"][..],
         ),
+        ("app-control", &["app.exit"][..], &[][..], &["axion"][..]),
         ("app-events", &[][..], &["app.log"][..], &["axion"][..]),
         (
             "window-control",
             &[
+                "window.close",
+                "window.confirm_close",
                 "window.focus",
                 "window.hide",
                 "window.info",
+                "window.prevent_close",
                 "window.reload",
                 "window.set_size",
                 "window.set_title",
@@ -510,9 +528,12 @@ fn suggested_profiles_for_explicit_capabilities(
         (
             "multi-window",
             &[
+                "window.close",
+                "window.confirm_close",
                 "window.focus",
                 "window.info",
                 "window.list",
+                "window.prevent_close",
                 "window.reload",
                 "window.set_title",
             ][..],
@@ -522,6 +543,12 @@ fn suggested_profiles_for_explicit_capabilities(
         (
             "file-access",
             &["fs.read_text", "fs.write_text"][..],
+            &[][..],
+            &["axion"][..],
+        ),
+        (
+            "clipboard-access",
+            &["clipboard.read_text", "clipboard.write_text"][..],
             &[][..],
             &["axion"][..],
         ),
@@ -561,7 +588,9 @@ fn capability_risk_level(
     } else if !capability.allowed_navigation_origins.is_empty()
         || capability.commands.iter().any(|command| {
             command.starts_with("fs.")
+                || command.starts_with("clipboard.")
                 || command.starts_with("dialog.")
+                || command == "app.exit"
                 || command == "window.close"
                 || command == "window.reload"
         })
@@ -585,6 +614,10 @@ fn command_category_counts(commands: &[String]) -> CommandCategoryCounts {
         .iter()
         .filter(|command| command.starts_with("fs."))
         .count();
+    let clipboard = commands
+        .iter()
+        .filter(|command| command.starts_with("clipboard."))
+        .count();
     let dialog = commands
         .iter()
         .filter(|command| command.starts_with("dialog."))
@@ -595,6 +628,7 @@ fn command_category_counts(commands: &[String]) -> CommandCategoryCounts {
             !command.starts_with("app.")
                 && !command.starts_with("window.")
                 && !command.starts_with("fs.")
+                && !command.starts_with("clipboard.")
                 && !command.starts_with("dialog.")
         })
         .count();
@@ -603,6 +637,7 @@ fn command_category_counts(commands: &[String]) -> CommandCategoryCounts {
         app,
         window,
         fs,
+        clipboard,
         dialog,
         custom,
     }
@@ -620,6 +655,7 @@ struct CommandCategoryCounts {
     app: usize,
     window: usize,
     fs: usize,
+    clipboard: usize,
     dialog: usize,
     custom: usize,
 }
@@ -627,15 +663,15 @@ struct CommandCategoryCounts {
 impl CommandCategoryCounts {
     fn summary(&self) -> String {
         format!(
-            "app={}, window={}, fs={}, dialog={}, custom={}",
-            self.app, self.window, self.fs, self.dialog, self.custom
+            "app={}, window={}, fs={}, clipboard={}, dialog={}, custom={}",
+            self.app, self.window, self.fs, self.clipboard, self.dialog, self.custom
         )
     }
 
     fn to_json(&self) -> String {
         format!(
-            "{{\"app\":{},\"window\":{},\"fs\":{},\"dialog\":{},\"custom\":{}}}",
-            self.app, self.window, self.fs, self.dialog, self.custom
+            "{{\"app\":{},\"window\":{},\"fs\":{},\"clipboard\":{},\"dialog\":{},\"custom\":{}}}",
+            self.app, self.window, self.fs, self.clipboard, self.dialog, self.custom
         )
     }
 }
@@ -1236,13 +1272,16 @@ fn runtime_diagnostic_lines_from_report(
     report: &axion_runtime::RuntimeDiagnosticReport,
 ) -> Vec<String> {
     let mut lines = vec![format!(
-        "runtime: app={}, mode={}, windows={}, errors={}, configured_dialog_backend={}, dialog_backend={}, resource_policy={}",
+        "runtime: app={}, mode={}, windows={}, errors={}, configured_dialog_backend={}, dialog_backend={}, configured_clipboard_backend={}, clipboard_backend={}, close_timeout_ms={}, resource_policy={}",
         report.app_name,
         report.mode,
         report.window_count,
         report.has_errors(),
         report.configured_dialog_backend.as_str(),
         report.dialog_backend.as_str(),
+        report.configured_clipboard_backend.as_str(),
+        report.clipboard_backend.as_str(),
+        report.close_timeout_ms,
         report.resource_policy
     )];
     for window in &report.windows {
@@ -1367,6 +1406,8 @@ fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> 
             entry: None,
             configured_dialog_backend: None,
             dialog_backend: None,
+            configured_clipboard_backend: None,
+            clipboard_backend: None,
             icon: None,
             host_events: Vec::new(),
             staged_app_dir: None,
@@ -1465,6 +1506,7 @@ fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> 
             events
         });
     let dialog_backend = runtime.dialog_backend.as_str().to_owned();
+    let clipboard_backend = runtime.clipboard_backend.as_str().to_owned();
 
     Ok(DiagnosticsReport {
         source: "axion-cli doctor".to_owned(),
@@ -1483,6 +1525,8 @@ fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> 
         entry: Some(config.build.entry.clone()),
         configured_dialog_backend: Some(config.native.dialog.backend.as_str().to_owned()),
         dialog_backend: Some(dialog_backend),
+        configured_clipboard_backend: Some(config.native.clipboard.backend.as_str().to_owned()),
+        clipboard_backend: Some(clipboard_backend),
         icon: config.bundle.icon.clone(),
         host_events,
         staged_app_dir: None,
@@ -1531,9 +1575,10 @@ fn doctor_diagnostics_json(input: DoctorDiagnosticsInput<'_>) -> String {
         .runtime
         .map(|runtime| {
             format!(
-                "{{\"has_errors\":{},\"issue_count\":{},\"resource_policy\":{}}}",
+                "{{\"has_errors\":{},\"issue_count\":{},\"close_timeout_ms\":{},\"resource_policy\":{}}}",
                 runtime.has_errors(),
                 runtime.issues.len(),
+                runtime.close_timeout_ms,
                 json_string_literal(&runtime.resource_policy)
             )
         })
@@ -1639,7 +1684,7 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.1.14.0"));
+        assert!(line.contains("release=v0.1.18.0"));
         assert!(line.contains("msrv="));
     }
 
@@ -1723,6 +1768,11 @@ mod tests {
                 .iter()
                 .any(|line| line == "native.dialog.backend: headless")
         );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "native.clipboard.backend: memory")
+        );
         assert!(lines.iter().any(|line| line.contains("window.main")));
         assert!(
             lines
@@ -1794,7 +1844,7 @@ mod tests {
             line == "security.window.main: bridge=enabled, risk=medium, commands=5, events=1, protocols=1, navigation_origins=1, remote_navigation=false"
         }));
         assert!(lines.iter().any(|line| {
-            line == "security.window.main.commands: app=1, window=1, fs=1, dialog=1, custom=1"
+            line == "security.window.main.commands: app=1, window=1, fs=1, clipboard=0, dialog=1, custom=1"
         }));
         assert!(lines.iter().any(|line| {
             line == "security.notice.main: remote navigation is limited to https://docs.example"
@@ -1865,7 +1915,7 @@ allowed_navigation_origins = ["https://docs.example"]
         assert!(json.contains("\"profiles\":[\"app-events\",\"app-info\",\"file-access\"]"));
         assert!(json.contains("\"risk\":\"medium\""));
         assert!(json.contains(
-            "\"command_categories\":{\"app\":4,\"window\":0,\"fs\":2,\"dialog\":0,\"custom\":0}"
+            "\"command_categories\":{\"app\":4,\"window\":0,\"fs\":2,\"clipboard\":0,\"dialog\":0,\"custom\":0}"
         ));
         assert!(json.contains("\"code\":\"limited_remote_navigation\""));
         assert!(json.contains("\"result\":\"ok\""));
@@ -2014,9 +2064,21 @@ protocols = ["axion"]
             capabilities: std::collections::BTreeMap::from([(
                 "main".to_owned(),
                 CapabilityConfig {
-                    explicit_commands: vec!["fs.read_text".to_owned(), "fs.write_text".to_owned()],
+                    explicit_commands: vec![
+                        "app.exit".to_owned(),
+                        "clipboard.read_text".to_owned(),
+                        "clipboard.write_text".to_owned(),
+                        "fs.read_text".to_owned(),
+                        "fs.write_text".to_owned(),
+                    ],
                     explicit_protocols: vec!["axion".to_owned()],
-                    commands: vec!["fs.read_text".to_owned(), "fs.write_text".to_owned()],
+                    commands: vec![
+                        "app.exit".to_owned(),
+                        "clipboard.read_text".to_owned(),
+                        "clipboard.write_text".to_owned(),
+                        "fs.read_text".to_owned(),
+                        "fs.write_text".to_owned(),
+                    ],
                     protocols: vec!["axion".to_owned()],
                     allowed_navigation_origins: Vec::new(),
                     allow_remote_navigation: false,
@@ -2031,7 +2093,18 @@ protocols = ["axion"]
         assert!(security.findings.iter().any(|finding| {
             finding.severity == "recommendation"
                 && finding.code == "capability_profile_available"
+                && finding.message == "explicit capabilities match built-in profile 'app-control'"
+        }));
+        assert!(security.findings.iter().any(|finding| {
+            finding.severity == "recommendation"
+                && finding.code == "capability_profile_available"
                 && finding.message == "explicit capabilities match built-in profile 'file-access'"
+        }));
+        assert!(security.findings.iter().any(|finding| {
+            finding.severity == "recommendation"
+                && finding.code == "capability_profile_available"
+                && finding.message
+                    == "explicit capabilities match built-in profile 'clipboard-access'"
         }));
         assert!(json.contains("\"code\":\"capability_profile_available\""));
     }
@@ -2185,7 +2258,7 @@ protocols = ["axion"]
         let lines = runtime_diagnostic_lines(&config);
 
         assert!(lines.iter().any(|line| line.starts_with(
-            "runtime: app=doctor-test, mode=production, windows=1, errors=false, configured_dialog_backend=headless, dialog_backend=headless, resource_policy="
+            "runtime: app=doctor-test, mode=production, windows=1, errors=false, configured_dialog_backend=headless, dialog_backend=headless, configured_clipboard_backend=memory, clipboard_backend=memory, close_timeout_ms=3000, resource_policy="
         )));
         assert!(
             lines

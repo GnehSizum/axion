@@ -19,7 +19,7 @@ Capabilities are scoped to a window id:
 
 ```toml
 [capabilities.main]
-profiles = ["app-info", "multi-window", "file-access", "dialog-access", "app-events"]
+profiles = ["app-info", "app-control", "multi-window", "clipboard-access", "file-access", "dialog-access", "app-events"]
 allowed_navigation_origins = []
 allow_remote_navigation = false
 ```
@@ -29,9 +29,10 @@ Window commands default to the current window, but payloads may include `target`
 
 Higher-risk command groups should stay local to trusted packaged UI:
 
+- `clipboard.*`: reads or writes clipboard text through the configured preview backend.
 - `fs.*`: restricted to app-data paths, but still reads or writes user-visible data.
 - `dialog.*`: opens native file dialogs and can expose selected paths to the app.
-- `window.close` and `window.reload`: affect runtime control flow and user state.
+- `app.exit`, `window.close`, and `window.reload`: affect runtime control flow and user state.
 
 ## Capability Profiles
 
@@ -39,9 +40,11 @@ Profiles reduce repetitive manifest entries but do not bypass the deny-by-defaul
 
 - `minimal`: bridge protocol only.
 - `app-info`: app metadata, version, ping, and echo commands.
+- `app-control`: application shutdown command.
 - `app-events`: frontend `app.log` events.
-- `window-control`: current-window control commands.
-- `multi-window`: multi-window coordination commands.
+- `window-control`: current-window control commands, including close confirmation.
+- `multi-window`: multi-window coordination commands, including targeted close confirmation.
+- `clipboard-access`: clipboard read/write commands.
 - `file-access`: app-data file read/write commands.
 - `dialog-access`: native open/save dialog commands.
 
@@ -73,7 +76,9 @@ Bridge payloads must be valid JSON values. Request ids, command names, event nam
 
 File commands are restricted to Axion's app-data directory. Absolute paths, `..` components, root components, and symlink targets are rejected.
 
-Dialog commands are also capability-gated. Keep `[native.dialog] backend = "headless"` for CI and non-interactive environments; use `system` only when interactive native dialogs are expected.
+Dialog and clipboard commands are also capability-gated. Keep `[native.dialog] backend = "headless"` and `[native.clipboard] backend = "memory"` for CI and non-interactive environments. Use system backends only for trusted packaged UI, because the system clipboard can expose data across application boundaries.
+
+Close confirmation is intentionally timeout-bound. Keep `[native.lifecycle] close_timeout_ms` long enough for trusted UI prompts, but do not rely on it as a security boundary; it is a lifecycle safety net for unsaved-state flows.
 
 ## Frontend Events
 
@@ -119,7 +124,7 @@ Key lines:
 - `security.window.<id>`: bridge status, risk level, command count, event count, protocol count, navigation allowlist count, and remote-navigation flag.
 - `security.window.<id>.profiles`: declared capability profiles, or `none`.
 - `security.window.<id>.profile.<profile>`: commands, events, and protocols supplied by that profile.
-- `security.window.<id>.commands`: command categories: `app`, `window`, `fs`, `dialog`, and `custom`.
+- `security.window.<id>.commands`: command categories: `app`, `window`, `fs`, `clipboard`, `dialog`, and `custom`.
 - `security.notice.<id>`: non-failing notes such as restricted remote navigation.
 - `security.warning.<id>`: configuration that weakens or contradicts the deny-by-default model.
 - `security.recommendation.<id>`: suggested tightening step.
@@ -130,7 +135,7 @@ Common warnings:
 - A nonstandard bridge protocol is declared.
 - `allow_remote_navigation = true` allows every remote origin.
 - `allowed_navigation_origins` is set while `allow_remote_navigation = true`.
-- File or dialog capabilities are enabled on a window with unrestricted remote navigation.
+- File, clipboard, or dialog capabilities are enabled on a window with unrestricted remote navigation.
 
 CI can fail on newly introduced warnings with a simple grep:
 
