@@ -113,6 +113,7 @@ mod enabled {
     const WINDOW_MOVED_EVENT: &str = "window.moved";
     const WINDOW_REDRAW_FAILED_EVENT: &str = "window.redraw_failed";
     const DEFAULT_SELF_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+    const DEFAULT_CLOSE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 
     pub fn run_dev_server(
         app_name: String,
@@ -121,6 +122,7 @@ mod enabled {
         resolver: AppAssetResolver,
         windows: Vec<WindowLaunchConfig>,
         window_bindings: Vec<WindowBridgeBinding>,
+        close_timeout_ms: u64,
         url: Url,
     ) -> Result<(), WinitRunError> {
         let launch = LaunchRequest::new(
@@ -129,6 +131,7 @@ mod enabled {
             windows,
             window_bindings,
             StartupTarget::DirectUrl(url),
+            close_timeout_ms,
         )?;
         run_launch(launch)
     }
@@ -139,6 +142,7 @@ mod enabled {
         _mode: axion_core::RunMode,
         windows: Vec<WindowLaunchConfig>,
         window_bindings: Vec<WindowBridgeBinding>,
+        close_timeout_ms: u64,
         initial_url: Url,
         resolver: AppAssetResolver,
     ) -> Result<(), WinitRunError> {
@@ -148,6 +152,7 @@ mod enabled {
             windows,
             window_bindings,
             StartupTarget::AppProtocol { initial_url },
+            close_timeout_ms,
         )?;
         run_launch(launch)
     }
@@ -177,6 +182,7 @@ mod enabled {
         self_test_bridge: bool,
         gui_smoke: bool,
         self_test_timeout: Duration,
+        close_timeout: Duration,
     }
 
     #[derive(Clone, Debug)]
@@ -202,6 +208,7 @@ mod enabled {
             windows: Vec<WindowLaunchConfig>,
             window_bindings: Vec<WindowBridgeBinding>,
             startup_target: StartupTarget,
+            close_timeout_ms: u64,
         ) -> Result<Self, WinitRunError> {
             if windows.is_empty() {
                 return Err(WinitRunError::MissingWindow);
@@ -220,6 +227,11 @@ mod enabled {
             let self_test_bridge = std::env::var_os("AXION_SELFTEST_BRIDGE").is_some();
             let gui_smoke = std::env::var_os("AXION_GUI_SMOKE").is_some();
             let self_test_timeout = launch_self_test_timeout(gui_smoke);
+            let close_timeout = if close_timeout_ms == 0 {
+                DEFAULT_CLOSE_CONFIRM_TIMEOUT
+            } else {
+                Duration::from_millis(close_timeout_ms)
+            };
 
             Ok(Self {
                 app_name,
@@ -233,6 +245,7 @@ mod enabled {
                 self_test_bridge,
                 gui_smoke,
                 self_test_timeout,
+                close_timeout,
             })
         }
 
@@ -314,8 +327,11 @@ mod enabled {
         self_test_started: std::cell::Cell<bool>,
         self_test_started_at: std::cell::Cell<Option<Instant>>,
         self_test_timeout: Duration,
+        close_timeout: Duration,
         modifiers_state: std::cell::Cell<ModifiersState>,
         window_registry: Arc<Mutex<BTreeMap<String, winit::window::WindowId>>>,
+        close_request_counter: std::cell::Cell<u64>,
+        pending_close_requests: RefCell<BTreeMap<String, winit::window::WindowId>>,
         windows: RefCell<Vec<RuntimeWindow>>,
     }
 
@@ -425,18 +441,119 @@ mod enabled {
             }
         }
 
-        fn close_window(&self, window_id: winit::window::WindowId) -> bool {
+        fn request_close_window(
+            &self,
+            window_id: winit::window::WindowId,
+            reason: &str,
+        ) -> Result<WindowControlResponse, String> {
+            if let Some((request_id, _)) = self
+                .pending_close_requests
+                .borrow()
+                .iter()
+                .find(|(_, pending_window_id)| **pending_window_id == window_id)
+            {
+                let state = self
+                    .window_state_for_id(window_id)
+                    .ok_or_else(|| "window control target is unavailable".to_owned())?;
+                return Ok(WindowControlResponse::CloseRequested {
+                    request_id: request_id.clone(),
+                    window: state,
+                });
+            }
+
+            let state = self
+                .window_state_for_id(window_id)
+                .ok_or_else(|| "window control target is unavailable".to_owned())?;
+            let counter = self.close_request_counter.get().saturating_add(1);
+            self.close_request_counter.set(counter);
+            let request_id = format!("axion-close-{counter}");
+            self.pending_close_requests
+                .borrow_mut()
+                .insert(request_id.clone(), window_id);
             self.dispatch_window_event(
                 window_id,
                 WINDOW_CLOSE_REQUESTED_EVENT,
-                self.window_payload(window_id),
+                self.close_requested_payload(window_id, &request_id, reason),
             );
+
+            let proxy = self.event_loop_proxy.clone();
+            let timeout_request_id = request_id.clone();
+            let close_timeout = self.close_timeout;
+            std::thread::spawn(move || {
+                std::thread::sleep(close_timeout);
+                let _ = proxy.send_event(WakerEvent::CloseTimeout {
+                    request_id: timeout_request_id,
+                });
+            });
+
+            Ok(WindowControlResponse::CloseRequested {
+                request_id,
+                window: state,
+            })
+        }
+
+        fn confirm_close_request(&self, request_id: &str) -> Result<WindowControlResponse, String> {
+            let window_id = self
+                .pending_close_requests
+                .borrow_mut()
+                .remove(request_id)
+                .ok_or_else(|| format!("close request '{request_id}' is unavailable"))?;
+            let state = self
+                .window_state_for_id(window_id)
+                .ok_or_else(|| "window control target is unavailable".to_owned())?;
+            let _ = self.close_window(window_id);
+            Ok(WindowControlResponse::State(state))
+        }
+
+        fn prevent_close_request(&self, request_id: &str) -> Result<WindowControlResponse, String> {
+            let window_id = self
+                .pending_close_requests
+                .borrow_mut()
+                .remove(request_id)
+                .ok_or_else(|| format!("close request '{request_id}' is unavailable"))?;
+            let window_id = self
+                .window_id_for_winit(window_id)
+                .ok_or_else(|| "window control target is unavailable".to_owned())?;
+            Ok(WindowControlResponse::ClosePrevented {
+                request_id: request_id.to_owned(),
+                window_id,
+            })
+        }
+
+        fn close_timeout(&self, request_id: &str) -> bool {
+            let Some(window_id) = self.pending_close_requests.borrow_mut().remove(request_id)
+            else {
+                return self.windows.borrow().is_empty();
+            };
+            self.close_window(window_id)
+        }
+
+        fn close_window(&self, window_id: winit::window::WindowId) -> bool {
             self.dispatch_window_event(
                 window_id,
                 WINDOW_CLOSED_EVENT,
                 self.window_payload(window_id),
             );
             self.remove_window(window_id)
+        }
+
+        fn window_state_for_id(
+            &self,
+            window_id: winit::window::WindowId,
+        ) -> Option<WindowStateSnapshot> {
+            self.windows
+                .borrow()
+                .iter()
+                .find(|runtime_window| runtime_window.window.id() == window_id)
+                .map(window_state_snapshot)
+        }
+
+        fn window_id_for_winit(&self, window_id: winit::window::WindowId) -> Option<String> {
+            self.windows
+                .borrow()
+                .iter()
+                .find(|runtime_window| runtime_window.window.id() == window_id)
+                .map(|runtime_window| runtime_window.window_id.clone())
         }
 
         fn remove_window(&self, window_id: winit::window::WindowId) -> bool {
@@ -487,6 +604,22 @@ mod enabled {
                 .find(|runtime_window| runtime_window.window.id() == window_id)
                 .map(window_payload)
                 .unwrap_or_else(|| "{\"windowId\":null}".to_owned())
+        }
+
+        fn close_requested_payload(
+            &self,
+            window_id: winit::window::WindowId,
+            request_id: &str,
+            reason: &str,
+        ) -> String {
+            let base_payload = self.window_payload(window_id);
+            let trimmed = base_payload.trim_end_matches('}');
+            format!(
+                "{trimmed},\"requestId\":{},\"reason\":{},\"defaultAction\":\"allow\",\"timeoutMs\":{}}}",
+                json_string_literal(request_id),
+                json_string_literal(reason),
+                self.close_timeout.as_millis(),
+            )
         }
 
         fn redraw_failed_payload(
@@ -711,6 +844,26 @@ mod enabled {
             window_id: Option<winit::window::WindowId>,
             request: WindowControlRequest,
         ) -> Result<WindowControlResponse, String> {
+            if matches!(request, WindowControlRequest::ExitApp) {
+                let window_ids = self
+                    .windows
+                    .borrow()
+                    .iter()
+                    .map(|runtime_window| runtime_window.window.id())
+                    .collect::<Vec<_>>();
+                let window_count = window_ids.len();
+                let mut request_count = 0;
+                for window_id in window_ids {
+                    if self.request_close_window(window_id, "app-exit").is_ok() {
+                        request_count += 1;
+                    }
+                }
+                return Ok(WindowControlResponse::AppExit {
+                    window_count,
+                    request_count,
+                });
+            }
+
             if matches!(request, WindowControlRequest::ListStates) {
                 let states = self
                     .windows
@@ -721,9 +874,15 @@ mod enabled {
                 return Ok(WindowControlResponse::List(states));
             }
 
+            if let WindowControlRequest::ConfirmClose { request_id } = &request {
+                return self.confirm_close_request(request_id);
+            }
+            if let WindowControlRequest::PreventClose { request_id } = &request {
+                return self.prevent_close_request(request_id);
+            }
+
             let window_id =
                 window_id.ok_or_else(|| "window control target is unavailable".to_owned())?;
-            let mut should_close = false;
             let response = {
                 let windows = self.windows.borrow();
                 let runtime_window = windows
@@ -733,6 +892,14 @@ mod enabled {
 
                 match request {
                     WindowControlRequest::ListStates => WindowControlResponse::List(Vec::new()),
+                    WindowControlRequest::ExitApp => WindowControlResponse::AppExit {
+                        window_count: 0,
+                        request_count: 0,
+                    },
+                    WindowControlRequest::ConfirmClose { .. }
+                    | WindowControlRequest::PreventClose { .. } => {
+                        unreachable!("close decisions are handled before window lookup")
+                    }
                     WindowControlRequest::GetState => {
                         WindowControlResponse::State(window_state_snapshot(runtime_window))
                     }
@@ -747,8 +914,7 @@ mod enabled {
                         WindowControlResponse::State(window_state_snapshot(runtime_window))
                     }
                     WindowControlRequest::Close => {
-                        should_close = true;
-                        WindowControlResponse::State(window_state_snapshot(runtime_window))
+                        return self.request_close_window(window_id, "command");
                     }
                     WindowControlRequest::Focus => {
                         runtime_window.window.focus_window();
@@ -777,10 +943,6 @@ mod enabled {
                     }
                 }
             };
-
-            if should_close {
-                let _ = self.close_window(window_id);
-            }
 
             Ok(response)
         }
@@ -972,12 +1134,16 @@ mod enabled {
                         }
                     }
                     WakerEvent::WindowControl(control) => {
-                        let is_close = matches!(control.request, WindowControlRequest::Close);
                         let result =
                             state.apply_window_control(control.window_id, control.request.clone());
                         let windows_empty = state.windows.borrow().is_empty();
                         let _ = control.response.send(result);
-                        if is_close && windows_empty {
+                        if windows_empty {
+                            event_loop.exit();
+                        }
+                    }
+                    WakerEvent::CloseTimeout { request_id } => {
+                        if state.close_timeout(&request_id) {
                             event_loop.exit();
                         }
                     }
@@ -1022,9 +1188,7 @@ mod enabled {
 
             match event {
                 WindowEvent::CloseRequested => {
-                    if state.close_window(window_id) {
-                        event_loop.exit();
-                    }
+                    let _ = state.request_close_window(window_id, "system");
                 }
                 WindowEvent::RedrawRequested => {
                     if let Err(error) = state.redraw_window(window_id) {
@@ -1108,8 +1272,11 @@ mod enabled {
             self_test_started: std::cell::Cell::new(false),
             self_test_started_at: std::cell::Cell::new(None),
             self_test_timeout: launch.self_test_timeout,
+            close_timeout: launch.close_timeout,
             modifiers_state: std::cell::Cell::new(ModifiersState::empty()),
             window_registry: Arc::new(Mutex::new(BTreeMap::new())),
+            close_request_counter: std::cell::Cell::new(0),
+            pending_close_requests: RefCell::new(BTreeMap::new()),
             windows: RefCell::new(Vec::new()),
         });
 
@@ -1279,6 +1446,9 @@ mod enabled {
             payload_json: String,
         },
         WindowControl(Arc<WindowControlEvent>),
+        CloseTimeout {
+            request_id: String,
+        },
         SelfTestPassed(String),
         SelfTestFailed(String),
     }
@@ -1433,7 +1603,10 @@ mod enabled {
             request: WindowControlRequest,
         ) -> Result<WindowControlResponse, String> {
             let window_id = match &request {
-                WindowControlRequest::ListStates => None,
+                WindowControlRequest::ListStates
+                | WindowControlRequest::ExitApp
+                | WindowControlRequest::ConfirmClose { .. }
+                | WindowControlRequest::PreventClose { .. } => None,
                 _ => {
                     let target_window_id =
                         target_window_id.unwrap_or(self.current_window_id.as_str());

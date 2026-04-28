@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use axion_core::{
     AppConfig, AppIdentity, BuildConfig, BundleConfig, CapabilityConfig, CapabilityProfileConfig,
     ClipboardBackendConfig, ClipboardConfig, DevServerConfig, DialogBackendConfig, DialogConfig,
-    NativeConfig, WindowConfig, WindowId,
+    LifecycleConfig, NativeConfig, WindowConfig, WindowId,
 };
 use url::Url;
 
@@ -102,6 +102,8 @@ pub enum ManifestError {
     InvalidNativeDialogBackend { path: PathBuf, value: String },
     #[error("manifest at {path} defines invalid native.clipboard.backend '{value}'")]
     InvalidNativeClipboardBackend { path: PathBuf, value: String },
+    #[error("manifest at {path} defines invalid native.lifecycle.close_timeout_ms '{value}'")]
+    InvalidNativeLifecycleCloseTimeout { path: PathBuf, value: u64 },
 }
 
 pub fn load_from_path(path: impl AsRef<Path>) -> Result<ManifestDocument, ManifestError> {
@@ -238,6 +240,18 @@ fn native_config_from_manifest(
                 }
             };
             config = config.with_clipboard(ClipboardConfig { backend });
+        }
+    }
+
+    if let Some(lifecycle) = native.lifecycle {
+        if let Some(close_timeout_ms) = lifecycle.close_timeout_ms {
+            if close_timeout_ms == 0 {
+                return Err(ManifestError::InvalidNativeLifecycleCloseTimeout {
+                    path: path.to_path_buf(),
+                    value: close_timeout_ms,
+                });
+            }
+            config = config.with_lifecycle(LifecycleConfig { close_timeout_ms });
         }
     }
 
@@ -512,6 +526,7 @@ fn capability_profile_expansions(profiles: &[String]) -> Vec<CapabilityProfileCo
 fn profile_commands(profile: &str) -> &'static [&'static str] {
     match profile {
         "app-info" => &["app.ping", "app.info", "app.version", "app.echo"],
+        "app-control" => &["app.exit"],
         "window-control" => &[
             "window.info",
             "window.reload",
@@ -520,6 +535,9 @@ fn profile_commands(profile: &str) -> &'static [&'static str] {
             "window.set_size",
             "window.show",
             "window.hide",
+            "window.close",
+            "window.confirm_close",
+            "window.prevent_close",
         ],
         "multi-window" => &[
             "window.list",
@@ -527,6 +545,9 @@ fn profile_commands(profile: &str) -> &'static [&'static str] {
             "window.reload",
             "window.focus",
             "window.set_title",
+            "window.close",
+            "window.confirm_close",
+            "window.prevent_close",
         ],
         "clipboard-access" => &["clipboard.read_text", "clipboard.write_text"],
         "file-access" => &["fs.read_text", "fs.write_text"],
@@ -544,8 +565,8 @@ fn profile_events(profile: &str) -> &'static [&'static str] {
 
 fn profile_protocols(profile: &str) -> &'static [&'static str] {
     match profile {
-        "minimal" | "app-info" | "app-events" | "window-control" | "multi-window"
-        | "clipboard-access" | "file-access" | "dialog-access" => &["axion"],
+        "minimal" | "app-info" | "app-control" | "app-events" | "window-control"
+        | "multi-window" | "clipboard-access" | "file-access" | "dialog-access" => &["axion"],
         _ => &[],
     }
 }
@@ -555,6 +576,7 @@ fn is_known_capability_profile(value: &str) -> bool {
         value,
         "minimal"
             | "app-info"
+            | "app-control"
             | "app-events"
             | "window-control"
             | "multi-window"
@@ -883,6 +905,7 @@ allow_remote_navigation = false
             config.native.clipboard.backend,
             ClipboardBackendConfig::Memory
         );
+        assert_eq!(config.native.lifecycle.close_timeout_ms, 3000);
         assert_eq!(config.capabilities["main"].commands, vec!["app.ping"]);
         assert_eq!(config.capabilities["main"].events, vec!["app.log"]);
         assert_eq!(
@@ -934,6 +957,51 @@ backend = "system"
             config.native.clipboard.backend,
             ClipboardBackendConfig::System
         );
+    }
+
+    #[test]
+    fn manifest_loader_accepts_lifecycle_close_timeout() {
+        let manifest_path = write_manifest(
+            r#"
+[app]
+name = "hello"
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[native.lifecycle]
+close_timeout_ms = 1500
+"#,
+        );
+
+        let config = load_app_config_from_path(&manifest_path).expect("manifest should load");
+
+        assert_eq!(config.native.lifecycle.close_timeout_ms, 1500);
+    }
+
+    #[test]
+    fn manifest_loader_rejects_invalid_lifecycle_close_timeout() {
+        let manifest_path = write_manifest(
+            r#"
+[app]
+name = "hello"
+
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+
+[native.lifecycle]
+close_timeout_ms = 0
+"#,
+        );
+
+        let error = load_app_config_from_path(&manifest_path).expect_err("manifest should fail");
+
+        assert!(matches!(
+            error,
+            ManifestError::InvalidNativeLifecycleCloseTimeout { .. }
+        ));
     }
 
     #[test]
@@ -1310,9 +1378,12 @@ allowed_navigation_origins = ["https://docs.example"]
                 "dialog.save",
                 "fs.read_text",
                 "fs.write_text",
+                "window.close",
+                "window.confirm_close",
                 "window.focus",
                 "window.hide",
                 "window.info",
+                "window.prevent_close",
                 "window.reload",
                 "window.set_size",
                 "window.set_title",

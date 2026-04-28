@@ -94,6 +94,8 @@ pub struct NativeSection {
     pub dialog: Option<DialogSection>,
     #[serde(default)]
     pub clipboard: Option<ClipboardSection>,
+    #[serde(default)]
+    pub lifecycle: Option<LifecycleSection>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -106,6 +108,12 @@ pub struct DialogSection {
 pub struct ClipboardSection {
     #[serde(default)]
     pub backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LifecycleSection {
+    #[serde(default)]
+    pub close_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

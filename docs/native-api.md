@@ -97,7 +97,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.17", release: "v0.1.17.0", framework: "axion" }
+// { version: "0.1.18", release: "v0.1.18.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -189,6 +189,47 @@ await window.__AXION__.invoke("window.reload", null);
 await window.__AXION__.invoke("window.reload", { target: "settings" });
 ```
 
+### `window.close`
+
+Requests the target native window to close. The command returns a pending close request. Closing one window does not exit the application while other windows remain open.
+
+```js
+await window.__AXION__.invoke("window.close", null);
+await window.__AXION__.invoke("window.close", { target: "settings" });
+// { pending: true, requestId: "axion-close-1", window: { id: "settings", ... } }
+```
+
+### `window.confirm_close`
+
+Accepts a pending close request and lets the runtime remove the window.
+
+```js
+await window.__AXION__.invoke("window.confirm_close", {
+  requestId: payload.requestId,
+});
+```
+
+### `window.prevent_close`
+
+Rejects a pending close request. Use this for unsaved-change prompts or other guarded flows.
+
+```js
+await window.__AXION__.invoke("window.prevent_close", {
+  requestId: payload.requestId,
+});
+```
+
+## App Lifecycle Commands
+
+### `app.exit`
+
+Requests application shutdown by asking all runtime windows to close. If windows do not answer, the preview backend defaults to allowing close after the reported timeout from `[native.lifecycle] close_timeout_ms`.
+
+```js
+await window.__AXION__.invoke("app.exit", null);
+// { pending: true, windowCount: 2, requestCount: 2 }
+```
+
 ### Host Lifecycle Events
 
 Axion host events are listen-only and come from the native runtime. Window lifecycle events currently include:
@@ -202,6 +243,8 @@ Axion host events are listen-only and come from the native runtime. Window lifec
 - `window.blurred`
 - `window.moved`
 - `window.redraw_failed`
+
+`window.close_requested` is emitted before a window is removed and includes `requestId`, `reason`, `defaultAction`, and `timeoutMs`. Frontend code can call `window.confirm_close` or `window.prevent_close` with that `requestId`. If no decision arrives before `timeoutMs`, the preview backend applies `defaultAction = "allow"`. The timeout defaults to `3000` and can be configured with `[native.lifecycle] close_timeout_ms`. `window.closed` is emitted after the close has been accepted.
 
 ```js
 window.__AXION__.listen("window.focused", (payload) => {
@@ -324,5 +367,5 @@ Response shape:
 
 ```toml
 [capabilities.main]
-profiles = ["app-info", "multi-window", "clipboard-access", "file-access", "dialog-access", "app-events"]
+profiles = ["app-info", "app-control", "multi-window", "clipboard-access", "file-access", "dialog-access", "app-events"]
 ```

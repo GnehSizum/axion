@@ -30,8 +30,11 @@ backend = "headless"
 [native.clipboard]
 backend = "memory"
 
+[native.lifecycle]
+close_timeout_ms = 3000
+
 [capabilities.main]
-profiles = ["app-info", "window-control", "clipboard-access", "file-access", "dialog-access", "app-events"]
+profiles = ["app-info", "app-control", "window-control", "clipboard-access", "file-access", "dialog-access", "app-events"]
 commands = ["demo.greet"]
 allowed_navigation_origins = ["https://docs.example"]
 allow_remote_navigation = false

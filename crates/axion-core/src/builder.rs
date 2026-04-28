@@ -161,7 +161,7 @@ mod tests {
     use super::Builder;
     use crate::{
         AppConfig, AppIdentity, AxionError, BuildConfig, BundleConfig, ClipboardConfig,
-        DialogConfig, NativeConfig, WindowConfig, WindowId,
+        DialogConfig, LifecycleConfig, NativeConfig, WindowConfig, WindowId,
     };
 
     fn valid_builder() -> Builder {
@@ -250,12 +250,14 @@ mod tests {
             .with_native(
                 NativeConfig::new()
                     .with_dialog(DialogConfig::system())
-                    .with_clipboard(ClipboardConfig::system()),
+                    .with_clipboard(ClipboardConfig::system())
+                    .with_lifecycle(LifecycleConfig::new().with_close_timeout_ms(1500)),
             )
             .build()
             .expect("native config should build");
 
         assert_eq!(app.config().native.dialog, DialogConfig::system());
         assert_eq!(app.config().native.clipboard, ClipboardConfig::system());
+        assert_eq!(app.config().native.lifecycle.close_timeout_ms, 1500);
     }
 }

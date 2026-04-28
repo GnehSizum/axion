@@ -10,7 +10,7 @@ pub use builder::Builder;
 pub use config::{
     AppConfig, AppIdentity, BuildConfig, BundleConfig, CapabilityConfig, CapabilityProfileConfig,
     ClipboardBackendConfig, ClipboardConfig, DevServerConfig, DialogBackendConfig, DialogConfig,
-    NativeConfig,
+    LifecycleConfig, NativeConfig,
 };
 pub use error::AxionError;
 pub use window::{WindowConfig, WindowId};

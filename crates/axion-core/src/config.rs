@@ -96,6 +96,7 @@ impl BundleConfig {
 pub struct NativeConfig {
     pub dialog: DialogConfig,
     pub clipboard: ClipboardConfig,
+    pub lifecycle: LifecycleConfig,
 }
 
 impl NativeConfig {
@@ -110,6 +111,11 @@ impl NativeConfig {
 
     pub fn with_clipboard(mut self, clipboard: ClipboardConfig) -> Self {
         self.clipboard = clipboard;
+        self
+    }
+
+    pub fn with_lifecycle(mut self, lifecycle: LifecycleConfig) -> Self {
+        self.lifecycle = lifecycle;
         self
     }
 }
@@ -191,6 +197,30 @@ impl ClipboardBackendConfig {
             Self::Memory => "memory",
             Self::System => "system",
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LifecycleConfig {
+    pub close_timeout_ms: u64,
+}
+
+impl Default for LifecycleConfig {
+    fn default() -> Self {
+        Self {
+            close_timeout_ms: 3000,
+        }
+    }
+}
+
+impl LifecycleConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_close_timeout_ms(mut self, close_timeout_ms: u64) -> Self {
+        self.close_timeout_ms = close_timeout_ms;
+        self
     }
 }
 

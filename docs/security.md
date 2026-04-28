@@ -19,7 +19,7 @@ Capabilities are scoped to a window id:
 
 ```toml
 [capabilities.main]
-profiles = ["app-info", "multi-window", "clipboard-access", "file-access", "dialog-access", "app-events"]
+profiles = ["app-info", "app-control", "multi-window", "clipboard-access", "file-access", "dialog-access", "app-events"]
 allowed_navigation_origins = []
 allow_remote_navigation = false
 ```
@@ -32,7 +32,7 @@ Higher-risk command groups should stay local to trusted packaged UI:
 - `clipboard.*`: reads or writes clipboard text through the configured preview backend.
 - `fs.*`: restricted to app-data paths, but still reads or writes user-visible data.
 - `dialog.*`: opens native file dialogs and can expose selected paths to the app.
-- `window.close` and `window.reload`: affect runtime control flow and user state.
+- `app.exit`, `window.close`, and `window.reload`: affect runtime control flow and user state.
 
 ## Capability Profiles
 
@@ -40,9 +40,10 @@ Profiles reduce repetitive manifest entries but do not bypass the deny-by-defaul
 
 - `minimal`: bridge protocol only.
 - `app-info`: app metadata, version, ping, and echo commands.
+- `app-control`: application shutdown command.
 - `app-events`: frontend `app.log` events.
-- `window-control`: current-window control commands.
-- `multi-window`: multi-window coordination commands.
+- `window-control`: current-window control commands, including close confirmation.
+- `multi-window`: multi-window coordination commands, including targeted close confirmation.
 - `clipboard-access`: clipboard read/write commands.
 - `file-access`: app-data file read/write commands.
 - `dialog-access`: native open/save dialog commands.
@@ -76,6 +77,8 @@ Bridge payloads must be valid JSON values. Request ids, command names, event nam
 File commands are restricted to Axion's app-data directory. Absolute paths, `..` components, root components, and symlink targets are rejected.
 
 Dialog and clipboard commands are also capability-gated. Keep `[native.dialog] backend = "headless"` and `[native.clipboard] backend = "memory"` for CI and non-interactive environments. Use system backends only for trusted packaged UI, because the system clipboard can expose data across application boundaries.
+
+Close confirmation is intentionally timeout-bound. Keep `[native.lifecycle] close_timeout_ms` long enough for trusted UI prompts, but do not rely on it as a security boundary; it is a lifecycle safety net for unsaved-state flows.
 
 ## Frontend Events
 

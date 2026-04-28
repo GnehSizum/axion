@@ -128,7 +128,7 @@ cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest
 ## What The Demo Shows
 
 - Bridge availability, allowed commands, frontend events, and host lifecycle events such as `window.ready`.
-- Built-in app/window commands: `app.info`, `app.version`, `app.echo`, `window.info`, `window.reload`, `window.set_title`, and `window.set_size`.
+- Built-in app/window commands: `app.info`, `app.version`, `app.echo`, `app.exit`, `window.info`, `window.close`, `window.reload`, `window.set_title`, and `window.set_size`.
 - Native preview APIs: `clipboard.write_text`, `clipboard.read_text`, `fs.write_text`, `fs.read_text`, `dialog.open`, and `dialog.save`.
 - A custom Rust command, `demo.greet`, registered in `src/main.rs`.
 - Capability denial behavior through an intentional `demo.missing` call.
@@ -196,7 +196,7 @@ cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-pat
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.1.17\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.1.18\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root
@@ -221,7 +221,7 @@ cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-pat
 
     fn manifest(&self) -> String {
         format!(
-            "[app]\nname = {name:?}\nidentifier = \"dev.axion.{identifier}\"\nversion = \"0.1.0\"\ndescription = \"Generated Axion application\"\nauthors = [\"Axion Developer\"]\nhomepage = \"https://example.dev/{name}\"\n\n[window]\nid = \"main\"\ntitle = {title:?}\nwidth = 960\nheight = 720\nresizable = true\nvisible = true\n\n[build]\nfrontend_dist = \"frontend\"\nentry = \"frontend/index.html\"\n\n# To use `axion dev --launch` with a frontend dev server, uncomment and update:\n# [dev]\n# url = \"http://127.0.0.1:3000\"\n# command = \"python3 -m http.server 3000 --bind 127.0.0.1 --directory frontend\"\n# timeout_ms = 15000\n\n[bundle]\nicon = \"icons/app.icns\"\n\n[native.dialog]\nbackend = \"headless\"\n\n[native.clipboard]\nbackend = \"memory\"\n\n[capabilities.main]\nprofiles = [\"app-info\", \"window-control\", \"clipboard-access\", \"file-access\", \"dialog-access\", \"app-events\"]\ncommands = [\"demo.greet\"]\nallowed_navigation_origins = []\nallow_remote_navigation = false\n",
+            "[app]\nname = {name:?}\nidentifier = \"dev.axion.{identifier}\"\nversion = \"0.1.0\"\ndescription = \"Generated Axion application\"\nauthors = [\"Axion Developer\"]\nhomepage = \"https://example.dev/{name}\"\n\n[window]\nid = \"main\"\ntitle = {title:?}\nwidth = 960\nheight = 720\nresizable = true\nvisible = true\n\n[build]\nfrontend_dist = \"frontend\"\nentry = \"frontend/index.html\"\n\n# To use `axion dev --launch` with a frontend dev server, uncomment and update:\n# [dev]\n# url = \"http://127.0.0.1:3000\"\n# command = \"python3 -m http.server 3000 --bind 127.0.0.1 --directory frontend\"\n# timeout_ms = 15000\n\n[bundle]\nicon = \"icons/app.icns\"\n\n[native.dialog]\nbackend = \"headless\"\n\n[native.clipboard]\nbackend = \"memory\"\n\n[native.lifecycle]\nclose_timeout_ms = 3000\n\n[capabilities.main]\nprofiles = [\"app-info\", \"app-control\", \"window-control\", \"clipboard-access\", \"file-access\", \"dialog-access\", \"app-events\"]\ncommands = [\"demo.greet\"]\nallowed_navigation_origins = []\nallow_remote_navigation = false\n",
             name = self.name,
             identifier = self.name.replace('-', "."),
             title = title_case(&self.name),
@@ -580,6 +580,27 @@ textarea {
       axion.hostEvents.includes('window.ready') ? 'pass' : 'fail',
       axion.hostEvents.includes('window.ready') ? 'window.ready' : 'missing window.ready',
     );
+    pushCheck(
+      'app.exit.available',
+      'app.exit capability exposed',
+      axion.commands.includes('app.exit') ? 'pass' : 'fail',
+      axion.commands.includes('app.exit') ? 'app.exit' : 'missing app.exit',
+    );
+    pushCheck(
+      'window.close.available',
+      'window.close capability exposed',
+      axion.commands.includes('window.close') ? 'pass' : 'fail',
+      axion.commands.includes('window.close') ? 'window.close' : 'missing window.close',
+    );
+    pushCheck(
+      'window.close_decision.available',
+      'window close decision capabilities exposed',
+      axion.commands.includes('window.confirm_close') &&
+        axion.commands.includes('window.prevent_close')
+        ? 'pass'
+        : 'fail',
+      'window.confirm_close/window.prevent_close',
+    );
 
     let ping = null;
     let appInfo = null;
@@ -739,6 +760,12 @@ textarea {
       windowInfo,
       windowTitleUpdate,
       windowSizeUpdate,
+      lifecycleControls: {
+        appExitAvailable: axion.commands.includes('app.exit'),
+        windowCloseAvailable: axion.commands.includes('window.close'),
+        windowConfirmCloseAvailable: axion.commands.includes('window.confirm_close'),
+        windowPreventCloseAvailable: axion.commands.includes('window.prevent_close'),
+      },
     });
 
     const fsWrite = await axion.invoke('fs.write_text', {
@@ -907,6 +934,9 @@ mod tests {
         assert!(project.app_js().contains("textarea-tab-handler"));
         assert!(project.app_js().contains("window.set_title"));
         assert!(project.app_js().contains("window.set_size"));
+        assert!(project.app_js().contains("app.exit.available"));
+        assert!(project.app_js().contains("window.close.available"));
+        assert!(project.app_js().contains("window.close_decision.available"));
         assert!(project.app_js().contains("clipboard.write_text"));
         assert!(project.app_js().contains("clipboard.read_text"));
         assert!(project.app_js().contains("clipboard.roundtrip"));
@@ -934,6 +964,7 @@ mod tests {
 
         assert!(project.manifest().contains("\"demo.greet\""));
         assert!(project.manifest().contains("\"app-info\""));
+        assert!(project.manifest().contains("\"app-control\""));
         assert!(project.manifest().contains("\"window-control\""));
         assert!(project.manifest().contains("\"clipboard-access\""));
         assert!(project.manifest().contains("\"file-access\""));
@@ -945,6 +976,8 @@ mod tests {
         assert!(project.manifest().contains("backend = \"headless\""));
         assert!(project.manifest().contains("[native.clipboard]"));
         assert!(project.manifest().contains("backend = \"memory\""));
+        assert!(project.manifest().contains("[native.lifecycle]"));
+        assert!(project.manifest().contains("close_timeout_ms = 3000"));
         assert!(project.manifest().contains("# [dev]"));
         assert!(
             project

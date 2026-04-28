@@ -106,6 +106,27 @@ window.addEventListener('DOMContentLoaded', async () => {
       bridge.hostEvents.includes('window.ready') ? 'pass' : 'fail',
       bridge.hostEvents.includes('window.ready') ? 'window.ready' : 'missing window.ready',
     );
+    pushCheck(
+      'app.exit.available',
+      'app.exit capability exposed',
+      bridge.commands.includes('app.exit') ? 'pass' : 'fail',
+      bridge.commands.includes('app.exit') ? 'app.exit' : 'missing app.exit',
+    );
+    pushCheck(
+      'window.close.available',
+      'window.close capability exposed',
+      bridge.commands.includes('window.close') ? 'pass' : 'fail',
+      bridge.commands.includes('window.close') ? 'window.close' : 'missing window.close',
+    );
+    pushCheck(
+      'window.close_decision.available',
+      'window close decision capabilities exposed',
+      bridge.commands.includes('window.confirm_close') &&
+        bridge.commands.includes('window.prevent_close')
+        ? 'pass'
+        : 'fail',
+      'window.confirm_close/window.prevent_close',
+    );
 
     let ping = null;
     let appInfo = null;
@@ -308,6 +329,12 @@ window.addEventListener('DOMContentLoaded', async () => {
           fsRead,
           clipboardWrite,
           clipboardRead,
+          lifecycleControls: {
+            appExitAvailable: bridge.commands.includes('app.exit'),
+            windowCloseAvailable: bridge.commands.includes('window.close'),
+            windowConfirmCloseAvailable: bridge.commands.includes('window.confirm_close'),
+            windowPreventCloseAvailable: bridge.commands.includes('window.prevent_close'),
+          },
           dialogOpen,
           dialogSave,
           hostLog,

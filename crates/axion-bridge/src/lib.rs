@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 pub const BRIDGE_MAX_NAME_BYTES: usize = 128;
 pub const BRIDGE_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const BRIDGE_MAX_REQUEST_ID_BYTES: usize = 128;
-const AXION_RELEASE_VERSION: &str = "v0.1.17.0";
+const AXION_RELEASE_VERSION: &str = "v0.1.18.0";
 const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,10 +160,13 @@ pub struct WindowStateSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowControlRequest {
     ListStates,
+    ExitApp,
     GetState,
     Show,
     Hide,
     Close,
+    ConfirmClose { request_id: String },
+    PreventClose { request_id: String },
     Focus,
     Reload,
     SetTitle { title: String },
@@ -172,6 +175,18 @@ pub enum WindowControlRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowControlResponse {
+    AppExit {
+        window_count: usize,
+        request_count: usize,
+    },
+    CloseRequested {
+        request_id: String,
+        window: WindowStateSnapshot,
+    },
+    ClosePrevented {
+        request_id: String,
+        window_id: String,
+    },
     State(WindowStateSnapshot),
     List(Vec<WindowStateSnapshot>),
 }

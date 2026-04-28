@@ -16,7 +16,7 @@ pub use axion_bridge::{
     WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-pub const AXION_RELEASE_VERSION: &str = "v0.1.17.0";
+pub const AXION_RELEASE_VERSION: &str = "v0.1.18.0";
 pub const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 pub trait RuntimePlugin: Send + Sync {
@@ -63,6 +63,7 @@ pub struct RuntimeDiagnosticReport {
     pub dialog_backend: DialogBackendKind,
     pub configured_clipboard_backend: ClipboardBackendKind,
     pub clipboard_backend: ClipboardBackendKind,
+    pub close_timeout_ms: u64,
     pub resource_policy: String,
     pub window_count: usize,
     pub windows: Vec<WindowDiagnostic>,
@@ -298,6 +299,7 @@ pub struct RuntimeLaunchRequest {
     pub dialog_backend: DialogBackendKind,
     pub configured_clipboard_backend: ClipboardBackendKind,
     pub clipboard_backend: ClipboardBackendKind,
+    pub close_timeout_ms: u64,
     pub windows: Vec<axion_core::WindowLaunchConfig>,
 }
 
@@ -638,6 +640,7 @@ pub fn diagnostic_report(app: &App, mode: RunMode) -> RuntimeDiagnosticReport {
             ),
             clipboard_backend: ClipboardBackendKind::from(app.config().native.clipboard.backend)
                 .resolve_for_current_platform(),
+            close_timeout_ms: app.config().native.lifecycle.close_timeout_ms,
             resource_policy: axion_protocol::default_resource_policy_summary().to_owned(),
             window_count: app.config().windows.len(),
             windows: Vec::new(),
@@ -741,6 +744,7 @@ fn diagnostic_report_from_launch_request(request: RuntimeLaunchRequest) -> Runti
         dialog_backend: request.dialog_backend,
         configured_clipboard_backend: request.configured_clipboard_backend,
         clipboard_backend: request.clipboard_backend,
+        close_timeout_ms: request.close_timeout_ms,
         resource_policy: axion_protocol::default_resource_policy_summary().to_owned(),
         window_count: request.windows.len(),
         windows,
@@ -904,6 +908,7 @@ pub fn launch_request_with_plugins(
         dialog_backend,
         configured_clipboard_backend,
         clipboard_backend,
+        close_timeout_ms: launch_config.native.lifecycle.close_timeout_ms,
         windows: launch_config.windows,
     })
 }
@@ -1125,6 +1130,14 @@ fn register_builtin_commands(
         });
     }
 
+    if allowed_commands.iter().any(|command| command == "app.exit") {
+        let window_control = window_control.clone();
+        builder.register_command_async("app.exit", move |_context, _request| {
+            let window_control = window_control.clone();
+            async move { execute_app_exit_json(&window_control) }
+        });
+    }
+
     if allowed_commands
         .iter()
         .any(|command| command == "clipboard.read_text")
@@ -1236,6 +1249,50 @@ fn register_builtin_commands(
                     &window_control,
                     target_window_id.as_deref(),
                     WindowControlRequest::Close,
+                )
+            }
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "window.confirm_close")
+    {
+        let window_control = window_control.clone();
+        builder.register_command_async("window.confirm_close", move |_context, request| {
+            let window_control = window_control.clone();
+            async move {
+                let request_id =
+                    json_string_field(&request.payload, "requestId").ok_or_else(|| {
+                        "window.confirm_close requires a JSON string field named 'requestId'"
+                            .to_owned()
+                    })?;
+                execute_window_control_json(
+                    &window_control,
+                    None,
+                    WindowControlRequest::ConfirmClose { request_id },
+                )
+            }
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "window.prevent_close")
+    {
+        let window_control = window_control.clone();
+        builder.register_command_async("window.prevent_close", move |_context, request| {
+            let window_control = window_control.clone();
+            async move {
+                let request_id =
+                    json_string_field(&request.payload, "requestId").ok_or_else(|| {
+                        "window.prevent_close requires a JSON string field named 'requestId'"
+                            .to_owned()
+                    })?;
+                execute_window_control_json(
+                    &window_control,
+                    None,
+                    WindowControlRequest::PreventClose { request_id },
                 )
             }
         });
@@ -1642,8 +1699,41 @@ fn execute_window_control_json(
     request: WindowControlRequest,
 ) -> Result<String, String> {
     match window_control.execute(target_window_id, request)? {
+        WindowControlResponse::AppExit { .. } => {
+            Err("window control backend returned an unexpected app exit response".to_owned())
+        }
+        WindowControlResponse::CloseRequested { request_id, window } => Ok(format!(
+            "{{\"pending\":true,\"requestId\":{},\"window\":{}}}",
+            json_string_literal(&request_id),
+            window_state_json(&window)
+        )),
+        WindowControlResponse::ClosePrevented {
+            request_id,
+            window_id,
+        } => Ok(format!(
+            "{{\"prevented\":true,\"requestId\":{},\"windowId\":{}}}",
+            json_string_literal(&request_id),
+            json_string_literal(&window_id)
+        )),
         WindowControlResponse::State(state) => Ok(window_state_json(&state)),
         WindowControlResponse::List(states) => Ok(window_state_list_json(&states)),
+    }
+}
+
+fn execute_app_exit_json(window_control: &WindowControlHandle) -> Result<String, String> {
+    match window_control.execute(None, WindowControlRequest::ExitApp)? {
+        WindowControlResponse::AppExit {
+            window_count,
+            request_count,
+        } => Ok(format!(
+            "{{\"pending\":true,\"windowCount\":{window_count},\"requestCount\":{request_count}}}"
+        )),
+        WindowControlResponse::CloseRequested { .. }
+        | WindowControlResponse::ClosePrevented { .. }
+        | WindowControlResponse::State(_)
+        | WindowControlResponse::List(_) => {
+            Err("window control backend returned an unexpected non-exit response".to_owned())
+        }
     }
 }
 
@@ -1657,6 +1747,11 @@ fn current_window_state(
         Ok(WindowControlResponse::List(_)) => {
             Err("window control backend returned an unexpected list response".to_owned())
         }
+        Ok(
+            WindowControlResponse::AppExit { .. }
+            | WindowControlResponse::CloseRequested { .. }
+            | WindowControlResponse::ClosePrevented { .. },
+        ) => Err("window control backend returned an unexpected app exit response".to_owned()),
         Err(_) if target_window_id.is_none_or(|target| target == context.window.id) => {
             Ok(WindowStateSnapshot {
                 id: context.window.id.clone(),
@@ -1756,6 +1851,7 @@ pub fn run_launch_request(launch_request: RuntimeLaunchRequest) -> Result<(), Ru
                 launch_request.app_protocol.resolver,
                 launch_request.windows,
                 window_bindings,
+                launch_request.close_timeout_ms,
                 url,
             )
             .map_err(RuntimeError::from),
@@ -1765,6 +1861,7 @@ pub fn run_launch_request(launch_request: RuntimeLaunchRequest) -> Result<(), Ru
                 launch_request.mode,
                 launch_request.windows,
                 window_bindings,
+                launch_request.close_timeout_ms,
                 app_protocol.initial_url,
                 app_protocol.resolver,
             )
@@ -1795,8 +1892,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use axion_core::{
-        BuildConfig, Builder, CapabilityConfig, DevServerConfig, DialogConfig, NativeConfig,
-        WindowConfig,
+        BuildConfig, Builder, CapabilityConfig, DevServerConfig, DialogConfig, LifecycleConfig,
+        NativeConfig, WindowConfig,
     };
     use axion_protocol::ProtocolError;
     use url::Url;
@@ -2039,10 +2136,14 @@ mod tests {
                 CapabilityConfig {
                     profiles: Vec::new(),
                     commands: vec![
+                        "app.exit".to_owned(),
                         "window.list".to_owned(),
                         "window.info".to_owned(),
                         "window.show".to_owned(),
                         "window.hide".to_owned(),
+                        "window.close".to_owned(),
+                        "window.confirm_close".to_owned(),
+                        "window.prevent_close".to_owned(),
                         "window.reload".to_owned(),
                         "window.focus".to_owned(),
                         "window.set_title".to_owned(),
@@ -2074,6 +2175,12 @@ mod tests {
                     fake_window_state("settings").expect("settings fake state should exist"),
                 ]));
             }
+            if matches!(request, WindowControlRequest::ExitApp) {
+                return Ok(WindowControlResponse::AppExit {
+                    window_count: 2,
+                    request_count: 2,
+                });
+            }
 
             let target_window_id = target_window_id.unwrap_or("main");
             let mut state = fake_window_state(target_window_id)
@@ -2082,7 +2189,14 @@ mod tests {
                 WindowControlRequest::GetState
                 | WindowControlRequest::Show
                 | WindowControlRequest::Close
+                | WindowControlRequest::ConfirmClose { .. }
                 | WindowControlRequest::Reload => {}
+                WindowControlRequest::PreventClose { request_id } => {
+                    return Ok(WindowControlResponse::ClosePrevented {
+                        request_id,
+                        window_id: target_window_id.to_owned(),
+                    });
+                }
                 WindowControlRequest::Hide => state.visible = false,
                 WindowControlRequest::Focus => state.focused = true,
                 WindowControlRequest::SetTitle { title } => state.title = title,
@@ -2090,7 +2204,7 @@ mod tests {
                     state.width = width;
                     state.height = height;
                 }
-                WindowControlRequest::ListStates => unreachable!(),
+                WindowControlRequest::ListStates | WindowControlRequest::ExitApp => unreachable!(),
             }
 
             Ok(WindowControlResponse::State(state))
@@ -2438,7 +2552,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.17.0\""));
+        assert!(version.contains("\"release\":\"v0.1.18.0\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
@@ -2611,6 +2725,7 @@ mod tests {
             DialogBackendKind::Headless
         );
         assert_eq!(report.dialog_backend, DialogBackendKind::Headless);
+        assert_eq!(report.close_timeout_ms, 3000);
         assert!(report.resource_policy.contains("nosniff=true"));
         assert!(!report.has_errors());
         assert_eq!(settings.command_count, 1);
@@ -2664,6 +2779,28 @@ mod tests {
                 .iter()
                 .any(|issue| matches!(issue.severity, DiagnosticSeverity::Warning))
         );
+    }
+
+    #[test]
+    fn launch_request_preserves_lifecycle_close_timeout() {
+        let (frontend_dist, entry) = frontend_fixture("lifecycle-timeout");
+        let app = Builder::new()
+            .with_name("axion-runtime-test")
+            .with_window(WindowConfig::main("Runtime Test"))
+            .with_build(BuildConfig::new(frontend_dist, entry))
+            .with_native(
+                NativeConfig::new()
+                    .with_lifecycle(LifecycleConfig::new().with_close_timeout_ms(1750)),
+            )
+            .build()
+            .expect("test app should build");
+
+        let request =
+            launch_request(&app, axion_core::RunMode::Production).expect("request should build");
+        let report = diagnostic_report(&app, axion_core::RunMode::Production);
+
+        assert_eq!(request.close_timeout_ms, 1750);
+        assert_eq!(report.close_timeout_ms, 1750);
     }
 
     #[test]
@@ -2812,6 +2949,13 @@ mod tests {
         .expect("window.hide should dispatch");
         assert!(hidden.contains("\"visible\":false"));
 
+        let closed = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("window.close", "{\"target\":\"settings\"}"),
+        ))
+        .expect("window.close should dispatch");
+        assert!(closed.contains("\"id\":\"settings\""));
+
         let renamed = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
             &BridgeRequest::new(
@@ -2840,6 +2984,30 @@ mod tests {
 
         reload_window(&binding.window_control, Some("main"))
             .expect("reload helper should dispatch");
+
+        let exit = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("app.exit", "null"),
+        ))
+        .expect("app.exit should dispatch");
+        assert_eq!(
+            exit,
+            "{\"pending\":true,\"windowCount\":2,\"requestCount\":2}"
+        );
+
+        let prevented = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("window.prevent_close", "{\"requestId\":\"test-close\"}"),
+        ))
+        .expect("window.prevent_close should dispatch");
+        assert!(prevented.contains("\"prevented\":true"));
+
+        let confirmed = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("window.confirm_close", "{\"requestId\":\"test-close\"}"),
+        ))
+        .expect("window.confirm_close should dispatch");
+        assert!(confirmed.contains("\"id\":\"main\""));
 
         let missing = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,

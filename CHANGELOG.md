@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.1.18.0 - Preview
+
+Axion v0.1.18.0 adds explicit application exit and window close lifecycle controls on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.18`.
+- Axion public release metadata is `v0.1.18.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added the capability-gated `app.exit` bridge command for runtime-wide application shutdown.
+- Added `app-control` as a built-in capability profile for `app.exit`.
+- Expanded `window-control` and `multi-window` profiles to include `window.close`.
+- Added `window.confirm_close` and `window.prevent_close` for preview close confirmation, with timeout defaulting to allow close.
+- Added `[native.lifecycle] close_timeout_ms` to configure preview close-confirmation timeout behavior.
+- Added close/exit controls and an unsaved-change prevention demo to `multi-window`, plus lifecycle capability checks to `hello-axion` and generated vanilla apps.
+- Added doctor risk handling for `app.exit`, `window.close`, and remote-navigation windows with runtime-control capabilities.
+
+### Changed
+
+- Updated lifecycle, manifest, native API, security, versioning, and generated app documentation for close/exit behavior.
+
 ## v0.1.17.0 - Preview
 
 Axion v0.1.17.0 adds capability-gated clipboard text commands and configurable clipboard backend diagnostics on the current Servo `0.1` baseline.

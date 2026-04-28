@@ -75,7 +75,7 @@ title = "Settings"
 visible = true
 
 [capabilities.main]
-profiles = ["app-info", "multi-window", "app-events"]
+profiles = ["app-info", "app-control", "multi-window", "app-events"]
 
 [capabilities.settings]
 profiles = ["app-events"]
@@ -133,6 +133,9 @@ backend = "headless"
 
 [native.clipboard]
 backend = "memory"
+
+[native.lifecycle]
+close_timeout_ms = 3000
 ```
 
 - `backend = "headless"`: default, deterministic behavior for CI and non-GUI validation.
@@ -142,6 +145,7 @@ Dialog and clipboard backends are configured independently:
 
 - `[native.dialog] backend = "headless" | "system"`.
 - `[native.clipboard] backend = "memory" | "system"`.
+- `[native.lifecycle] close_timeout_ms = 3000`: close-confirmation timeout before the preview backend applies its default allow action.
 
 The clipboard `memory` backend is the default and stores text inside the current runtime. The `system` backend uses macOS `pbcopy` / `pbpaste`; unsupported platforms fall back to `memory` and report the effective backend in diagnostics. `axion doctor` reports both configured and effective native backends before launch.
 
@@ -151,7 +155,7 @@ Capabilities are scoped by window id:
 
 ```toml
 [capabilities.main]
-profiles = ["app-info", "multi-window", "clipboard-access", "file-access", "dialog-access", "app-events"]
+profiles = ["app-info", "app-control", "multi-window", "clipboard-access", "file-access", "dialog-access", "app-events"]
 allowed_navigation_origins = ["https://docs.example"]
 allow_remote_navigation = false
 ```
@@ -162,9 +166,10 @@ Built-in profiles:
 
 - `minimal`: enables the `axion` bridge protocol without commands or events.
 - `app-info`: enables `app.ping`, `app.info`, `app.version`, and `app.echo`.
+- `app-control`: enables `app.exit` for application shutdown.
 - `app-events`: enables frontend `app.log` events.
-- `window-control`: enables current-window control commands such as `window.info`, `window.reload`, `window.focus`, `window.set_title`, and `window.set_size`.
-- `multi-window`: enables multi-window coordination commands including `window.list`, `window.info`, `window.reload`, `window.focus`, and `window.set_title`.
+- `window-control`: enables current-window control commands such as `window.info`, `window.close`, `window.confirm_close`, `window.prevent_close`, `window.reload`, `window.focus`, `window.set_title`, and `window.set_size`.
+- `multi-window`: enables multi-window coordination commands including `window.list`, `window.info`, `window.close`, `window.confirm_close`, `window.prevent_close`, `window.reload`, `window.focus`, and `window.set_title`.
 - `clipboard-access`: enables `clipboard.read_text` and `clipboard.write_text` using the configured preview text clipboard backend.
 - `file-access`: enables `fs.read_text` and `fs.write_text`.
 - `dialog-access`: enables `dialog.open` and `dialog.save`.

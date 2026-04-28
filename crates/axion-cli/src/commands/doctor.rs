@@ -354,13 +354,19 @@ fn security_diagnostics(config: &AppConfig) -> SecurityDiagnostics {
                         || capability
                             .commands
                             .iter()
-                            .any(|command| command.starts_with("dialog.")))
+                            .any(|command| command.starts_with("dialog."))
+                        || capability.commands.iter().any(|command| {
+                            matches!(
+                                command.as_str(),
+                                "app.exit" | "window.close" | "window.reload"
+                            )
+                        }))
                 {
                     findings.push(SecurityFinding::warning(
                         window_id,
                         "remote_navigation_native_capability",
-                        "file, clipboard, or dialog capabilities are enabled on a window that allows unrestricted remote navigation",
-                        Some("split native capabilities into a packaged app window or restrict remote navigation origins".to_owned()),
+                        "native or runtime-control capabilities are enabled on a window that allows unrestricted remote navigation",
+                        Some("split native/control capabilities into a packaged app window or restrict remote navigation origins".to_owned()),
                     ));
                 }
             }
@@ -500,13 +506,17 @@ fn suggested_profiles_for_explicit_capabilities(
             &[][..],
             &["axion"][..],
         ),
+        ("app-control", &["app.exit"][..], &[][..], &["axion"][..]),
         ("app-events", &[][..], &["app.log"][..], &["axion"][..]),
         (
             "window-control",
             &[
+                "window.close",
+                "window.confirm_close",
                 "window.focus",
                 "window.hide",
                 "window.info",
+                "window.prevent_close",
                 "window.reload",
                 "window.set_size",
                 "window.set_title",
@@ -518,9 +528,12 @@ fn suggested_profiles_for_explicit_capabilities(
         (
             "multi-window",
             &[
+                "window.close",
+                "window.confirm_close",
                 "window.focus",
                 "window.info",
                 "window.list",
+                "window.prevent_close",
                 "window.reload",
                 "window.set_title",
             ][..],
@@ -577,6 +590,7 @@ fn capability_risk_level(
             command.starts_with("fs.")
                 || command.starts_with("clipboard.")
                 || command.starts_with("dialog.")
+                || command == "app.exit"
                 || command == "window.close"
                 || command == "window.reload"
         })
@@ -1258,7 +1272,7 @@ fn runtime_diagnostic_lines_from_report(
     report: &axion_runtime::RuntimeDiagnosticReport,
 ) -> Vec<String> {
     let mut lines = vec![format!(
-        "runtime: app={}, mode={}, windows={}, errors={}, configured_dialog_backend={}, dialog_backend={}, configured_clipboard_backend={}, clipboard_backend={}, resource_policy={}",
+        "runtime: app={}, mode={}, windows={}, errors={}, configured_dialog_backend={}, dialog_backend={}, configured_clipboard_backend={}, clipboard_backend={}, close_timeout_ms={}, resource_policy={}",
         report.app_name,
         report.mode,
         report.window_count,
@@ -1267,6 +1281,7 @@ fn runtime_diagnostic_lines_from_report(
         report.dialog_backend.as_str(),
         report.configured_clipboard_backend.as_str(),
         report.clipboard_backend.as_str(),
+        report.close_timeout_ms,
         report.resource_policy
     )];
     for window in &report.windows {
@@ -1560,9 +1575,10 @@ fn doctor_diagnostics_json(input: DoctorDiagnosticsInput<'_>) -> String {
         .runtime
         .map(|runtime| {
             format!(
-                "{{\"has_errors\":{},\"issue_count\":{},\"resource_policy\":{}}}",
+                "{{\"has_errors\":{},\"issue_count\":{},\"close_timeout_ms\":{},\"resource_policy\":{}}}",
                 runtime.has_errors(),
                 runtime.issues.len(),
+                runtime.close_timeout_ms,
                 json_string_literal(&runtime.resource_policy)
             )
         })
@@ -1668,7 +1684,7 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.1.17.0"));
+        assert!(line.contains("release=v0.1.18.0"));
         assert!(line.contains("msrv="));
     }
 
@@ -2049,6 +2065,7 @@ protocols = ["axion"]
                 "main".to_owned(),
                 CapabilityConfig {
                     explicit_commands: vec![
+                        "app.exit".to_owned(),
                         "clipboard.read_text".to_owned(),
                         "clipboard.write_text".to_owned(),
                         "fs.read_text".to_owned(),
@@ -2056,6 +2073,7 @@ protocols = ["axion"]
                     ],
                     explicit_protocols: vec!["axion".to_owned()],
                     commands: vec![
+                        "app.exit".to_owned(),
                         "clipboard.read_text".to_owned(),
                         "clipboard.write_text".to_owned(),
                         "fs.read_text".to_owned(),
@@ -2072,6 +2090,11 @@ protocols = ["axion"]
         let security = security_diagnostics(&config);
         let json = security.to_json();
 
+        assert!(security.findings.iter().any(|finding| {
+            finding.severity == "recommendation"
+                && finding.code == "capability_profile_available"
+                && finding.message == "explicit capabilities match built-in profile 'app-control'"
+        }));
         assert!(security.findings.iter().any(|finding| {
             finding.severity == "recommendation"
                 && finding.code == "capability_profile_available"
@@ -2235,7 +2258,7 @@ protocols = ["axion"]
         let lines = runtime_diagnostic_lines(&config);
 
         assert!(lines.iter().any(|line| line.starts_with(
-            "runtime: app=doctor-test, mode=production, windows=1, errors=false, configured_dialog_backend=headless, dialog_backend=headless, configured_clipboard_backend=memory, clipboard_backend=memory, resource_policy="
+            "runtime: app=doctor-test, mode=production, windows=1, errors=false, configured_dialog_backend=headless, dialog_backend=headless, configured_clipboard_backend=memory, clipboard_backend=memory, close_timeout_ms=3000, resource_policy="
         )));
         assert!(
             lines
