@@ -97,7 +97,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.19", release: "v0.1.19.0", framework: "axion" }
+// { version: "0.1.20", release: "v0.1.20.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -227,16 +227,25 @@ Requests application shutdown by asking all runtime windows to close. If windows
 
 ```js
 await window.__AXION__.invoke("app.exit", null);
-// { pending: true, windowCount: 2, requestCount: 2 }
+// { pending: true, requestId: "axion-exit-1", windowCount: 2, requestCount: 2 }
 ```
 
 ### Host Lifecycle Events
 
-Axion host events are listen-only and come from the native runtime. Window lifecycle events currently include:
+Axion host events are listen-only and come from the native runtime. Application lifecycle events currently include:
+
+- `app.exit_requested`
+- `app.exit_prevented`
+- `app.exit_completed`
+
+Window lifecycle events currently include:
 
 - `window.created`
 - `window.ready`
 - `window.close_requested`
+- `window.close_prevented`
+- `window.close_completed`
+- `window.close_timed_out`
 - `window.closed`
 - `window.resized`
 - `window.focused`
@@ -244,7 +253,11 @@ Axion host events are listen-only and come from the native runtime. Window lifec
 - `window.moved`
 - `window.redraw_failed`
 
-`window.close_requested` is emitted before a window is removed and includes `requestId`, `reason`, `defaultAction`, and `timeoutMs`. Frontend code can call `window.confirm_close` or `window.prevent_close` with that `requestId`. If no decision arrives before `timeoutMs`, the preview backend applies `defaultAction = "allow"`. The timeout defaults to `3000` and can be configured with `[native.lifecycle] close_timeout_ms`. `window.closed` is emitted after the close has been accepted.
+`app.exit_requested` is emitted to all runtime windows before `app.exit` starts per-window close requests. Its payload includes `requestId`, `reason`, `windowCount`, `defaultAction`, and `timeoutMs`.
+
+`app.exit_prevented` is emitted when any window rejects a close request that belongs to the app exit request. The backend cancels the remaining pending close requests for that app exit attempt. `app.exit_completed` is emitted when all close requests associated with an app exit request complete. Both outcome events include `requestId`, `status`, `windowCount`, `requestCount`, `closedCount`, `preventedCount`, `timedOutCount`, `closeRequests`, `closedWindows`, `preventedWindows`, `timedOutWindows`, `closedRequests`, `preventedRequests`, and `timedOutRequests`. Request arrays contain `{ requestId, windowId }` entries so frontends can correlate app-level and window-level lifecycle results.
+
+`window.close_requested` is emitted before a window is removed and includes `requestId`, `reason`, `defaultAction`, and `timeoutMs`. Frontend code can call `window.confirm_close` or `window.prevent_close` with that `requestId`. `window.close_prevented` is emitted after a prevent decision. `window.close_completed` is emitted after an explicit confirm decision. If no decision arrives before `timeoutMs`, the preview backend emits `window.close_timed_out` and applies `defaultAction = "allow"`. The timeout defaults to `3000` and can be configured with `[native.lifecycle] close_timeout_ms`. `window.closed` is emitted after the close has been accepted.
 
 Close decision commands reject unknown, duplicate, or already timed-out `requestId` values. Treat these failures as terminal for that close request and wait for the next `window.close_requested` event before retrying.
 

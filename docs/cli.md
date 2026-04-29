@@ -195,7 +195,7 @@ cargo run -p axion-cli -- gui-smoke \
   --serial-build
 ```
 
-GUI smoke requires the app frontend to define `window.__AXION_GUI_SMOKE__()`. The CLI validates both the report schema and `result: "ok"` before returning success, and human output includes a `smoke_checks: total=N, failed=...` summary when the returned report contains `diagnostics.smoke_checks`. Lifecycle-aware examples also report close-confirmation smoke checks and `close_timeout_ms`. Failure reports include `failure_phase`, `help`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr` under `diagnostics`. Runtime failures that include `GUI smoke failed` or `Winit(RegisterProtocol(...))` are classified as `runtime` even when Cargo emitted compile progress before launch.
+GUI smoke requires the app frontend to define `window.__AXION_GUI_SMOKE__()`. The CLI validates both the report schema and `result: "ok"` before returning success, and human output includes a `smoke_checks: total=N, failed=...` summary when the returned report contains `diagnostics.smoke_checks`. Lifecycle-aware examples also report close-confirmation, `window.close_prevented`, `app.exit_requested`, `app.exit_prevented`, and `close_timeout_ms` smoke checks. Failure reports include `failure_phase`, `help`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr` under `diagnostics`. Runtime failures that include `GUI smoke failed` or `Winit(RegisterProtocol(...))` are classified as `runtime` even when Cargo emitted compile progress before launch.
 
 Troubleshooting:
 

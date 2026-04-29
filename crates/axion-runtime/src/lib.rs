@@ -16,7 +16,7 @@ pub use axion_bridge::{
     WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-pub const AXION_RELEASE_VERSION: &str = "v0.1.19.0";
+pub const AXION_RELEASE_VERSION: &str = "v0.1.20.0";
 pub const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 pub trait RuntimePlugin: Send + Sync {
@@ -199,6 +199,9 @@ pub enum WindowLifecycleEventKind {
     Created,
     Ready,
     CloseRequested,
+    ClosePrevented,
+    CloseCompleted,
+    CloseTimedOut,
     Closed,
     Resized,
     Focused,
@@ -213,6 +216,9 @@ impl WindowLifecycleEventKind {
             Self::Created => "window.created",
             Self::Ready => "window.ready",
             Self::CloseRequested => "window.close_requested",
+            Self::ClosePrevented => "window.close_prevented",
+            Self::CloseCompleted => "window.close_completed",
+            Self::CloseTimedOut => "window.close_timed_out",
             Self::Closed => "window.closed",
             Self::Resized => "window.resized",
             Self::Focused => "window.focused",
@@ -237,6 +243,9 @@ pub fn window_lifecycle_event_names() -> Vec<String> {
         WindowLifecycleEventKind::Created,
         WindowLifecycleEventKind::Ready,
         WindowLifecycleEventKind::CloseRequested,
+        WindowLifecycleEventKind::ClosePrevented,
+        WindowLifecycleEventKind::CloseCompleted,
+        WindowLifecycleEventKind::CloseTimedOut,
         WindowLifecycleEventKind::Closed,
         WindowLifecycleEventKind::Resized,
         WindowLifecycleEventKind::Focused,
@@ -249,6 +258,14 @@ pub fn window_lifecycle_event_names() -> Vec<String> {
     .collect()
 }
 
+pub fn app_lifecycle_event_names() -> Vec<String> {
+    vec![
+        "app.exit_requested".to_owned(),
+        "app.exit_prevented".to_owned(),
+        "app.exit_completed".to_owned(),
+    ]
+}
+
 fn host_event_names(startup_events: &[BridgeEvent]) -> Vec<String> {
     let mut events = Vec::new();
     for event in startup_events {
@@ -257,6 +274,11 @@ fn host_event_names(startup_events: &[BridgeEvent]) -> Vec<String> {
         }
     }
     for event in window_lifecycle_event_names() {
+        if !events.contains(&event) {
+            events.push(event);
+        }
+    }
+    for event in app_lifecycle_event_names() {
         if !events.contains(&event) {
             events.push(event);
         }
@@ -1725,10 +1747,12 @@ fn execute_window_control_json(
 fn execute_app_exit_json(window_control: &WindowControlHandle) -> Result<String, String> {
     match window_control.execute(None, WindowControlRequest::ExitApp)? {
         WindowControlResponse::AppExit {
+            request_id,
             window_count,
             request_count,
         } => Ok(format!(
-            "{{\"pending\":true,\"windowCount\":{window_count},\"requestCount\":{request_count}}}"
+            "{{\"pending\":true,\"requestId\":{},\"windowCount\":{window_count},\"requestCount\":{request_count}}}",
+            json_string_literal(&request_id)
         )),
         WindowControlResponse::CloseRequested { .. }
         | WindowControlResponse::ClosePrevented { .. }
@@ -2179,6 +2203,7 @@ mod tests {
             }
             if matches!(request, WindowControlRequest::ExitApp) {
                 return Ok(WindowControlResponse::AppExit {
+                    request_id: "test-exit".to_owned(),
                     window_count: 2,
                     request_count: 2,
                 });
@@ -2554,7 +2579,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.19.0\""));
+        assert!(version.contains("\"release\":\"v0.1.20.0\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
@@ -2742,12 +2767,18 @@ mod tests {
                 "window.created".to_owned(),
                 "window.ready".to_owned(),
                 "window.close_requested".to_owned(),
+                "window.close_prevented".to_owned(),
+                "window.close_completed".to_owned(),
+                "window.close_timed_out".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
                 "window.focused".to_owned(),
                 "window.blurred".to_owned(),
                 "window.moved".to_owned(),
                 "window.redraw_failed".to_owned(),
+                "app.exit_requested".to_owned(),
+                "app.exit_prevented".to_owned(),
+                "app.exit_completed".to_owned(),
             ]
         );
         assert_eq!(settings.startup_event_count, 3);
@@ -2757,6 +2788,9 @@ mod tests {
                 "window.created".to_owned(),
                 "window.ready".to_owned(),
                 "window.close_requested".to_owned(),
+                "window.close_prevented".to_owned(),
+                "window.close_completed".to_owned(),
+                "window.close_timed_out".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
                 "window.focused".to_owned(),
@@ -2821,12 +2855,18 @@ mod tests {
                 "plugin.ready".to_owned(),
                 "window.ready".to_owned(),
                 "window.close_requested".to_owned(),
+                "window.close_prevented".to_owned(),
+                "window.close_completed".to_owned(),
+                "window.close_timed_out".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
                 "window.focused".to_owned(),
                 "window.blurred".to_owned(),
                 "window.moved".to_owned(),
                 "window.redraw_failed".to_owned(),
+                "app.exit_requested".to_owned(),
+                "app.exit_prevented".to_owned(),
+                "app.exit_completed".to_owned(),
             ]
         );
     }
@@ -2996,7 +3036,7 @@ mod tests {
         .expect("app.exit should dispatch");
         assert_eq!(
             exit,
-            "{\"pending\":true,\"windowCount\":2,\"requestCount\":2}"
+            "{\"pending\":true,\"requestId\":\"test-exit\",\"windowCount\":2,\"requestCount\":2}"
         );
 
         let prevented = block_on(binding.bridge_bindings.command_registry.dispatch(
@@ -3081,12 +3121,27 @@ mod tests {
                 "window.created".to_owned(),
                 "window.ready".to_owned(),
                 "window.close_requested".to_owned(),
+                "window.close_prevented".to_owned(),
+                "window.close_completed".to_owned(),
+                "window.close_timed_out".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
                 "window.focused".to_owned(),
                 "window.blurred".to_owned(),
                 "window.moved".to_owned(),
                 "window.redraw_failed".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn app_lifecycle_event_names_are_stable() {
+        assert_eq!(
+            super::app_lifecycle_event_names(),
+            vec![
+                "app.exit_requested".to_owned(),
+                "app.exit_prevented".to_owned(),
+                "app.exit_completed".to_owned(),
             ]
         );
     }

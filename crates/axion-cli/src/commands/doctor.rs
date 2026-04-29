@@ -1770,7 +1770,7 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.1.19.0"));
+        assert!(line.contains("release=v0.1.20.0"));
         assert!(line.contains("msrv="));
     }
 
@@ -2444,10 +2444,10 @@ protocols = ["axion"]
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("events=1, frontend_events=app.log, host_events=app.ready,window.created,window.ready,window.close_requested,window.closed,window.resized,window.focused,window.blurred,window.moved,window.redraw_failed"))
+                .any(|line| line.contains("events=1, frontend_events=app.log, host_events=app.ready,window.created,window.ready,window.close_requested,window.close_prevented,window.close_completed,window.close_timed_out,window.closed,window.resized,window.focused,window.blurred,window.moved,window.redraw_failed,app.exit_requested,app.exit_prevented,app.exit_completed"))
         );
         assert!(lines.iter().any(|line| line.contains(
-            "lifecycle_events=window.created,window.ready,window.close_requested,window.closed,window.resized,window.focused,window.blurred,window.moved,window.redraw_failed"
+            "lifecycle_events=window.created,window.ready,window.close_requested,window.close_prevented,window.close_completed,window.close_timed_out,window.closed,window.resized,window.focused,window.blurred,window.moved,window.redraw_failed"
         )));
     }
 

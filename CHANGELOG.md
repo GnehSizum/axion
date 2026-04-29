@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.1.20.0 - Preview
+
+Axion v0.1.20.0 adds an application-level exit lifecycle event on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.20`.
+- Axion public release metadata is `v0.1.20.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added the listen-only `app.exit_requested` host lifecycle event, emitted when `app.exit` asks the runtime to close all windows.
+- Added `app.exit_prevented` and `app.exit_completed` host lifecycle events for app-wide shutdown outcomes.
+- Added a stable `requestId` to `app.exit` responses so frontend code can correlate command results with `app.exit_requested`.
+- Added app exit request tracking in the winit backend, including closed, prevented, and timed-out window summaries.
+- Added `window.close_prevented`, `window.close_completed`, and `window.close_timed_out` host lifecycle events for per-window close outcomes.
+- Added close request/window correlation arrays to app exit outcome payloads.
+- Added multi-window GUI smoke coverage for `window.close_prevented`, `app.exit` pending responses, `app.exit_requested`, and `app.exit_prevented` payloads.
+
+### Changed
+
+- Updated host event diagnostics and native API documentation to include application-level and window-level lifecycle outcome events.
+
 ## v0.1.19.0 - Preview
 
 Axion v0.1.19.0 strengthens lifecycle validation and GUI smoke coverage on the current Servo `0.1` baseline.

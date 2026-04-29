@@ -37,10 +37,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
     throw new Error(`timed out after ${timeoutMs}ms`);
   };
-
   window.__AXION_GUI_SMOKE__ = async () => {
     const checks = [];
     const addCheck = (id, status, detail) => checks.push({ id, status, detail });
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     try {
       if (bridge.commands.includes('app.ping')) {
@@ -95,6 +95,19 @@ window.addEventListener('DOMContentLoaded', async () => {
           prevented?.prevented === true ? 'pass' : 'fail',
           formatPretty(prevented),
         );
+
+        const preventedEvent = await waitFor(() =>
+          results.lifecycleEvents.find(
+            (event) =>
+              event.name === 'window.close_prevented' &&
+              event.payload?.requestId === closeRequest?.requestId,
+          ),
+        );
+        addCheck(
+          'window.close_prevented.event',
+          preventedEvent?.payload?.status === 'prevented' ? 'pass' : 'fail',
+          formatPretty(preventedEvent?.payload),
+        );
         results.manualCloseDecision = false;
 
         try {
@@ -112,6 +125,86 @@ window.addEventListener('DOMContentLoaded', async () => {
       } else {
         addCheck('window.close.lifecycle', 'skip', 'close lifecycle commands not available');
       }
+
+      const appExitLifecycleAvailable =
+        bridge.commands.includes('app.exit') &&
+        bridge.commands.includes('window.prevent_close') &&
+        bridge.hostEvents.includes('app.exit_requested') &&
+        bridge.hostEvents.includes('app.exit_prevented') &&
+        bridge.hostEvents.includes('window.close_prevented');
+      if (appExitLifecycleAvailable) {
+        if (preventCloseCheckbox) preventCloseCheckbox.checked = true;
+        results.manualCloseDecision = true;
+        try {
+          const exitRequest = await bridge.invoke('app.exit', null);
+          results.allowedCalls.appExitSmoke = exitRequest;
+          addCheck(
+            'app.exit.pending',
+            exitRequest?.pending === true &&
+              typeof exitRequest?.requestId === 'string' &&
+              Number.isInteger(exitRequest?.windowCount)
+              ? 'pass'
+              : 'fail',
+            formatPretty(exitRequest),
+          );
+
+          const exitEvent = await waitFor(() =>
+            results.lifecycleEvents.find(
+              (event) =>
+                event.name === 'app.exit_requested' &&
+                event.payload?.requestId === exitRequest?.requestId,
+            ),
+          );
+          addCheck(
+            'app.exit_requested.event',
+            exitEvent?.payload?.defaultAction === 'request-window-close' ? 'pass' : 'fail',
+            formatPretty(exitEvent?.payload),
+          );
+
+          const appExitCloseEvent = await waitFor(() =>
+            results.lifecycleEvents.find(
+              (event) =>
+                event.name === 'window.close_requested' &&
+                event.payload?.reason === 'app-exit',
+            ),
+          );
+          const preventedExitClose = await bridge.invoke('window.prevent_close', {
+            requestId: appExitCloseEvent.payload.requestId,
+          });
+          results.allowedCalls.lastAppExitCloseDecision = preventedExitClose;
+          addCheck(
+            'app.exit.window.prevent_close',
+            preventedExitClose?.prevented === true ? 'pass' : 'fail',
+            formatPretty(preventedExitClose),
+          );
+
+          const preventedExitEvent = await waitFor(() =>
+            results.lifecycleEvents.find(
+              (event) =>
+                event.name === 'app.exit_prevented' &&
+                event.payload?.requestId === exitRequest?.requestId,
+            ),
+          );
+          addCheck(
+            'app.exit_prevented.event',
+            preventedExitEvent?.payload?.preventedCount === 1 &&
+              preventedExitEvent?.payload?.closeRequests?.some(
+                (entry) => entry.requestId === appExitCloseEvent.payload.requestId,
+              ) &&
+              preventedExitEvent?.payload?.preventedRequests?.some(
+                (entry) => entry.requestId === appExitCloseEvent.payload.requestId,
+              )
+              ? 'pass'
+              : 'fail',
+            formatPretty(preventedExitEvent?.payload),
+          );
+        } finally {
+          results.manualCloseDecision = false;
+        }
+      } else {
+        addCheck('app.exit.lifecycle', 'skip', 'app exit lifecycle is not fully available');
+      }
+
     } catch (error) {
       addCheck('bridge.invoke', 'fail', error instanceof Error ? error.message : String(error));
     }
@@ -145,10 +238,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     bridge.listen(name, async (payload) => {
       if (name === 'app.ready') {
         results.ready = payload;
-      } else if (name.startsWith('window.')) {
+      } else if (name.startsWith('window.') || name.startsWith('app.')) {
         results.lifecycleEvents.push({ name, payload });
       }
       if (name === 'window.close_requested' && payload?.requestId) {
+        if (payload?.reason === 'app-exit') {
+          render();
+          return;
+        }
         const shouldPrevent = preventCloseCheckbox?.checked === true;
         const command = shouldPrevent ? 'window.prevent_close' : 'window.confirm_close';
         if (!results.manualCloseDecision && bridge.commands.includes(command)) {

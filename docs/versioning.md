@@ -10,7 +10,7 @@ Public releases and Git tags use this format:
 v<servo-major>.<servo-minor>.<feature>.<bugfix>
 ```
 
-Example: `v0.1.19.0`.
+Example: `v0.1.20.0`.
 
 - `servo-major.servo-minor`: follows the vendored Servo baseline tracked by Axion.
 - `feature`: increments when Axion adds user-visible framework capabilities.
@@ -26,14 +26,14 @@ Rust crates in this workspace use Cargo-compatible SemVer:
 <servo-major>.<servo-minor>.<feature>
 ```
 
-For public release `v0.1.19.0`, workspace crates use Cargo version `0.1.19`. Bugfix releases keep the same public feature prefix and update the public bugfix component. If crates are published externally, decide per bugfix release whether the Cargo patch version also needs to move.
+For public release `v0.1.20.0`, workspace crates use Cargo version `0.1.20`. Bugfix releases keep the same public feature prefix and update the public bugfix component. If crates are published externally, decide per bugfix release whether the Cargo patch version also needs to move.
 
 ## Current Release Baseline
 
 The current release baseline is:
 
-- public release: `v0.1.19.0`
-- Cargo workspace version: `0.1.19`
+- public release: `v0.1.20.0`
+- Cargo workspace version: `0.1.20`
 - Servo baseline: `0.1`
 - Axion feature version: `18`
 - Axion bugfix version: `0`
