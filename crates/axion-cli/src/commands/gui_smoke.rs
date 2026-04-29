@@ -27,6 +27,7 @@ pub fn run(args: GuiSmokeArgs) -> Result<(), AxionCliError> {
 
     match (output.status.success(), report) {
         (true, Some(report)) if report_result_ok(report) => {
+            let summary = smoke_check_summary(report);
             if let Some(path) = &args.report_path {
                 write_report_json(path, report)?;
             }
@@ -37,15 +38,21 @@ pub fn run(args: GuiSmokeArgs) -> Result<(), AxionCliError> {
                 if let Some(path) = &args.report_path {
                     println!("diagnostics_report: {}", path.display());
                 }
+                println!("{}", summary.to_line());
                 println!("result: ok");
             }
             Ok(())
         }
         (true, Some(report)) => {
+            let summary = smoke_check_summary(report);
             if let Some(path) = &args.report_path {
                 write_report_json(path, report)?;
             }
-            Err(std::io::Error::other("GUI smoke report result was not ok").into())
+            Err(std::io::Error::other(format!(
+                "GUI smoke report result was not ok; {}",
+                summary.to_line()
+            ))
+            .into())
         }
         _ => {
             let failure = gui_smoke_failure(output.status, report.is_some(), &stderr);
@@ -149,6 +156,125 @@ fn report_result_ok(report: &str) -> bool {
     report.contains("\"result\":\"ok\"")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SmokeCheckSummary {
+    total: usize,
+    failed_ids: Vec<String>,
+}
+
+impl SmokeCheckSummary {
+    fn to_line(&self) -> String {
+        let failed = if self.failed_ids.is_empty() {
+            "none".to_owned()
+        } else {
+            self.failed_ids.join(",")
+        };
+        format!("smoke_checks: total={}, failed={failed}", self.total)
+    }
+}
+
+fn smoke_check_summary(report: &str) -> SmokeCheckSummary {
+    let Some(checks) = json_array_section(report, "\"smoke_checks\"") else {
+        return SmokeCheckSummary {
+            total: 0,
+            failed_ids: Vec::new(),
+        };
+    };
+
+    let mut total = 0;
+    let mut failed_ids = Vec::new();
+    let mut cursor = 0;
+    while let Some((object, next_cursor)) = next_json_object(checks, cursor) {
+        total += 1;
+        if json_string_field(object, "status").as_deref() == Some("fail") {
+            failed_ids.push(
+                json_string_field(object, "id").unwrap_or_else(|| format!("smoke-check-{total}")),
+            );
+        }
+        cursor = next_cursor;
+    }
+
+    SmokeCheckSummary { total, failed_ids }
+}
+
+fn json_array_section<'a>(source: &'a str, key: &str) -> Option<&'a str> {
+    let key_index = source.find(key)?;
+    let array_start = source[key_index..].find('[')? + key_index;
+    let array_end = matching_json_delimiter(source, array_start, '[', ']')?;
+    source.get(array_start + 1..array_end)
+}
+
+fn next_json_object(source: &str, start: usize) -> Option<(&str, usize)> {
+    let object_start = source.get(start..)?.find('{')? + start;
+    let object_end = matching_json_delimiter(source, object_start, '{', '}')?;
+    Some((source.get(object_start..=object_end)?, object_end + 1))
+}
+
+fn matching_json_delimiter(source: &str, start: usize, open: char, close: char) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, character) in source
+        .char_indices()
+        .skip_while(|(index, _)| *index < start)
+    {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if character == '"' {
+            in_string = true;
+        } else if character == open {
+            depth += 1;
+        } else if character == close {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+
+    None
+}
+
+fn json_string_field(source: &str, field: &str) -> Option<String> {
+    let key = format!("\"{field}\":\"");
+    let start = source.find(&key)? + key.len();
+    let mut value = String::new();
+    let mut escaped = false;
+    for character in source[start..].chars() {
+        if escaped {
+            value.push(match character {
+                '"' => '"',
+                '\\' => '\\',
+                '/' => '/',
+                'b' => '\u{0008}',
+                'f' => '\u{000c}',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            });
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            return Some(value);
+        } else {
+            value.push(character);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FailurePhase {
     Build,
@@ -243,6 +369,7 @@ fn failed_report(input: FailedReportInput<'_>) -> String {
         dialog_backend: None,
         configured_clipboard_backend: None,
         clipboard_backend: None,
+        close_timeout_ms: Some(input.launch_config.native.lifecycle.close_timeout_ms),
         icon: None,
         host_events: Vec::new(),
         staged_app_dir: None,
@@ -302,6 +429,16 @@ fn classify_failure_phase(status: std::process::ExitStatus, stderr: &str) -> Fai
     }
 
     let stderr = stderr.to_ascii_lowercase();
+    let runtime_markers = [
+        "gui smoke failed",
+        "winit(registerprotocol",
+        "window.__axion_gui_smoke__",
+        "axion_selftest",
+    ];
+    if runtime_markers.iter().any(|marker| stderr.contains(marker)) {
+        return FailurePhase::Runtime;
+    }
+
     let build_markers = [
         "compiling ",
         "could not compile",
@@ -367,7 +504,7 @@ mod tests {
     use super::{
         FailedReportInput, FailurePhase, PASSED_PREFIX, classify_failure_phase,
         extract_gui_smoke_report, failed_report, gui_smoke_failure, parse_build_env,
-        report_result_ok,
+        report_result_ok, smoke_check_summary,
     };
 
     #[cfg(unix)]
@@ -410,6 +547,37 @@ mod tests {
     }
 
     #[test]
+    fn summarizes_gui_smoke_checks() {
+        let report = concat!(
+            "{\"schema\":\"axion.diagnostics-report.v1\",\"result\":\"failed\",",
+            "\"diagnostics\":{\"smoke_checks\":[",
+            "{\"id\":\"app.ping\",\"status\":\"pass\",\"detail\":\"ok\"},",
+            "{\"id\":\"window.close\",\"status\":\"fail\",\"detail\":\"missing\"},",
+            "{\"id\":\"window.prevent_close\",\"status\":\"fail\",\"detail\":\"duplicate\"}",
+            "]}}"
+        );
+        let summary = smoke_check_summary(report);
+
+        assert_eq!(summary.total, 3);
+        assert_eq!(
+            summary.failed_ids,
+            vec!["window.close".to_owned(), "window.prevent_close".to_owned()]
+        );
+        assert_eq!(
+            summary.to_line(),
+            "smoke_checks: total=3, failed=window.close,window.prevent_close"
+        );
+    }
+
+    #[test]
+    fn summarizes_missing_gui_smoke_checks() {
+        let summary =
+            smoke_check_summary("{\"schema\":\"axion.diagnostics-report.v1\",\"result\":\"ok\"}");
+
+        assert_eq!(summary.to_line(), "smoke_checks: total=0, failed=none");
+    }
+
+    #[test]
     fn failure_message_uses_last_stderr_line() {
         let failure = gui_smoke_failure(failing_status(), false, "warning\nerror detail\n");
 
@@ -428,6 +596,13 @@ mod tests {
         );
         assert_eq!(
             classify_failure_phase(failing_status(), "frontend crashed"),
+            FailurePhase::Runtime,
+        );
+        assert_eq!(
+            classify_failure_phase(
+                failing_status(),
+                "Compiling multi-window\nError: Winit(RegisterProtocol(\"GUI smoke failed: timed out after 30000ms\"))",
+            ),
             FailurePhase::Runtime,
         );
         assert_eq!(

@@ -80,6 +80,8 @@ Dialog and clipboard commands are also capability-gated. Keep `[native.dialog] b
 
 Close confirmation is intentionally timeout-bound. Keep `[native.lifecycle] close_timeout_ms` long enough for trusted UI prompts, but do not rely on it as a security boundary; it is a lifecycle safety net for unsaved-state flows.
 
+If a window can call `app.exit`, at least one trusted packaged window should also be able to call both `window.confirm_close` and `window.prevent_close`. Otherwise application exit can request window closes but frontend code has no authorized close-decision path for guarded shutdown flows.
+
 ## Frontend Events
 
 Frontend-originated events require explicit capability entries:

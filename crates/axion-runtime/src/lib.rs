@@ -16,7 +16,7 @@ pub use axion_bridge::{
     WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-pub const AXION_RELEASE_VERSION: &str = "v0.1.18.0";
+pub const AXION_RELEASE_VERSION: &str = "v0.1.19.0";
 pub const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 pub trait RuntimePlugin: Send + Sync {
@@ -98,6 +98,7 @@ pub struct DiagnosticsReport {
     pub dialog_backend: Option<String>,
     pub configured_clipboard_backend: Option<String>,
     pub clipboard_backend: Option<String>,
+    pub close_timeout_ms: Option<u64>,
     pub icon: Option<std::path::PathBuf>,
     pub host_events: Vec<String>,
     pub staged_app_dir: Option<std::path::PathBuf>,
@@ -140,7 +141,7 @@ impl DiagnosticsReport {
             .unwrap_or_default();
 
         format!(
-            "{{\"schema\":{},\"source\":{},\"exported_at_unix_seconds\":{},\"manifest_path\":{},\"app_name\":{},\"identifier\":{},\"version\":{},\"description\":{},\"authors\":{},\"homepage\":{},\"mode\":{},\"window_count\":{},\"windows\":[{}],\"frontend_dist\":{},\"entry\":{},\"configured_dialog_backend\":{},\"dialog_backend\":{},\"configured_clipboard_backend\":{},\"clipboard_backend\":{},\"icon\":{},\"host_events\":{},\"staged_app_dir\":{},\"asset_manifest_path\":{},\"artifacts_removed\":{}{},\"result\":{}}}",
+            "{{\"schema\":{},\"source\":{},\"exported_at_unix_seconds\":{},\"manifest_path\":{},\"app_name\":{},\"identifier\":{},\"version\":{},\"description\":{},\"authors\":{},\"homepage\":{},\"mode\":{},\"window_count\":{},\"windows\":[{}],\"frontend_dist\":{},\"entry\":{},\"configured_dialog_backend\":{},\"dialog_backend\":{},\"configured_clipboard_backend\":{},\"clipboard_backend\":{},\"close_timeout_ms\":{},\"icon\":{},\"host_events\":{},\"staged_app_dir\":{},\"asset_manifest_path\":{},\"artifacts_removed\":{}{},\"result\":{}}}",
             json_string_literal(AXION_DIAGNOSTICS_REPORT_SCHEMA),
             json_string_literal(&self.source),
             optional_json_u64(self.exported_at_unix_seconds),
@@ -160,6 +161,7 @@ impl DiagnosticsReport {
             optional_json_string_literal(self.dialog_backend.as_deref()),
             optional_json_string_literal(self.configured_clipboard_backend.as_deref()),
             optional_json_string_literal(self.clipboard_backend.as_deref()),
+            optional_json_u64(self.close_timeout_ms),
             optional_json_path(self.icon.as_deref()),
             json_string_array_literal(&self.host_events),
             optional_json_path(self.staged_app_dir.as_deref()),
@@ -2552,7 +2554,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.18.0\""));
+        assert!(version.contains("\"release\":\"v0.1.19.0\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
@@ -2642,6 +2644,7 @@ mod tests {
             dialog_backend: Some("headless".to_owned()),
             configured_clipboard_backend: Some("memory".to_owned()),
             clipboard_backend: Some("memory".to_owned()),
+            close_timeout_ms: Some(3000),
             icon: None,
             host_events: vec!["app.ready".to_owned()],
             staged_app_dir: Some(std::path::PathBuf::from("target/axion/app")),
@@ -2655,6 +2658,7 @@ mod tests {
         assert!(json.contains("\"schema\":\"axion.diagnostics-report.v1\""));
         assert!(json.contains("\"source\":\"unit-test\""));
         assert!(json.contains("\"manifest_path\":\"axion.toml\""));
+        assert!(json.contains("\"close_timeout_ms\":3000"));
         assert!(json.contains("\"configured_profiles\":[\"app-info\"]"));
         assert!(json.contains("\"configured_commands\":[\"app.ping\"]"));
         assert!(json.contains("\"artifacts_removed\":true"));

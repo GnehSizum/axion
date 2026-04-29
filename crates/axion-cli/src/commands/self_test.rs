@@ -324,6 +324,7 @@ impl SelfTestReport {
             dialog_backend: Some(self.dialog_backend.clone()),
             configured_clipboard_backend: Some(self.configured_clipboard_backend.clone()),
             clipboard_backend: Some(self.clipboard_backend.clone()),
+            close_timeout_ms: Some(self.close_timeout_ms),
             icon: self.icon.clone(),
             host_events: self.host_events.clone(),
             staged_app_dir: Some(self.staged_app_dir.clone()),

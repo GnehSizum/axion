@@ -97,7 +97,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.18", release: "v0.1.18.0", framework: "axion" }
+// { version: "0.1.19", release: "v0.1.19.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -245,6 +245,8 @@ Axion host events are listen-only and come from the native runtime. Window lifec
 - `window.redraw_failed`
 
 `window.close_requested` is emitted before a window is removed and includes `requestId`, `reason`, `defaultAction`, and `timeoutMs`. Frontend code can call `window.confirm_close` or `window.prevent_close` with that `requestId`. If no decision arrives before `timeoutMs`, the preview backend applies `defaultAction = "allow"`. The timeout defaults to `3000` and can be configured with `[native.lifecycle] close_timeout_ms`. `window.closed` is emitted after the close has been accepted.
+
+Close decision commands reject unknown, duplicate, or already timed-out `requestId` values. Treat these failures as terminal for that close request and wait for the next `window.close_requested` event before retrying.
 
 ```js
 window.__AXION__.listen("window.focused", (payload) => {

@@ -45,7 +45,7 @@ Each `windows[]` entry includes:
 - `host_events`
 - `trusted_origins`, `allowed_navigation_origins`, `allow_remote_navigation`
 
-GUI reports may include an additional `diagnostics` object with bridge snapshots, smoke checks, recent host events, dialog previews, export metadata, and text-control snapshots. GUI window entries may also include preview native state fields such as `width`, `height`, `resizable`, `visible`, and `focused`.
+GUI reports may include an additional `diagnostics` object with bridge snapshots, smoke checks, recent host events, lifecycle events, dialog previews, export metadata, and text-control snapshots. GUI window entries may also include preview native state fields such as `width`, `height`, `resizable`, `visible`, and `focused`. Reports can include `close_timeout_ms` when lifecycle timeout configuration is available.
 
 Each `diagnostics.smoke_checks[]` entry should include stable `id`, user-facing `label`, `status` (`pass`, `fail`, or `skip`), and optional `detail`. Check ids use dotted lower-case names such as `bridge.bootstrap`, `app.ping`, `clipboard.roundtrip`, `fs.roundtrip`, `dialog.preview`, and `input.snapshot`.
 
@@ -83,7 +83,7 @@ The command exits non-zero if manifest loading, runtime diagnostics, asset stagi
 
 ## Local GUI Smoke
 
-`axion gui-smoke` is the preferred local entrypoint. It runs the Servo-backed window, captures the returned diagnostics report, validates the schema and `result: "ok"`, optionally writes it to `--report-path`, and exits. The bridge diagnostics demo implements the required `window.__AXION_GUI_SMOKE__()` hook.
+`axion gui-smoke` is the preferred local entrypoint. It runs the Servo-backed window, captures the returned diagnostics report, validates the schema and `result: "ok"`, optionally writes it to `--report-path`, prints a `smoke_checks` summary for human runs, and exits. The bridge diagnostics demo implements the required `window.__AXION_GUI_SMOKE__()` hook.
 
 ```sh
 cargo run -p axion-cli -- gui-smoke \

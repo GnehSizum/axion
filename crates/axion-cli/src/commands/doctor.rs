@@ -341,6 +341,7 @@ fn security_diagnostics(config: &AppConfig) -> SecurityDiagnostics {
 
                 add_redundant_profile_findings(&mut findings, window_id, capability);
                 add_profile_suggestion_findings(&mut findings, window_id, capability);
+                add_lifecycle_capability_findings(&mut findings, window_id, capability);
 
                 if capability.allow_remote_navigation
                     && (capability
@@ -395,7 +396,79 @@ fn security_diagnostics(config: &AppConfig) -> SecurityDiagnostics {
         }
     }
 
+    add_app_exit_lifecycle_findings(config, &mut findings);
+
     SecurityDiagnostics { windows, findings }
+}
+
+fn add_app_exit_lifecycle_findings(config: &AppConfig, findings: &mut Vec<SecurityFinding>) {
+    let app_exit_windows = config
+        .capabilities
+        .iter()
+        .filter_map(|(window_id, capability)| {
+            capability
+                .commands
+                .iter()
+                .any(|command| command == "app.exit")
+                .then_some(window_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    if app_exit_windows.is_empty() || any_window_has_close_decision_commands(config) {
+        return;
+    }
+
+    for window_id in app_exit_windows {
+        findings.push(SecurityFinding::warning(
+            window_id,
+            "incomplete_app_exit_lifecycle",
+            "app.exit is configured but no window can call both window.confirm_close and window.prevent_close",
+            Some("add close decision commands to at least one trusted app window before relying on guarded application exit".to_owned()),
+        ));
+    }
+}
+
+fn any_window_has_close_decision_commands(config: &AppConfig) -> bool {
+    config.capabilities.values().any(|capability| {
+        capability
+            .commands
+            .iter()
+            .any(|command| command == "window.confirm_close")
+            && capability
+                .commands
+                .iter()
+                .any(|command| command == "window.prevent_close")
+    })
+}
+
+fn add_lifecycle_capability_findings(
+    findings: &mut Vec<SecurityFinding>,
+    window_id: &str,
+    capability: &axion_core::CapabilityConfig,
+) {
+    let has_close = capability
+        .commands
+        .iter()
+        .any(|command| command == "window.close");
+    if !has_close {
+        return;
+    }
+
+    let has_confirm = capability
+        .commands
+        .iter()
+        .any(|command| command == "window.confirm_close");
+    let has_prevent = capability
+        .commands
+        .iter()
+        .any(|command| command == "window.prevent_close");
+    if !has_confirm || !has_prevent {
+        findings.push(SecurityFinding::warning(
+            window_id,
+            "incomplete_close_lifecycle",
+            "window.close is configured without both window.confirm_close and window.prevent_close",
+            Some("add the window-control or multi-window profile, or explicitly allow both close decision commands".to_owned()),
+        ));
+    }
 }
 
 fn add_redundant_profile_findings(
@@ -1105,6 +1178,17 @@ fn readiness_diagnostics(
         None => bundle_blockers.push("bundle icon is not configured".to_owned()),
     }
 
+    let close_timeout_ms = config.native.lifecycle.close_timeout_ms;
+    if close_timeout_ms < 500 {
+        warnings.push(format!(
+            "native.lifecycle.close_timeout_ms={close_timeout_ms} is short for user confirmation flows"
+        ));
+    } else if close_timeout_ms > 60_000 {
+        warnings.push(format!(
+            "native.lifecycle.close_timeout_ms={close_timeout_ms} may leave close requests pending too long"
+        ));
+    }
+
     if servo_path.is_none() {
         gui_blockers.push(
             "servo source was not found near the manifest; run GUI smoke from an Axion checkout"
@@ -1408,6 +1492,7 @@ fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> 
             dialog_backend: None,
             configured_clipboard_backend: None,
             clipboard_backend: None,
+            close_timeout_ms: None,
             icon: None,
             host_events: Vec::new(),
             staged_app_dir: None,
@@ -1527,6 +1612,7 @@ fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> 
         dialog_backend: Some(dialog_backend),
         configured_clipboard_backend: Some(config.native.clipboard.backend.as_str().to_owned()),
         clipboard_backend: Some(clipboard_backend),
+        close_timeout_ms: Some(config.native.lifecycle.close_timeout_ms),
         icon: config.bundle.icon.clone(),
         host_events,
         staged_app_dir: None,
@@ -1640,8 +1726,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use axion_core::{
-        AppConfig, AppIdentity, BuildConfig, CapabilityConfig, DevServerConfig, WindowConfig,
-        WindowId,
+        AppConfig, AppIdentity, BuildConfig, CapabilityConfig, DevServerConfig, LifecycleConfig,
+        NativeConfig, WindowConfig, WindowId,
     };
     use url::Url;
 
@@ -1651,8 +1737,8 @@ mod tests {
         DoctorGate, build_asset_diagnostic_lines, bundle_diagnostic_lines,
         dev_server_diagnostic_line, dev_server_diagnostic_line_with, doctor_report,
         framework_diagnostic_line, manifest_diagnostic_lines, parse_rustc_semver, parse_semver,
-        runtime_diagnostic_lines, rustc_msrv_diagnostic_line, security_diagnostics,
-        servo_path_for_manifest,
+        readiness_diagnostics, runtime_diagnostic_lines, rustc_msrv_diagnostic_line,
+        security_diagnostics, servo_path_for_manifest,
     };
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1684,7 +1770,7 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.1.18.0"));
+        assert!(line.contains("release=v0.1.19.0"));
         assert!(line.contains("msrv="));
     }
 
@@ -2107,6 +2193,96 @@ protocols = ["axion"]
                     == "explicit capabilities match built-in profile 'clipboard-access'"
         }));
         assert!(json.contains("\"code\":\"capability_profile_available\""));
+    }
+
+    #[test]
+    fn security_diagnostics_warns_for_incomplete_close_lifecycle() {
+        let config = AppConfig {
+            identity: AppIdentity::new("doctor-close-lifecycle"),
+            windows: vec![WindowConfig::main("Main")],
+            dev: None,
+            build: BuildConfig::new("frontend", "frontend/index.html"),
+            bundle: Default::default(),
+            native: Default::default(),
+            capabilities: std::collections::BTreeMap::from([(
+                "main".to_owned(),
+                CapabilityConfig {
+                    commands: vec!["window.close".to_owned()],
+                    protocols: vec!["axion".to_owned()],
+                    ..Default::default()
+                },
+            )]),
+        };
+
+        let security = security_diagnostics(&config);
+
+        assert!(security.findings.iter().any(|finding| {
+            finding.severity == "warning" && finding.code == "incomplete_close_lifecycle"
+        }));
+    }
+
+    #[test]
+    fn security_diagnostics_warns_for_app_exit_without_close_decisions() {
+        let config = AppConfig {
+            identity: AppIdentity::new("doctor-app-exit-lifecycle"),
+            windows: vec![WindowConfig::main("Main")],
+            dev: None,
+            build: BuildConfig::new("frontend", "frontend/index.html"),
+            bundle: Default::default(),
+            native: Default::default(),
+            capabilities: std::collections::BTreeMap::from([(
+                "main".to_owned(),
+                CapabilityConfig {
+                    commands: vec!["app.exit".to_owned()],
+                    protocols: vec!["axion".to_owned()],
+                    ..Default::default()
+                },
+            )]),
+        };
+
+        let security = security_diagnostics(&config);
+
+        assert!(security.findings.iter().any(|finding| {
+            finding.severity == "warning" && finding.code == "incomplete_app_exit_lifecycle"
+        }));
+    }
+
+    #[test]
+    fn readiness_warns_for_short_close_timeout() {
+        let root = temp_dir();
+        let frontend = root.join("frontend");
+        fs::create_dir_all(&frontend).unwrap();
+        fs::write(frontend.join("index.html"), "<!doctype html><html></html>").unwrap();
+        fs::write(
+            frontend.join("app.js"),
+            "window.__AXION_GUI_SMOKE__ = async () => ({ result: 'ok' });",
+        )
+        .unwrap();
+        let mut config = AppConfig {
+            identity: AppIdentity::new("doctor-timeout"),
+            windows: vec![WindowConfig::main("Main")],
+            dev: None,
+            build: BuildConfig::new(&frontend, frontend.join("index.html")),
+            bundle: Default::default(),
+            native: NativeConfig::new()
+                .with_lifecycle(LifecycleConfig::new().with_close_timeout_ms(250)),
+            capabilities: std::collections::BTreeMap::from([(
+                "main".to_owned(),
+                CapabilityConfig {
+                    protocols: vec!["axion".to_owned()],
+                    ..Default::default()
+                },
+            )]),
+        };
+        config.bundle.icon = Some(root.join("icons").join("missing.icns"));
+        let security = security_diagnostics(&config);
+        let readiness = readiness_diagnostics(&config, &security, None, Some(root.as_path()));
+
+        assert!(
+            readiness.warnings().iter().any(|warning| {
+                warning.contains("native.lifecycle.close_timeout_ms=250 is short")
+            })
+        );
     }
 
     #[test]

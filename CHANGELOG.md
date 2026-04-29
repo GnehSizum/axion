@@ -1,13 +1,13 @@
 # Changelog
 
-## v0.1.18.0 - Preview
+## v0.1.19.0 - Preview
 
-Axion v0.1.18.0 adds explicit application exit and window close lifecycle controls on the current Servo `0.1` baseline.
+Axion v0.1.19.0 strengthens lifecycle validation and GUI smoke coverage on the current Servo `0.1` baseline.
 
 ### Baseline
 
-- Cargo workspace version is `0.1.18`.
-- Axion public release metadata is `v0.1.18.0`.
+- Cargo workspace version is `0.1.19`.
+- Axion public release metadata is `v0.1.19.0`.
 - Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
 
 ### Added
@@ -17,6 +17,12 @@ Axion v0.1.18.0 adds explicit application exit and window close lifecycle contro
 - Expanded `window-control` and `multi-window` profiles to include `window.close`.
 - Added `window.confirm_close` and `window.prevent_close` for preview close confirmation, with timeout defaulting to allow close.
 - Added `[native.lifecycle] close_timeout_ms` to configure preview close-confirmation timeout behavior.
+- Added GUI smoke coverage for `window.close_requested`, `window.prevent_close`, duplicate close-decision errors, and close timeout payloads in the multi-window example.
+- Added `axion gui-smoke` human-output summaries for returned `diagnostics.smoke_checks`, including total count and failed check ids.
+- Added doctor warnings for incomplete close lifecycle command sets and suspicious close timeout values.
+- Added a doctor warning for `app.exit` configurations that have no trusted close-decision command path.
+- Improved `axion gui-smoke` failure classification so runtime hook failures are not reported as build failures just because Cargo printed compile progress.
+- Added `close_timeout_ms` to diagnostics reports so CI can read lifecycle timeout configuration.
 - Added close/exit controls and an unsaved-change prevention demo to `multi-window`, plus lifecycle capability checks to `hello-axion` and generated vanilla apps.
 - Added doctor risk handling for `app.exit`, `window.close`, and remote-navigation windows with runtime-control capabilities.
 

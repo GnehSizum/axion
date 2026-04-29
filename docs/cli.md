@@ -99,7 +99,7 @@ After the window opens, edit a file under `examples/hello-axion/frontend/`. A su
 
 ## `doctor`
 
-Validate Axion version metadata, local tooling, manifest configuration, app metadata, native dialog and clipboard backend configuration, effective runtime native backends, frontend assets, runtime diagnostics, capability categories including clipboard access, and Servo path availability.
+Validate Axion version metadata, local tooling, manifest configuration, app metadata, native dialog, clipboard, and lifecycle configuration, effective runtime native backends, frontend assets, runtime diagnostics, capability categories including clipboard access, and Servo path availability.
 
 ```sh
 cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml
@@ -195,7 +195,7 @@ cargo run -p axion-cli -- gui-smoke \
   --serial-build
 ```
 
-GUI smoke requires the app frontend to define `window.__AXION_GUI_SMOKE__()`. The CLI validates both the report schema and `result: "ok"` before returning success. Failure reports include `failure_phase`, `help`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr` under `diagnostics`.
+GUI smoke requires the app frontend to define `window.__AXION_GUI_SMOKE__()`. The CLI validates both the report schema and `result: "ok"` before returning success, and human output includes a `smoke_checks: total=N, failed=...` summary when the returned report contains `diagnostics.smoke_checks`. Lifecycle-aware examples also report close-confirmation smoke checks and `close_timeout_ms`. Failure reports include `failure_phase`, `help`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr` under `diagnostics`. Runtime failures that include `GUI smoke failed` or `Winit(RegisterProtocol(...))` are classified as `runtime` even when Cargo emitted compile progress before launch.
 
 Troubleshooting:
 

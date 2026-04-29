@@ -25,6 +25,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     allowedCalls: {},
     deniedProbes: {},
     lifecycleEvents: [],
+    manualCloseDecision: false,
+  };
+
+  const waitFor = async (predicate, timeoutMs = 1200) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const value = predicate();
+      if (value) return value;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error(`timed out after ${timeoutMs}ms`);
   };
 
   window.__AXION_GUI_SMOKE__ = async () => {
@@ -45,6 +56,62 @@ window.addEventListener('DOMContentLoaded', async () => {
       } else {
         addCheck('window.info', 'skip', 'not allowed for this window');
       }
+
+      const closeCommandsAvailable =
+        bridge.commands.includes('window.close') &&
+        bridge.commands.includes('window.prevent_close') &&
+        bridge.hostEvents.includes('window.close_requested');
+      if (closeCommandsAvailable) {
+        if (preventCloseCheckbox) preventCloseCheckbox.checked = true;
+        results.manualCloseDecision = true;
+        const closeRequest = await bridge.invoke('window.close', null);
+        addCheck(
+          'window.close.pending',
+          closeRequest?.pending === true && typeof closeRequest?.requestId === 'string'
+            ? 'pass'
+            : 'fail',
+          formatPretty(closeRequest),
+        );
+
+        const closeEvent = await waitFor(() =>
+          results.lifecycleEvents.find(
+            (event) =>
+              event.name === 'window.close_requested' &&
+              event.payload?.requestId === closeRequest?.requestId,
+          ),
+        );
+        addCheck(
+          'window.close_requested.event',
+          closeEvent?.payload?.timeoutMs === 3000 ? 'pass' : 'fail',
+          formatPretty(closeEvent?.payload),
+        );
+
+        const prevented = await bridge.invoke('window.prevent_close', {
+          requestId: closeRequest.requestId,
+        });
+        results.allowedCalls.lastCloseDecision = prevented;
+        addCheck(
+          'window.prevent_close',
+          prevented?.prevented === true ? 'pass' : 'fail',
+          formatPretty(prevented),
+        );
+        results.manualCloseDecision = false;
+
+        try {
+          await bridge.invoke('window.prevent_close', {
+            requestId: closeRequest.requestId,
+          });
+          addCheck('window.prevent_close.duplicate', 'fail', 'duplicate request was accepted');
+        } catch (error) {
+          addCheck(
+            'window.prevent_close.duplicate',
+            'pass',
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      } else {
+        addCheck('window.close.lifecycle', 'skip', 'close lifecycle commands not available');
+      }
     } catch (error) {
       addCheck('bridge.invoke', 'fail', error instanceof Error ? error.message : String(error));
     }
@@ -56,6 +123,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       app_name: bridge.appName,
       diagnostics: {
         smoke_checks: checks,
+        lifecycle_events: results.lifecycleEvents,
         bridge: typeof diagnostics?.describeBridge === 'function' ? diagnostics.describeBridge() : null,
       },
     };
@@ -83,7 +151,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       if (name === 'window.close_requested' && payload?.requestId) {
         const shouldPrevent = preventCloseCheckbox?.checked === true;
         const command = shouldPrevent ? 'window.prevent_close' : 'window.confirm_close';
-        if (bridge.commands.includes(command)) {
+        if (!results.manualCloseDecision && bridge.commands.includes(command)) {
           results.allowedCalls.lastCloseDecision = await bridge.invoke(command, {
             requestId: payload.requestId,
           });
