@@ -97,7 +97,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.21", release: "v0.1.21.0", framework: "axion" }
+// { version: "0.1.22", release: "v0.1.22.0", framework: "axion" }
 ```
 
 ### `app.echo`

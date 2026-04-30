@@ -10,6 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use axion_core::{App, AppConfig, Builder, RunMode};
+use axion_runtime::json_string_literal;
 
 use crate::cli::DevArgs;
 use crate::error::AxionCliError;
@@ -23,6 +24,7 @@ pub fn run(args: DevArgs) -> Result<(), AxionCliError> {
     let config = axion_manifest::load_app_config_from_path(&args.manifest_path)?;
     let app = Builder::new().apply_config(config).build()?;
     let frontend_command = frontend_command_plan(&args, app.config(), &args.manifest_path)?;
+    let dev_events = DevEventOutput::new(&args)?;
     let mut frontend_process = None;
     let mut frontend_command_lines = Vec::new();
     let mut frontend_wait_result = None;
@@ -73,21 +75,38 @@ pub fn run(args: DevArgs) -> Result<(), AxionCliError> {
 
     if args.launch {
         let launch_mode = launch_mode?;
-        println!("launch_summary:");
-        for line in launch_summary_lines(
-            &app,
-            &dev_server_status,
-            &packaged_fallback_status,
-            launch_mode,
-        ) {
-            println!("{line}");
-        }
+        let mut launch_count = 1usize;
+        loop {
+            println!("launch_summary:");
+            for line in launch_summary_lines(
+                &app,
+                &dev_server_status,
+                &packaged_fallback_status,
+                launch_mode,
+            ) {
+                println!("{line}");
+            }
 
-        let launch_request = axion_runtime::launch_request(&app, launch_mode)?;
-        let reload_targets = reload_targets_from_launch_request(&launch_request);
-        let watch_guard = DevWatchGuard::spawn(&args, app.config(), reload_targets)?;
-        axion_runtime::run_launch_request(launch_request)?;
-        drop(watch_guard);
+            let launch_request = axion_runtime::launch_request(&app, launch_mode)?;
+            let reload_targets = reload_targets_from_launch_request(&launch_request);
+            let watch_guard =
+                DevWatchGuard::spawn(&args, app.config(), reload_targets, dev_events.clone())?;
+            axion_runtime::run_launch_request(launch_request)?;
+            let restart_requested = watch_guard
+                .as_ref()
+                .is_some_and(DevWatchGuard::restart_requested);
+            drop(watch_guard);
+            if args.restart_on_change && restart_requested {
+                launch_count = launch_count.saturating_add(1);
+                println!("restart_applied: launch={launch_count}; reason=frontend assets changed");
+                dev_events.emit(&DevEvent::RestartApplied {
+                    launch: launch_count,
+                    reason: "frontend assets changed".to_owned(),
+                });
+                continue;
+            }
+            break;
+        }
         drop(frontend_process);
         return Ok(());
     }
@@ -101,7 +120,7 @@ pub fn run(args: DevArgs) -> Result<(), AxionCliError> {
     println!("runtime_plan:");
     println!("{plan}");
 
-    run_foreground_watch_if_requested(&args, app.config())?;
+    run_foreground_watch_if_requested(&args, app.config(), dev_events)?;
 
     drop(frontend_process);
     Ok(())
@@ -538,7 +557,53 @@ struct WatchChange {
 
 struct DevWatchGuard {
     stop: Arc<AtomicBool>,
+    restart_requested: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+struct DevEventOutput {
+    json_stdout: bool,
+    log: Option<Arc<Mutex<fs::File>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DevEvent {
+    WatchChange {
+        kind: WatchChangeKind,
+        path: PathBuf,
+    },
+    WatchError {
+        message: String,
+    },
+    ReloadRequested {
+        reason: String,
+    },
+    ReloadApplied {
+        window_id: String,
+    },
+    ReloadDeferred {
+        window_id: Option<String>,
+        reason: String,
+    },
+    RestartRequired {
+        window_id: String,
+        reason: String,
+    },
+    RestartRequested {
+        reason: String,
+    },
+    RestartExitRequested {
+        window_count: usize,
+        request_count: usize,
+    },
+    RestartDeferred {
+        reason: String,
+    },
+    RestartApplied {
+        launch: usize,
+        reason: String,
+    },
 }
 
 #[derive(Clone)]
@@ -562,11 +627,131 @@ enum ReloadOutcome {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RestartOutcome {
+    Requested {
+        window_count: usize,
+        request_count: usize,
+    },
+    Deferred {
+        reason: String,
+    },
+}
+
+impl DevEventOutput {
+    fn new(args: &DevArgs) -> Result<Self, AxionCliError> {
+        let log = if let Some(path) = &args.event_log {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    fs::create_dir_all(parent)?;
+                }
+            }
+            Some(Arc::new(Mutex::new(fs::File::create(path)?)))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            json_stdout: args.json_events,
+            log,
+        })
+    }
+
+    fn emit(&self, event: &DevEvent) {
+        let json = event.to_json();
+        if self.json_stdout {
+            println!("{json}");
+        }
+        if let Some(log) = &self.log {
+            if let Ok(mut file) = log.lock() {
+                let _ = writeln!(file, "{json}");
+            }
+        }
+    }
+
+    fn emit_many(&self, events: &[DevEvent]) {
+        for event in events {
+            self.emit(event);
+        }
+    }
+}
+
+impl DevEvent {
+    fn event_name(&self) -> &'static str {
+        match self {
+            Self::WatchChange { .. } => "watch_change",
+            Self::WatchError { .. } => "watch_error",
+            Self::ReloadRequested { .. } => "reload_requested",
+            Self::ReloadApplied { .. } => "reload_applied",
+            Self::ReloadDeferred { .. } => "reload_deferred",
+            Self::RestartRequired { .. } => "restart_required",
+            Self::RestartRequested { .. } => "restart_requested",
+            Self::RestartExitRequested { .. } => "restart_exit_requested",
+            Self::RestartDeferred { .. } => "restart_deferred",
+            Self::RestartApplied { .. } => "restart_applied",
+        }
+    }
+
+    fn to_json(&self) -> String {
+        let fields = match self {
+            Self::WatchChange { kind, path } => format!(
+                ",\"kind\":{},\"path\":{}",
+                json_string_literal(watch_change_kind_label(kind)),
+                json_string_literal(&path.display().to_string())
+            ),
+            Self::WatchError { message } => {
+                format!(",\"message\":{}", json_string_literal(message))
+            }
+            Self::ReloadRequested { reason } | Self::RestartRequested { reason } => {
+                format!(",\"reason\":{}", json_string_literal(reason))
+            }
+            Self::ReloadApplied { window_id } => {
+                format!(",\"windowId\":{}", json_string_literal(window_id))
+            }
+            Self::ReloadDeferred { window_id, reason } => format!(
+                ",\"windowId\":{},\"reason\":{}",
+                optional_json_string_literal(window_id.as_deref()),
+                json_string_literal(reason)
+            ),
+            Self::RestartRequired { window_id, reason } => format!(
+                ",\"windowId\":{},\"reason\":{}",
+                json_string_literal(window_id),
+                json_string_literal(reason)
+            ),
+            Self::RestartExitRequested {
+                window_count,
+                request_count,
+            } => format!(",\"windowCount\":{window_count},\"requestCount\":{request_count}"),
+            Self::RestartDeferred { reason } => {
+                format!(",\"reason\":{}", json_string_literal(reason))
+            }
+            Self::RestartApplied { launch, reason } => {
+                format!(
+                    ",\"launch\":{launch},\"reason\":{}",
+                    json_string_literal(reason)
+                )
+            }
+        };
+        format!(
+            "{{\"schema\":\"axion.dev-event.v1\",\"event\":{}{}}}",
+            json_string_literal(self.event_name()),
+            fields
+        )
+    }
+}
+
+fn optional_json_string_literal(value: Option<&str>) -> String {
+    value
+        .map(json_string_literal)
+        .unwrap_or_else(|| "null".to_owned())
+}
+
 impl DevWatchGuard {
     fn spawn(
         args: &DevArgs,
         config: &AppConfig,
         reload_targets: Vec<ReloadTarget>,
+        event_output: DevEventOutput,
     ) -> Result<Option<Self>, AxionCliError> {
         if !args.watch {
             return Ok(None);
@@ -575,6 +760,7 @@ impl DevWatchGuard {
         let root = config.build.frontend_dist.clone();
         let mut snapshot = scan_watch_root(&root)?;
         let reload = args.reload;
+        let restart_on_change = args.restart_on_change;
         println!(
             "watch: watching {} (poll={}ms, debounce={}ms, files={})",
             root.display(),
@@ -585,7 +771,9 @@ impl DevWatchGuard {
         println!("{}", reload_mode_line(reload));
 
         let stop = Arc::new(AtomicBool::new(false));
+        let restart_requested = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
+        let thread_restart_requested = Arc::clone(&restart_requested);
         let handle = thread::spawn(move || {
             while !thread_stop.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS));
@@ -606,14 +794,35 @@ impl DevWatchGuard {
                             } else {
                                 Vec::new()
                             };
-                            for line in watch_change_lines(&changes, reload, &reload_outcomes) {
+                            let restart_outcome = (restart_on_change
+                                && should_restart_after_change(reload, &reload_outcomes))
+                            .then(|| request_restart(&reload_targets));
+                            for line in watch_change_lines(
+                                &changes,
+                                reload,
+                                &reload_outcomes,
+                                restart_outcome.as_ref(),
+                            ) {
                                 println!("{line}");
+                            }
+                            event_output.emit_many(&watch_change_events(
+                                &changes,
+                                reload,
+                                &reload_outcomes,
+                                restart_outcome.as_ref(),
+                            ));
+                            if matches!(restart_outcome, Some(RestartOutcome::Requested { .. })) {
+                                thread_restart_requested.store(true, Ordering::Relaxed);
+                                break;
                             }
                         }
                         snapshot = debounced_snapshot;
                     }
                     Err(error) => {
                         println!("watch_error: {error}");
+                        event_output.emit(&DevEvent::WatchError {
+                            message: error.to_string(),
+                        });
                     }
                 }
             }
@@ -621,8 +830,13 @@ impl DevWatchGuard {
 
         Ok(Some(Self {
             stop,
+            restart_requested,
             handle: Some(handle),
         }))
+    }
+
+    fn restart_requested(&self) -> bool {
+        self.restart_requested.load(Ordering::Relaxed)
     }
 }
 
@@ -660,11 +874,46 @@ fn apply_reload_target(target: &ReloadTarget) -> ReloadOutcome {
     }
 }
 
+fn request_restart(reload_targets: &[ReloadTarget]) -> RestartOutcome {
+    let Some(target) = reload_targets.first() else {
+        return RestartOutcome::Deferred {
+            reason: "no live window control targets are available; launch the app with --launch to restart on changes".to_owned(),
+        };
+    };
+
+    match target
+        .window_control
+        .execute(None, axion_runtime::WindowControlRequest::ExitApp)
+    {
+        Ok(axion_runtime::WindowControlResponse::AppExit {
+            window_count,
+            request_count,
+            ..
+        }) => RestartOutcome::Requested {
+            window_count,
+            request_count,
+        },
+        Ok(_) => RestartOutcome::Deferred {
+            reason: "window control backend returned an unexpected restart response".to_owned(),
+        },
+        Err(error) => RestartOutcome::Deferred { reason: error },
+    }
+}
+
+fn should_restart_after_change(reload: bool, reload_outcomes: &[ReloadOutcome]) -> bool {
+    !reload
+        || reload_outcomes.is_empty()
+        || reload_outcomes
+            .iter()
+            .any(|outcome| !matches!(outcome, ReloadOutcome::Applied { .. }))
+}
+
 fn run_foreground_watch_if_requested(
     args: &DevArgs,
     config: &AppConfig,
+    event_output: DevEventOutput,
 ) -> Result<(), AxionCliError> {
-    let Some(_watch_guard) = DevWatchGuard::spawn(args, config, Vec::new())? else {
+    let Some(_watch_guard) = DevWatchGuard::spawn(args, config, Vec::new(), event_output)? else {
         return Ok(());
     };
 
@@ -792,6 +1041,7 @@ fn watch_change_lines(
     changes: &[WatchChange],
     reload: bool,
     reload_outcomes: &[ReloadOutcome],
+    restart_outcome: Option<&RestartOutcome>,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     for change in changes {
@@ -814,7 +1064,77 @@ fn watch_change_lines(
             }
         }
     }
+    if let Some(restart_outcome) = restart_outcome {
+        lines.push("restart_requested: frontend assets changed.".to_owned());
+        lines.push(restart_outcome_line(restart_outcome));
+    }
     lines
+}
+
+fn watch_change_events(
+    changes: &[WatchChange],
+    reload: bool,
+    reload_outcomes: &[ReloadOutcome],
+    restart_outcome: Option<&RestartOutcome>,
+) -> Vec<DevEvent> {
+    let mut events = changes
+        .iter()
+        .map(|change| DevEvent::WatchChange {
+            kind: change.kind.clone(),
+            path: change.path.clone(),
+        })
+        .collect::<Vec<_>>();
+    if reload {
+        events.push(DevEvent::ReloadRequested {
+            reason: "frontend assets changed".to_owned(),
+        });
+        if reload_outcomes.is_empty() {
+            events.push(DevEvent::ReloadDeferred {
+                window_id: None,
+                reason: "no live window control targets are available; launch the app with --launch to apply reloads".to_owned(),
+            });
+        } else {
+            events.extend(reload_outcomes.iter().map(reload_outcome_event));
+        }
+    }
+    if let Some(restart_outcome) = restart_outcome {
+        events.push(DevEvent::RestartRequested {
+            reason: "frontend assets changed".to_owned(),
+        });
+        events.push(restart_outcome_event(restart_outcome));
+    }
+    events
+}
+
+fn reload_outcome_event(outcome: &ReloadOutcome) -> DevEvent {
+    match outcome {
+        ReloadOutcome::Applied { window_id } => DevEvent::ReloadApplied {
+            window_id: window_id.clone(),
+        },
+        ReloadOutcome::Deferred { window_id, reason } => DevEvent::ReloadDeferred {
+            window_id: window_id.clone(),
+            reason: reason.clone(),
+        },
+        ReloadOutcome::RestartRequired { window_id, reason } => DevEvent::RestartRequired {
+            window_id: window_id.clone(),
+            reason: reason.clone(),
+        },
+    }
+}
+
+fn restart_outcome_event(outcome: &RestartOutcome) -> DevEvent {
+    match outcome {
+        RestartOutcome::Requested {
+            window_count,
+            request_count,
+        } => DevEvent::RestartExitRequested {
+            window_count: *window_count,
+            request_count: *request_count,
+        },
+        RestartOutcome::Deferred { reason } => DevEvent::RestartDeferred {
+            reason: reason.clone(),
+        },
+    }
 }
 
 fn reload_outcome_line(outcome: &ReloadOutcome) -> String {
@@ -829,6 +1149,20 @@ fn reload_outcome_line(outcome: &ReloadOutcome) -> String {
         ReloadOutcome::RestartRequired { window_id, reason } => {
             format!("restart_required: window={window_id}; reason={reason}")
         }
+    }
+}
+
+fn restart_outcome_line(outcome: &RestartOutcome) -> String {
+    match outcome {
+        RestartOutcome::Requested {
+            window_count,
+            request_count,
+        } => {
+            format!(
+                "restart_exit_requested: windows={window_count}; close_requests={request_count}"
+            )
+        }
+        RestartOutcome::Deferred { reason } => format!("restart_deferred: {reason}."),
     }
 }
 
@@ -1013,6 +1347,28 @@ fn dev_option_lines(args: &DevArgs) -> Vec<String> {
             );
         }
     }
+    if args.restart_on_change {
+        if args.watch {
+            lines.push(
+                "restart_on_change: enabled; app restart is requested after watched file changes."
+                    .to_owned(),
+            );
+        } else {
+            lines.push(
+                "restart_on_change: requested without --watch; no file changes will be observed."
+                    .to_owned(),
+            );
+        }
+    }
+    if args.json_events {
+        lines.push("json_events: enabled; dev events are printed as JSON lines.".to_owned());
+    }
+    if let Some(path) = &args.event_log {
+        lines.push(format!(
+            "event_log: enabled; writing JSON lines to {}",
+            path.display()
+        ));
+    }
     if args.open_devtools {
         lines.push(
             "devtools: requested but unsupported by the current Servo backend; continuing without opening devtools.".to_owned(),
@@ -1101,6 +1457,9 @@ mod tests {
             fallback_packaged: false,
             watch: false,
             reload: false,
+            restart_on_change: false,
+            json_events: false,
+            event_log: None,
             open_devtools: false,
             frontend_command: None,
             frontend_cwd: None,
@@ -1313,6 +1672,9 @@ mod tests {
         let lines = dev_option_lines(&DevArgs {
             watch: true,
             reload: true,
+            restart_on_change: true,
+            json_events: true,
+            event_log: Some("target/dev-events.jsonl".into()),
             open_devtools: true,
             ..dev_args()
         });
@@ -1330,6 +1692,19 @@ mod tests {
         assert!(
             lines
                 .iter()
+                .any(|line| line.starts_with("restart_on_change: enabled"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "json_events: enabled; dev events are printed as JSON lines.")
+        );
+        assert!(lines.iter().any(
+            |line| line == "event_log: enabled; writing JSON lines to target/dev-events.jsonl"
+        ));
+        assert!(
+            lines
+                .iter()
                 .any(|line| line.starts_with("devtools: requested"))
         );
     }
@@ -1338,6 +1713,7 @@ mod tests {
     fn dev_option_lines_report_reload_without_watch() {
         let lines = dev_option_lines(&DevArgs {
             reload: true,
+            restart_on_change: true,
             ..dev_args()
         });
 
@@ -1345,6 +1721,8 @@ mod tests {
             lines.iter().any(|line| line
                 == "reload: requested without --watch; no file changes will be observed.")
         );
+        assert!(lines.iter().any(|line| line
+            == "restart_on_change: requested without --watch; no file changes will be observed."));
     }
 
     #[test]
@@ -1361,7 +1739,7 @@ mod tests {
         fs::remove_file(root.join("nested").join("app.js")).unwrap();
         let second = scan_watch_root(&root).unwrap();
         let changes = watch_changes(&first, &second);
-        let lines = watch_change_lines(&changes, true, &[]);
+        let lines = watch_change_lines(&changes, true, &[], None);
 
         assert!(
             lines
@@ -1412,6 +1790,7 @@ mod tests {
                     reason: "window control backend is unavailable".to_owned(),
                 },
             ],
+            None,
         );
 
         assert!(
@@ -1427,6 +1806,140 @@ mod tests {
         assert!(lines.iter().any(|line| {
             line == "restart_required: window=tools; reason=window control backend is unavailable"
         }));
+    }
+
+    #[test]
+    fn watch_change_lines_report_restart_on_change_outcomes() {
+        let changes = vec![super::WatchChange {
+            path: "app.js".into(),
+            kind: super::WatchChangeKind::Modified,
+        }];
+        let lines = watch_change_lines(
+            &changes,
+            false,
+            &[],
+            Some(&super::RestartOutcome::Requested {
+                window_count: 2,
+                request_count: 2,
+            }),
+        );
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "restart_requested: frontend assets changed.")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "restart_exit_requested: windows=2; close_requests=2")
+        );
+
+        let deferred = watch_change_lines(
+            &changes,
+            false,
+            &[],
+            Some(&super::RestartOutcome::Deferred {
+                reason: "no live target".to_owned(),
+            }),
+        );
+        assert!(
+            deferred
+                .iter()
+                .any(|line| line == "restart_deferred: no live target.")
+        );
+    }
+
+    #[test]
+    fn watch_change_events_serialize_stable_json() {
+        let changes = vec![super::WatchChange {
+            path: "app.js".into(),
+            kind: super::WatchChangeKind::Modified,
+        }];
+        let events = super::watch_change_events(
+            &changes,
+            true,
+            &[
+                ReloadOutcome::Applied {
+                    window_id: "main".to_owned(),
+                },
+                ReloadOutcome::RestartRequired {
+                    window_id: "settings".to_owned(),
+                    reason: "window control backend is unavailable".to_owned(),
+                },
+            ],
+            Some(&super::RestartOutcome::Requested {
+                window_count: 2,
+                request_count: 2,
+            }),
+        );
+        let json = events
+            .iter()
+            .map(super::DevEvent::to_json)
+            .collect::<Vec<_>>();
+
+        assert!(json[0].contains("\"schema\":\"axion.dev-event.v1\""));
+        assert!(json[0].contains("\"event\":\"watch_change\""));
+        assert!(json[0].contains("\"kind\":\"modified\""));
+        assert!(json[0].contains("\"path\":\"app.js\""));
+        assert!(
+            json.iter()
+                .any(|line| line.contains("\"event\":\"reload_applied\""))
+        );
+        assert!(
+            json.iter()
+                .any(|line| line.contains("\"event\":\"restart_required\""))
+        );
+        assert!(
+            json.iter()
+                .any(|line| line.contains("\"event\":\"restart_exit_requested\""))
+        );
+    }
+
+    #[test]
+    fn dev_event_output_writes_json_lines_report() {
+        let root = temp_dir();
+        let log_path = root.join("dev-events.jsonl");
+        let output = super::DevEventOutput::new(&DevArgs {
+            event_log: Some(log_path.clone()),
+            ..dev_args()
+        })
+        .expect("event output should create log");
+
+        output.emit(&super::DevEvent::RestartApplied {
+            launch: 2,
+            reason: "frontend assets changed".to_owned(),
+        });
+        drop(output);
+
+        let body = fs::read_to_string(log_path).expect("event log should be readable");
+        assert!(body.contains("\"schema\":\"axion.dev-event.v1\""));
+        assert!(body.contains("\"event\":\"restart_applied\""));
+        assert!(body.contains("\"launch\":2"));
+    }
+
+    #[test]
+    fn restart_on_change_is_only_required_when_reload_cannot_cover_change() {
+        assert!(super::should_restart_after_change(false, &[]));
+        assert!(super::should_restart_after_change(true, &[]));
+        assert!(!super::should_restart_after_change(
+            true,
+            &[ReloadOutcome::Applied {
+                window_id: "main".to_owned(),
+            }]
+        ));
+        assert!(super::should_restart_after_change(
+            true,
+            &[
+                ReloadOutcome::Applied {
+                    window_id: "main".to_owned(),
+                },
+                ReloadOutcome::RestartRequired {
+                    window_id: "settings".to_owned(),
+                    reason: "window control backend is unavailable".to_owned(),
+                },
+            ]
+        ));
     }
 
     #[test]

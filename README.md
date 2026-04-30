@@ -2,13 +2,13 @@
 
 Axion is a Rust desktop application framework built on a vendored Servo engine. It provides an explicit manifest, capability-gated JavaScript bridge, packaged app assets, runtime diagnostics, and a `winit` desktop backend.
 
-Axion is currently at the **v0.1.21.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
+Axion is currently at the **v0.1.22.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
 
 ## What Works Today
 
 - Generate a guided Axion application with `axion-cli new --template vanilla`, optionally using `--run-check` for immediate validation.
 - Run the lightweight application validation loop with `axion-cli check`, including `--json` output for CI.
-- Inspect development-server readiness, run external frontend commands, watch frontend files with debounce/ignore rules, reload live windows when launched, and use packaged fallback through `axion-cli dev`.
+- Inspect development-server readiness, run external frontend commands, watch frontend files with debounce/ignore rules, reload live windows when launched, restart on changes when reload is unavailable, and export JSONL dev events through `axion-cli dev`.
 - Reuse bridge-provided text-input compatibility helpers in generated apps and custom frontends.
 - Load and validate `axion.toml` manifests.
 - Install crash reporting in generated and example applications.
@@ -37,13 +37,13 @@ cargo run -p multi-window -- --plan
 cargo run -p file-access-demo -- --plan
 cargo run -p bridge-diagnostics-demo -- --plan
 cargo run -p axion-cli -- dev --manifest-path examples/hello-axion/axion.toml
-cargo run -p axion-cli --features servo-runtime -- dev --manifest-path examples/hello-axion/axion.toml --launch --fallback-packaged --watch --reload
+cargo run -p axion-cli --features servo-runtime -- dev --manifest-path examples/hello-axion/axion.toml --launch --fallback-packaged --watch --reload --restart-on-change --event-log target/axion/reports/hello-dev-events.jsonl
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/file-access-demo/axion.toml
 AXION_SELFTEST_BRIDGE=1 cargo run -p hello-axion --features servo-runtime
 ```
 
-While the `axion-cli dev --launch --watch --reload` command is running, edit `examples/hello-axion/frontend/app.js` or `style.css`. The CLI should print `reload_requested` followed by `reload_applied: window=main`.
+While the `axion-cli dev --launch --watch --reload --restart-on-change` command is running, edit `examples/hello-axion/frontend/app.js` or `style.css`. The CLI should print `reload_requested` followed by `reload_applied: window=main`; if a backend cannot reload a live window, it prints restart diagnostics and relaunches after the current windows close. Add `--json-events` or `--event-log <path>` when automation needs stable `axion.dev-event.v1` JSONL events.
 
 Generate a new application:
 
@@ -120,4 +120,4 @@ Servo warnings from the vendored `servo/` subtree are not Axion release blockers
 
 ## Versioning
 
-Axion public releases use four-part tags such as `v0.1.21.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.21`. See `docs/versioning.md`.
+Axion public releases use four-part tags such as `v0.1.22.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.22`. See `docs/versioning.md`.

@@ -40,6 +40,15 @@ pub struct DevArgs {
     pub reload: bool,
 
     #[arg(long, default_value_t = false)]
+    pub restart_on_change: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub json_events: bool,
+
+    #[arg(long)]
+    pub event_log: Option<PathBuf>,
+
+    #[arg(long, default_value_t = false)]
     pub open_devtools: bool,
 
     #[arg(long)]

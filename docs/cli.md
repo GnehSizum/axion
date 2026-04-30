@@ -82,6 +82,9 @@ Watch and reload preview:
 
 - `--watch`: polls `[build].frontend_dist` for created, modified, and deleted files. It ignores common temporary files and cache directories, then debounces editor save bursts before printing diagnostics. With `--launch`, polling runs while the app window is open. Without `--launch`, the command prints the runtime plan and keeps watching until interrupted.
 - `--reload`: when combined with `--watch`, prints `reload_requested` when watched files change. With `--launch`, Axion asks each live window to reload and prints `reload_applied`, `reload_deferred`, or `restart_required` per window. Without `--launch`, no live window target exists, so reload remains diagnostic-only.
+- `--restart-on-change`: when combined with `--watch --launch`, requests application exit and relaunches after watched files change. With `--reload`, restart is used as a fallback only when live reload is unavailable or incomplete.
+- `--json-events`: prints stable `axion.dev-event.v1` JSON lines for watch, reload, and restart events in addition to the human-readable diagnostics.
+- `--event-log <path>`: writes the same JSON lines to a file for scripts and CI artifacts.
 - `--open-devtools`: accepted as an explicit reserved option and reports that the current Servo backend does not open devtools.
 
 Example:
@@ -92,10 +95,12 @@ cargo run -p axion-cli --features servo-runtime -- dev \
   --launch \
   --fallback-packaged \
   --watch \
-  --reload
+  --reload \
+  --restart-on-change \
+  --event-log target/axion/reports/hello-dev-events.jsonl
 ```
 
-After the window opens, edit a file under `examples/hello-axion/frontend/`. A successful live reload prints `reload_requested` and `reload_applied: window=main`. Multi-window apps print one reload result per live window.
+After the window opens, edit a file under `examples/hello-axion/frontend/`. A successful live reload prints `reload_requested` and `reload_applied: window=main`. Multi-window apps print one reload result per live window. If any target reports `restart_required`, `--restart-on-change` prints `restart_requested`, `restart_exit_requested`, and then `restart_applied` after the current windows close and the app is relaunched. The event log records the same flow as JSONL with schema `axion.dev-event.v1`.
 
 ## `doctor`
 

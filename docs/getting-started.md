@@ -82,9 +82,9 @@ cargo run -p axion-cli --features servo-runtime -- dev \
   --fallback-packaged
 ```
 
-The preview flags `--watch` and `--reload` are available for frontend development. `--watch` polls `[build].frontend_dist`, ignores common temporary files and cache directories, debounces editor save bursts, and reports created, modified, and deleted files. `--reload` reports `reload_requested`; with `--launch`, Axion asks each live window to reload and prints `reload_applied`, `reload_deferred`, or `restart_required`. Without `--launch`, reload remains diagnostic-only because there is no live window target. `--open-devtools` is accepted for diagnostics, but the current Servo backend does not open devtools yet.
+The preview flags `--watch`, `--reload`, and `--restart-on-change` are available for frontend development. `--watch` polls `[build].frontend_dist`, ignores common temporary files and cache directories, debounces editor save bursts, and reports created, modified, and deleted files. `--reload` reports `reload_requested`; with `--launch`, Axion asks each live window to reload and prints `reload_applied`, `reload_deferred`, or `restart_required`. `--restart-on-change` relaunches after watched changes when live reload is not requested or cannot cover every window. `--json-events` prints stable `axion.dev-event.v1` JSONL events, and `--event-log <path>` writes those events for automation. Without `--launch`, reload and restart remain diagnostic-only because there is no live window target. `--open-devtools` is accepted for diagnostics, but the current Servo backend does not open devtools yet.
 
-To test live reload, launch with `--features servo-runtime --launch --fallback-packaged --watch --reload`, then edit a file in the app's `frontend/` directory. `hello-axion` should report `reload_applied: window=main`; `multi-window` reports one reload result for each live window.
+To test live reload and restart fallback, launch with `--features servo-runtime --launch --fallback-packaged --watch --reload --restart-on-change`, then edit a file in the app's `frontend/` directory. `hello-axion` should report `reload_applied: window=main`; if reload is unavailable, Axion reports restart diagnostics and relaunches after the current windows close.
 
 To let Axion start a simple local frontend server, run:
 

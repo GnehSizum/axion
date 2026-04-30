@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.1.22.0 - Preview
+
+Axion v0.1.22.0 strengthens the frontend development loop on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.22`.
+- Axion public release metadata is `v0.1.22.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion dev --restart-on-change` for watched frontend changes that should relaunch the app.
+- Added restart fallback behavior when `--watch --reload --restart-on-change` cannot apply live reload to all windows.
+- Added restart diagnostics: `restart_requested`, `restart_exit_requested`, `restart_deferred`, and `restart_applied`.
+- Added `axion dev --json-events` and `--event-log <path>` for stable `axion.dev-event.v1` JSONL watch/reload/restart events.
+- Added unit coverage for restart-on-change option reporting, restart fallback selection, event-log writing, and restart diagnostic output.
+
+### Changed
+
+- `axion dev --launch` can now relaunch the app in the same CLI session after a restart request closes the current windows.
+- Updated development-loop docs and release metadata for v0.1.22.0.
+
 ## v0.1.21.0 - Preview
 
 Axion v0.1.21.0 stabilizes lifecycle GUI smoke coverage on the current Servo `0.1` baseline.

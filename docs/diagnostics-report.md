@@ -70,6 +70,24 @@ Release reports include:
 
 The release report artifact itself records only path and existence because report size or fingerprint would be self-referential. Other file artifacts include byte counts and `fnv1a64` when they exist and can be read.
 
+## Dev Event Stream
+
+`axion.dev-event.v1` is the JSONL schema used by `axion dev --json-events` and `axion dev --event-log <path>`. It is intended for local automation, editor integrations, and CI artifacts that need stable watch/reload/restart events without parsing human-readable output.
+
+Each line includes:
+
+- `schema`: always `axion.dev-event.v1`.
+- `event`: stable event name.
+- event-specific fields such as `path`, `kind`, `windowId`, `reason`, `windowCount`, `requestCount`, or `launch`.
+
+Stable event names are `watch_change`, `watch_error`, `reload_requested`, `reload_applied`, `reload_deferred`, `restart_required`, `restart_requested`, `restart_exit_requested`, `restart_deferred`, and `restart_applied`.
+
+Example:
+
+```json
+{"schema":"axion.dev-event.v1","event":"reload_applied","windowId":"main"}
+```
+
 ## CI Usage
 
 ```sh
