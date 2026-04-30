@@ -82,9 +82,9 @@ cargo run -p axion-cli --features servo-runtime -- dev \
   --fallback-packaged
 ```
 
-The preview flags `--watch`, `--reload`, and `--restart-on-change` are available for frontend development. `--watch` polls `[build].frontend_dist`, ignores common temporary files and cache directories, debounces editor save bursts, and reports created, modified, and deleted files. `--reload` reports `reload_requested`; with `--launch`, Axion asks each live window to reload and prints `reload_applied`, `reload_deferred`, or `restart_required`. `--restart-on-change` relaunches after watched changes when live reload is not requested or cannot cover every window. `--json-events` prints stable `axion.dev-event.v1` JSONL events, and `--event-log <path>` writes those events for automation. Without `--launch`, reload and restart remain diagnostic-only because there is no live window target. `--open-devtools` is accepted for diagnostics, but the current Servo backend does not open devtools yet.
+The preview flags `--watch`, `--reload`, and `--restart-on-change` are available for frontend development. `--watch` polls `[build].frontend_dist`, ignores common temporary files and cache directories, debounces editor save bursts, and reports created, modified, and deleted files. `--reload` reports `reload_requested`; with `--launch`, Axion asks each live window to reload and prints `reload_applied`, `reload_deferred`, or `restart_required`. `--restart-on-change` relaunches after watched changes when live reload is not requested or cannot cover every window. `--json-events` prints stable `axion.dev-event.v1` JSONL events, `--event-log <path>` writes those events for automation, and `--report-path <path>` writes a stable `axion.dev-report.v1` session summary. Without `--launch`, reload and restart remain diagnostic-only because there is no live window target. `--open-devtools` is accepted for diagnostics, but the current Servo backend does not open devtools yet.
 
-To test live reload and restart fallback, launch with `--features servo-runtime --launch --fallback-packaged --watch --reload --restart-on-change`, then edit a file in the app's `frontend/` directory. `hello-axion` should report `reload_applied: window=main`; if reload is unavailable, Axion reports restart diagnostics and relaunches after the current windows close.
+To test live reload and restart fallback, launch with `--features servo-runtime --launch --fallback-packaged --watch --reload --restart-on-change --event-log target/axion/reports/hello-dev-events.jsonl --report-path target/axion/reports/hello-dev-report.json`, then edit a file in the app's `frontend/` directory. `hello-axion` should report `reload_applied: window=main`; if reload is unavailable, Axion reports restart diagnostics and relaunches after the current windows close.
 
 To let Axion start a simple local frontend server, run:
 
@@ -136,7 +136,7 @@ Generated apps install Axion panic reporting by default. Crash reports are writt
 From the Axion repository root:
 
 ```sh
-cargo run -p axion-cli -- check --manifest-path /tmp/demo-app/axion.toml --bundle
+cargo run -p axion-cli -- check --manifest-path /tmp/demo-app/axion.toml --dev --bundle
 cargo run -p axion-cli -- doctor --manifest-path /tmp/demo-app/axion.toml --deny-warnings --max-risk medium
 cargo run -p axion-cli -- self-test --manifest-path /tmp/demo-app/axion.toml
 cargo run -p axion-cli -- gui-smoke \
@@ -151,7 +151,7 @@ cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml --buil
 cargo run -p axion-cli -- release --manifest-path /tmp/demo-app/axion.toml --json --report-path target/axion/reports/demo-app-release.json --bundle-report-path target/axion/reports/demo-app-bundle.json --archive
 ```
 
-`check` is the fastest default validation loop: it runs the doctor gate, readiness, quiet self-test staging, and optional bundle preflight. Use `check --json` for CI and `doctor` when you need the full diagnostics detail. Continue when development, bundle, and GUI smoke readiness are all `true`; otherwise resolve the printed `readiness.blocker` lines first.
+`check` is the fastest default validation loop: it runs the doctor gate, readiness, quiet self-test staging, and optional dev/bundle preflight. Use `check --dev --bundle --json` for CI and `doctor` when you need the full diagnostics detail. Continue when development, bundle, and GUI smoke readiness are all `true`; otherwise resolve the printed `readiness.blocker` or `dev.blocker` lines first.
 
 `self-test` prints app metadata, native dialog backend, each window's configured commands/events/protocols, runtime command/event counts, host events, navigation origins, and staged asset paths. Add `--json` to print an `axion.diagnostics-report.v1` report, or `--report-path <path>` to write that report while keeping the default text output. Add `--quiet` with `--report-path` in CI when only the exit code and report file are needed.
 

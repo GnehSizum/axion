@@ -85,6 +85,7 @@ Watch and reload preview:
 - `--restart-on-change`: when combined with `--watch --launch`, requests application exit and relaunches after watched files change. With `--reload`, restart is used as a fallback only when live reload is unavailable or incomplete.
 - `--json-events`: prints stable `axion.dev-event.v1` JSON lines for watch, reload, and restart events in addition to the human-readable diagnostics.
 - `--event-log <path>`: writes the same JSON lines to a file for scripts and CI artifacts.
+- `--report-path <path>`: writes a stable `axion.dev-report.v1` JSON session summary with launch mode, dev-server status, fallback status, enabled options, launch/restart counters, next step, failure, and result.
 - `--open-devtools`: accepted as an explicit reserved option and reports that the current Servo backend does not open devtools.
 
 Example:
@@ -97,10 +98,11 @@ cargo run -p axion-cli --features servo-runtime -- dev \
   --watch \
   --reload \
   --restart-on-change \
-  --event-log target/axion/reports/hello-dev-events.jsonl
+  --event-log target/axion/reports/hello-dev-events.jsonl \
+  --report-path target/axion/reports/hello-dev-report.json
 ```
 
-After the window opens, edit a file under `examples/hello-axion/frontend/`. A successful live reload prints `reload_requested` and `reload_applied: window=main`. Multi-window apps print one reload result per live window. If any target reports `restart_required`, `--restart-on-change` prints `restart_requested`, `restart_exit_requested`, and then `restart_applied` after the current windows close and the app is relaunched. The event log records the same flow as JSONL with schema `axion.dev-event.v1`.
+After the window opens, edit a file under `examples/hello-axion/frontend/`. A successful live reload prints `reload_requested` and `reload_applied: window=main`. Multi-window apps print one reload result per live window. If any target reports `restart_required`, `--restart-on-change` prints `restart_requested`, `restart_exit_requested`, and then `restart_applied` after the current windows close and the app is relaunched. The event log records the same flow as JSONL with schema `axion.dev-event.v1`; the report file records the session summary as `axion.dev-report.v1`.
 
 ## `doctor`
 
@@ -141,16 +143,16 @@ cargo run -p axion-cli -- doctor \
 
 ## `check`
 
-Run the recommended lightweight application validation loop. `check` applies the `doctor` security gate, reads release readiness, runs quiet `self-test` staging, and can optionally verify bundle preflight conditions:
+Run the recommended lightweight application validation loop. `check` applies the `doctor` security gate, reads release readiness, runs quiet `self-test` staging, and can optionally verify development-loop and bundle preflight conditions:
 
 ```sh
-cargo run -p axion-cli -- check --manifest-path examples/hello-axion/axion.toml --bundle
-cargo run -p axion-cli -- check --manifest-path examples/hello-axion/axion.toml --bundle --json
+cargo run -p axion-cli -- check --manifest-path examples/hello-axion/axion.toml --dev --bundle
+cargo run -p axion-cli -- check --manifest-path examples/hello-axion/axion.toml --dev --bundle --json
 ```
 
-By default `check` fails on security warnings and requires risk no higher than `medium`. Use `--max-risk low|medium|high` to tune the gate. Pass `--keep-artifacts` to keep the self-test staging directory for inspection. `--bundle` validates that bundle readiness is true and verifies web assets plus the configured icon before you run the heavier `bundle --build-executable` command.
+By default `check` fails on security warnings and requires risk no higher than `medium`. Use `--max-risk low|medium|high` to tune the gate. Pass `--keep-artifacts` to keep the self-test staging directory for inspection. `--dev` validates frontend watch roots, packaged fallback availability, `[dev]` server reachability, frontend command settings, and recommended event/report artifact paths without launching a GUI. `--bundle` validates that bundle readiness is true and verifies web assets plus the configured icon before you run the heavier `bundle --build-executable` command.
 
-Human output ends with `next_step`, which tells you whether to fix blockers, run `gui-smoke`, or proceed to `bundle --build-executable`. JSON output uses `axion.check-report.v1` and includes `doctor`, `readiness`, `self_test`, `bundle_preflight`, `next_step`, and `result`.
+Human output ends with `next_step`, which tells you whether to fix blockers, run `gui-smoke`, or proceed to `bundle --build-executable`. JSON output uses `axion.check-report.v1` and includes `doctor`, `readiness`, `self_test`, `dev_preflight`, `bundle_preflight`, `next_step`, and `result`.
 
 ## `self-test`
 

@@ -4,11 +4,12 @@ Use this checklist before tagging an Axion preview or sharing a generated app.
 
 ## Fast Readiness Check
 
-Run `check` first. It validates the doctor gate, readiness, quiet self-test staging, and optional bundle preflight:
+Run `check` first. It validates the doctor gate, readiness, quiet self-test staging, optional dev preflight, and optional bundle preflight:
 
 ```sh
 cargo run -p axion-cli -- check \
   --manifest-path examples/hello-axion/axion.toml \
+  --dev \
   --bundle
 ```
 
@@ -18,13 +19,14 @@ Expected summary:
 doctor: ok
 readiness: dev=true, bundle=true, gui_smoke=true
 self_test: ok
+dev.preflight: ok
 bundle.preflight: ok
 result: ok
 ```
 
 Use `doctor --deny-warnings --max-risk medium` when you need the full human-readable diagnostics, including per-window security details and `readiness.summary`.
 Use `--json` in CI and read `diagnostics.readiness.ready_for_dev`, `ready_for_bundle`, `ready_for_gui_smoke`, `blockers`, and `warnings`.
-Use `check --json` when CI only needs the aggregate workflow result, `next_step`, and bundle preflight status.
+Use `check --dev --bundle --json` when CI only needs the aggregate workflow result, `next_step`, dev preflight status, and bundle preflight status.
 Use `bundle --json` when CI needs the generated bundle layout, platform metadata, copied icon/executable paths, verification counters, checked paths, and final `result`. Add `--report-path <path>` to upload the bundle report as an artifact.
 Use `release --json` when CI needs the full preview artifact workflow result in `axion.release-report.v1`. The report includes `failure_phase`, `failed_reasons`, an `artifacts[]` inventory, and archive verification details when `--archive` is used.
 
@@ -42,7 +44,7 @@ cargo check -p axion-cli -p hello-axion -p multi-window -p file-access-demo -p b
 Then validate the example app workflow:
 
 ```sh
-cargo run -p axion-cli -- check --manifest-path examples/hello-axion/axion.toml --bundle
+cargo run -p axion-cli -- check --manifest-path examples/hello-axion/axion.toml --dev --bundle
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- gui-smoke --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-gui-smoke.json --timeout-ms 30000 --cargo-target-dir target --serial-build
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --build-executable

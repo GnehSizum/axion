@@ -1,3 +1,4 @@
+use axion_core::{Builder, RunMode};
 use axion_runtime::json_string_literal;
 
 use crate::cli::{CheckArgs, DoctorArgs, SelfTestArgs};
@@ -91,6 +92,10 @@ fn check_report(args: &CheckArgs) -> CheckReport {
         }
     }
 
+    if args.dev {
+        report.dev_preflight = Some(dev_preflight(&args.manifest_path));
+    }
+
     report.finalize();
     report
 }
@@ -119,6 +124,7 @@ struct CheckReport {
     bundle_preflight_checked: bool,
     bundle_preflight_passed: Option<bool>,
     bundle_preflight_error: Option<String>,
+    dev_preflight: Option<DevPreflightReport>,
     next_step: String,
     result: String,
 }
@@ -141,6 +147,7 @@ impl CheckReport {
             bundle_preflight_checked: false,
             bundle_preflight_passed: None,
             bundle_preflight_error: None,
+            dev_preflight: None,
             next_step: String::new(),
             result: "failed".to_owned(),
         }
@@ -148,7 +155,15 @@ impl CheckReport {
 
     fn finalize(&mut self) {
         let bundle_ok = !self.bundle_requested || self.bundle_preflight_passed == Some(true);
-        let passed = self.doctor_passed && self.ready_for_dev && self.self_test_passed && bundle_ok;
+        let dev_ok = self
+            .dev_preflight
+            .as_ref()
+            .is_none_or(DevPreflightReport::passed);
+        let passed = self.doctor_passed
+            && self.ready_for_dev
+            && self.self_test_passed
+            && bundle_ok
+            && dev_ok;
 
         self.result = if passed { "ok" } else { "failed" }.to_owned();
         self.next_step = if !self.doctor_passed {
@@ -159,6 +174,8 @@ impl CheckReport {
             "run axion self-test for full staging diagnostics".to_owned()
         } else if self.bundle_requested && self.bundle_preflight_passed != Some(true) {
             "fix bundle preflight issues before running axion bundle --build-executable".to_owned()
+        } else if !dev_ok {
+            "fix dev preflight blockers before using axion dev --launch".to_owned()
         } else if self.ready_for_gui_smoke {
             "run axion gui-smoke, then axion bundle --build-executable".to_owned()
         } else if self.ready_for_bundle {
@@ -216,16 +233,22 @@ impl CheckReport {
         } else {
             println!("bundle.preflight: skipped (pass --bundle to enable)");
         }
+        if let Some(dev) = &self.dev_preflight {
+            dev.print_human();
+        } else {
+            println!("dev.preflight: skipped (pass --dev to enable)");
+        }
         println!("next_step: {}", self.next_step);
         println!("result: {}", self.result);
     }
 
     fn to_json(&self) -> String {
         format!(
-            "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"max_risk\":{},\"bundle_requested\":{},\"doctor\":{{\"passed\":{},\"failed_reasons\":{}}},\"readiness\":{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}},\"self_test\":{{\"passed\":{},\"error\":{}}},\"bundle_preflight\":{{\"checked\":{},\"passed\":{},\"error\":{}}},\"next_step\":{},\"result\":{}}}",
+            "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"max_risk\":{},\"bundle_requested\":{},\"dev_requested\":{},\"doctor\":{{\"passed\":{},\"failed_reasons\":{}}},\"readiness\":{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}},\"self_test\":{{\"passed\":{},\"error\":{}}},\"bundle_preflight\":{{\"checked\":{},\"passed\":{},\"error\":{}}},\"dev_preflight\":{},\"next_step\":{},\"result\":{}}}",
             json_string_literal(&self.manifest_path),
             json_string_literal(&self.max_risk),
             self.bundle_requested,
+            self.dev_preflight.is_some(),
             self.doctor_passed,
             json_string_array_literal(&self.doctor_failures),
             self.ready_for_dev,
@@ -238,9 +261,223 @@ impl CheckReport {
             self.bundle_preflight_checked,
             optional_json_bool(self.bundle_preflight_passed),
             optional_json_string_literal(self.bundle_preflight_error.as_deref()),
+            self.dev_preflight
+                .as_ref()
+                .map(DevPreflightReport::to_json)
+                .unwrap_or_else(|| "{\"checked\":false}".to_owned()),
             json_string_literal(&self.next_step),
             json_string_literal(&self.result),
         )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DevPreflightReport {
+    manifest_loaded: bool,
+    dev_server_status: String,
+    dev_server_url: Option<String>,
+    frontend_command_configured: bool,
+    frontend_cwd: Option<String>,
+    frontend_timeout_ms: Option<u64>,
+    watch_root: String,
+    packaged_fallback: String,
+    event_log_hint: String,
+    report_path_hint: String,
+    blockers: Vec<String>,
+    recommendations: Vec<String>,
+}
+
+impl DevPreflightReport {
+    fn failed(error: impl Into<String>) -> Self {
+        Self {
+            manifest_loaded: false,
+            dev_server_status: "unknown".to_owned(),
+            dev_server_url: None,
+            frontend_command_configured: false,
+            frontend_cwd: None,
+            frontend_timeout_ms: None,
+            watch_root: "unknown".to_owned(),
+            packaged_fallback: "unknown".to_owned(),
+            event_log_hint: "target/axion/reports/dev-events.jsonl".to_owned(),
+            report_path_hint: "target/axion/reports/dev-report.json".to_owned(),
+            blockers: vec![error.into()],
+            recommendations: Vec::new(),
+        }
+    }
+
+    fn passed(&self) -> bool {
+        self.blockers.is_empty()
+    }
+
+    fn print_human(&self) {
+        println!(
+            "dev.preflight: {}",
+            if self.passed() { "ok" } else { "failed" }
+        );
+        println!("dev.server: {}", self.dev_server_status);
+        if let Some(url) = &self.dev_server_url {
+            println!("dev.server.url: {url}");
+        }
+        println!("dev.watch_root: {}", self.watch_root);
+        println!("dev.packaged_fallback: {}", self.packaged_fallback);
+        println!(
+            "dev.frontend_command: {}",
+            if self.frontend_command_configured {
+                "configured"
+            } else {
+                "not configured"
+            }
+        );
+        if let Some(cwd) = &self.frontend_cwd {
+            println!("dev.frontend_cwd: {cwd}");
+        }
+        if let Some(timeout_ms) = self.frontend_timeout_ms {
+            println!("dev.frontend_timeout_ms: {timeout_ms}");
+        }
+        println!("dev.event_log_hint: {}", self.event_log_hint);
+        println!("dev.report_path_hint: {}", self.report_path_hint);
+        for blocker in &self.blockers {
+            println!("dev.blocker: {blocker}");
+        }
+        for recommendation in &self.recommendations {
+            println!("dev.recommendation: {recommendation}");
+        }
+    }
+
+    fn to_json(&self) -> String {
+        format!(
+            "{{\"checked\":true,\"passed\":{},\"manifest_loaded\":{},\"dev_server\":{{\"status\":{},\"url\":{}}},\"frontend_command\":{{\"configured\":{},\"cwd\":{},\"timeout_ms\":{}}},\"watch_root\":{},\"packaged_fallback\":{},\"event_log_hint\":{},\"report_path_hint\":{},\"blockers\":{},\"recommendations\":{}}}",
+            self.passed(),
+            self.manifest_loaded,
+            json_string_literal(&self.dev_server_status),
+            optional_json_string_literal(self.dev_server_url.as_deref()),
+            self.frontend_command_configured,
+            optional_json_string_literal(self.frontend_cwd.as_deref()),
+            self.frontend_timeout_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_owned()),
+            json_string_literal(&self.watch_root),
+            json_string_literal(&self.packaged_fallback),
+            json_string_literal(&self.event_log_hint),
+            json_string_literal(&self.report_path_hint),
+            json_string_array_literal(&self.blockers),
+            json_string_array_literal(&self.recommendations),
+        )
+    }
+}
+
+fn dev_preflight(manifest_path: &std::path::Path) -> DevPreflightReport {
+    let config = match axion_manifest::load_app_config_from_path(manifest_path) {
+        Ok(config) => config,
+        Err(error) => return DevPreflightReport::failed(error.to_string()),
+    };
+
+    let mut blockers = Vec::new();
+    let mut recommendations = Vec::new();
+
+    let watch_root =
+        match axion_packager::validate_web_assets(&config.build.frontend_dist, &config.build.entry)
+        {
+            Ok(_) => format!("ok ({})", config.build.frontend_dist.display()),
+            Err(error) => {
+                blockers.push(format!(
+                    "frontend assets are not valid for watch/reload: {error}"
+                ));
+                format!("invalid ({})", config.build.frontend_dist.display())
+            }
+        };
+
+    let packaged_fallback = match Builder::new().apply_config(config.clone()).build() {
+        Ok(app) => match axion_runtime::launch_request(&app, RunMode::Production) {
+            Ok(request) => match request.target {
+                axion_runtime::RuntimeLaunchTarget::AppProtocol(target) => {
+                    format!("available ({})", target.initial_url)
+                }
+                axion_runtime::RuntimeLaunchTarget::DevServer(url) => {
+                    let message = format!("production launch unexpectedly resolved to {url}");
+                    blockers.push(message.clone());
+                    format!("invalid ({message})")
+                }
+            },
+            Err(error) => {
+                blockers.push(format!("packaged fallback is unavailable: {error}"));
+                format!("unavailable ({error})")
+            }
+        },
+        Err(error) => {
+            blockers.push(format!("app configuration is invalid: {error}"));
+            format!("unavailable ({error})")
+        }
+    };
+
+    let (dev_server_status, dev_server_url) = match &config.dev {
+        Some(dev_server) if crate::commands::dev::dev_server_is_reachable(&config) => {
+            recommendations.push(
+                "dev server is reachable; use axion dev --launch for live frontend assets"
+                    .to_owned(),
+            );
+            ("reachable".to_owned(), Some(dev_server.url.to_string()))
+        }
+        Some(dev_server) => {
+            recommendations.push(
+                "dev server is not reachable; start it or pass --fallback-packaged".to_owned(),
+            );
+            ("unreachable".to_owned(), Some(dev_server.url.to_string()))
+        }
+        None => {
+            recommendations.push(
+                "no [dev] server is configured; use --fallback-packaged or add [dev] url"
+                    .to_owned(),
+            );
+            ("not configured".to_owned(), None)
+        }
+    };
+
+    let (frontend_command_configured, frontend_cwd, frontend_timeout_ms) = config
+        .dev
+        .as_ref()
+        .map(|dev| {
+            (
+                dev.command
+                    .as_ref()
+                    .is_some_and(|command| !command.trim().is_empty()),
+                dev.cwd.as_ref().map(|cwd| cwd.display().to_string()),
+                dev.timeout_ms,
+            )
+        })
+        .unwrap_or((false, None, None));
+
+    if config.dev.as_ref().is_some_and(|dev| {
+        dev.command
+            .as_ref()
+            .is_some_and(|command| command.trim().is_empty())
+    }) {
+        blockers.push("[dev] command is configured but empty".to_owned());
+    }
+    if let Some(timeout_ms) = frontend_timeout_ms {
+        if timeout_ms < 1000 {
+            recommendations
+                .push("[dev] timeout_ms is very short; consider at least 5000ms".to_owned());
+        }
+    }
+
+    recommendations.push(
+        "archive dev sessions with --event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json".to_owned(),
+    );
+
+    DevPreflightReport {
+        manifest_loaded: true,
+        dev_server_status,
+        dev_server_url,
+        frontend_command_configured,
+        frontend_cwd,
+        frontend_timeout_ms,
+        watch_root,
+        packaged_fallback,
+        event_log_hint: "target/axion/reports/dev-events.jsonl".to_owned(),
+        report_path_hint: "target/axion/reports/dev-report.json".to_owned(),
+        blockers,
+        recommendations,
     }
 }
 
@@ -340,6 +577,7 @@ profiles = ["app-info"]
             manifest_path: write_check_manifest(),
             max_risk: DoctorRisk::Medium,
             bundle: true,
+            dev: false,
             json: false,
             keep_artifacts: false,
         })
@@ -352,6 +590,7 @@ profiles = ["app-info"]
             manifest_path: write_check_manifest(),
             max_risk: DoctorRisk::Medium,
             bundle: true,
+            dev: true,
             json: true,
             keep_artifacts: false,
         });
@@ -359,12 +598,46 @@ profiles = ["app-info"]
 
         assert_eq!(report.result, "ok");
         assert!(json.contains("\"schema\":\"axion.check-report.v1\""));
+        assert!(json.contains("\"dev_requested\":true"));
         assert!(json.contains("\"doctor\":{\"passed\":true"));
         assert!(json.contains("\"ready_for_dev\":true"));
         assert!(json.contains("\"bundle_preflight\":{\"checked\":true,\"passed\":true"));
+        assert!(json.contains("\"dev_preflight\":{\"checked\":true,\"passed\":true"));
+        assert!(json.contains("\"dev_server\":{\"status\":\"not configured\""));
         assert!(json.contains(
             "\"next_step\":\"run axion gui-smoke, then axion bundle --build-executable\""
         ));
         assert!(json.contains("\"result\":\"ok\""));
+    }
+
+    #[test]
+    fn check_dev_preflight_reports_unreachable_dev_server_without_failing() {
+        let manifest = write_check_manifest();
+        let mut body = fs::read_to_string(&manifest).unwrap();
+        body.push_str(
+            r#"
+[dev]
+url = "http://127.0.0.1:9"
+command = "python3 -m http.server 3000"
+timeout_ms = 500
+"#,
+        );
+        fs::write(&manifest, body).unwrap();
+
+        let report = check_report(&CheckArgs {
+            manifest_path: manifest,
+            max_risk: DoctorRisk::Medium,
+            bundle: false,
+            dev: true,
+            json: true,
+            keep_artifacts: false,
+        });
+        let json = report.to_json();
+
+        assert_eq!(report.result, "ok");
+        assert!(json.contains("\"status\":\"unreachable\""));
+        assert!(json.contains("\"frontend_command\":{\"configured\":true"));
+        assert!(json.contains("dev server is not reachable"));
+        assert!(json.contains("timeout_ms is very short"));
     }
 }

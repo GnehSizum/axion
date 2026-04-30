@@ -55,7 +55,7 @@ CLI-generated GUI smoke failure reports use `source = "axion-cli gui-smoke"` and
 
 ## Aggregate CLI Reports
 
-`axion.check-report.v1` summarizes doctor gate status, readiness, quiet self-test, optional bundle preflight, `next_step`, and `result`.
+`axion.check-report.v1` summarizes doctor gate status, readiness, quiet self-test, optional dev preflight, optional bundle preflight, `next_step`, and `result`. When `check --dev` is used, `dev_preflight` includes dev-server status, frontend command settings, watch-root validation, packaged fallback status, recommended event/report artifact paths, blockers, and recommendations.
 
 `axion.bundle-report.v1` summarizes the staged bundle target, layout, generated paths, platform metadata paths, copied icon and executable, verification counters, checked paths, readiness blockers, warnings, optional `report_path`, and `result`. It is intended for release automation that needs bundle-specific output rather than the broader diagnostics report schema.
 
@@ -86,6 +86,28 @@ Example:
 
 ```json
 {"schema":"axion.dev-event.v1","event":"reload_applied","windowId":"main"}
+```
+
+## Dev Session Report
+
+`axion.dev-report.v1` is the JSON schema written by `axion dev --report-path <path>`. It summarizes a single development command invocation for CI artifacts, editor integrations, and local debugging.
+
+Top-level fields include:
+
+- `schema`: always `axion.dev-report.v1`.
+- `manifestPath`, `appName`, `identifier`, `appVersion`: app and manifest context.
+- `launchMode`: `development`, `production`, or `blocked`.
+- `launchError`: launch selection error when startup is blocked.
+- `devServer`: `{ status, url }` with status values such as `reachable`, `unreachable`, `invalid_endpoint`, or `unconfigured`.
+- `packagedFallback`: `{ status, url, reason }`.
+- `options`: the active `dev` flags, including `eventLog` and `reportPath`.
+- `frontendCommand`: command, cwd, wait state, exit status, and stderr summary when configured.
+- `launches`, `restarts`, `nextStep`, `failure`, and `result`.
+
+Example:
+
+```json
+{"schema":"axion.dev-report.v1","launchMode":"production","launches":1,"restarts":0,"result":"ok"}
 ```
 
 ## CI Usage

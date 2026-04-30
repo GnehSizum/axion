@@ -27,7 +27,11 @@ pub fn run_new(args: NewArgs) -> Result<(), AxionCliError> {
     println!("  cd {}", project.root.display());
     println!("  cargo run -- --plan");
     println!(
-        "  cargo run -p axion-cli -- check --manifest-path {} --bundle",
+        "  cargo run -p axion-cli -- check --manifest-path {} --dev --bundle",
+        project.root.join("axion.toml").display()
+    );
+    println!(
+        "  cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {} --launch --fallback-packaged --watch --reload --restart-on-change --report-path target/axion/reports/dev-report.json",
         project.root.join("axion.toml").display()
     );
     println!("  cargo run --features servo-runtime");
@@ -37,6 +41,7 @@ pub fn run_new(args: NewArgs) -> Result<(), AxionCliError> {
             manifest_path: project.root.join("axion.toml"),
             max_risk: DoctorRisk::Medium,
             bundle: true,
+            dev: true,
             json: false,
             keep_artifacts: false,
         })?;
@@ -122,8 +127,10 @@ cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest
 If the dev server is unavailable, use `--fallback-packaged` to launch the packaged `frontend/index.html` entry instead. `--watch` polls frontend files with debounce and temporary-file ignore rules, and `--reload` asks live windows to reload when launched with `--launch`. `--open-devtools` reports that the current Servo backend does not open devtools yet.
 
 ```sh
-cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest} --launch --fallback-packaged --watch --reload
+cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest} --launch --fallback-packaged --watch --reload --restart-on-change --event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json
 ```
+
+`--event-log` writes realtime `axion.dev-event.v1` JSONL watch/reload/restart events. `--report-path` writes the final `axion.dev-report.v1` session summary with launch mode, dev-server status, fallback status, launch/restart counters, next step, failure, and result.
 
 ## What The Demo Shows
 
@@ -165,7 +172,7 @@ The generated frontend includes a small text input and textarea wired to `window
 Run these commands from the Axion repository root so `gui-smoke` can reuse the checkout build cache through `--cargo-target-dir target`:
 
 ```sh
-cargo run -p axion-cli -- check --manifest-path {manifest} --bundle
+cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle
 cargo run -p axion-cli -- doctor --manifest-path {manifest} --deny-warnings --max-risk medium
 cargo run -p axion-cli -- self-test --manifest-path {manifest}
 cargo run -p axion-cli -- gui-smoke --manifest-path {manifest} --report-path target/axion/reports/gui-smoke.json --timeout-ms 30000 --cargo-target-dir target --serial-build
@@ -196,7 +203,7 @@ cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-pat
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.1.22\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.1.23\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root
@@ -1020,10 +1027,13 @@ mod tests {
         assert!(readme.contains("Frontend Development"));
         assert!(readme.contains("cargo run -p axion-cli -- dev"));
         assert!(readme.contains("--watch --reload"));
+        assert!(readme.contains("--restart-on-change"));
+        assert!(readme.contains("axion.dev-report.v1"));
         assert!(readme.contains("window.ready"));
         assert!(readme.contains("--open-devtools"));
         assert!(readme.contains("cargo run -p axion-cli -- gui-smoke"));
         assert!(readme.contains("cargo run -p axion-cli -- check"));
+        assert!(readme.contains("--dev --bundle"));
         assert!(readme.contains("--deny-warnings --max-risk medium"));
         assert!(readme.contains("--cargo-target-dir target"));
         assert!(readme.contains("--serial-build"));

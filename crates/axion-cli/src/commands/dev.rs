@@ -69,12 +69,46 @@ pub fn run(args: DevArgs) -> Result<(), AxionCliError> {
     if let Some(wait_result) = &frontend_wait_result {
         if !args.fallback_packaged && !matches!(wait_result, DevServerWaitResult::Reachable) {
             let _ = std::io::stdout().flush();
-            return Err(frontend_wait_error(wait_result).into());
+            let error = frontend_wait_error(wait_result);
+            write_dev_report_if_requested(&DevReportInput {
+                args: &args,
+                app: &app,
+                dev_server_status: &dev_server_status,
+                packaged_fallback_status: &packaged_fallback_status,
+                launch_mode: launch_mode.as_ref().ok().copied(),
+                launch_error: launch_mode.as_ref().err().map(ToString::to_string),
+                frontend_command: frontend_process.as_ref(),
+                frontend_wait_result: frontend_wait_result.as_ref(),
+                launch_count: 0,
+                restart_count: 0,
+                result: DevReportResult::Failed,
+                failure: Some(error.to_string()),
+            })?;
+            return Err(error.into());
         }
     }
 
     if args.launch {
-        let launch_mode = launch_mode?;
+        let launch_mode = match launch_mode {
+            Ok(launch_mode) => launch_mode,
+            Err(error) => {
+                write_dev_report_if_requested(&DevReportInput {
+                    args: &args,
+                    app: &app,
+                    dev_server_status: &dev_server_status,
+                    packaged_fallback_status: &packaged_fallback_status,
+                    launch_mode: None,
+                    launch_error: Some(error.to_string()),
+                    frontend_command: frontend_process.as_ref(),
+                    frontend_wait_result: frontend_wait_result.as_ref(),
+                    launch_count: 0,
+                    restart_count: 0,
+                    result: DevReportResult::Failed,
+                    failure: Some(error.to_string()),
+                })?;
+                return Err(error);
+            }
+        };
         let mut launch_count = 1usize;
         loop {
             println!("launch_summary:");
@@ -87,11 +121,66 @@ pub fn run(args: DevArgs) -> Result<(), AxionCliError> {
                 println!("{line}");
             }
 
-            let launch_request = axion_runtime::launch_request(&app, launch_mode)?;
+            let launch_request = match axion_runtime::launch_request(&app, launch_mode) {
+                Ok(launch_request) => launch_request,
+                Err(error) => {
+                    write_dev_report_if_requested(&DevReportInput {
+                        args: &args,
+                        app: &app,
+                        dev_server_status: &dev_server_status,
+                        packaged_fallback_status: &packaged_fallback_status,
+                        launch_mode: Some(launch_mode),
+                        launch_error: None,
+                        frontend_command: frontend_process.as_ref(),
+                        frontend_wait_result: frontend_wait_result.as_ref(),
+                        launch_count,
+                        restart_count: launch_count.saturating_sub(1),
+                        result: DevReportResult::Failed,
+                        failure: Some(error.to_string()),
+                    })?;
+                    return Err(error.into());
+                }
+            };
             let reload_targets = reload_targets_from_launch_request(&launch_request);
             let watch_guard =
-                DevWatchGuard::spawn(&args, app.config(), reload_targets, dev_events.clone())?;
-            axion_runtime::run_launch_request(launch_request)?;
+                match DevWatchGuard::spawn(&args, app.config(), reload_targets, dev_events.clone())
+                {
+                    Ok(watch_guard) => watch_guard,
+                    Err(error) => {
+                        write_dev_report_if_requested(&DevReportInput {
+                            args: &args,
+                            app: &app,
+                            dev_server_status: &dev_server_status,
+                            packaged_fallback_status: &packaged_fallback_status,
+                            launch_mode: Some(launch_mode),
+                            launch_error: None,
+                            frontend_command: frontend_process.as_ref(),
+                            frontend_wait_result: frontend_wait_result.as_ref(),
+                            launch_count,
+                            restart_count: launch_count.saturating_sub(1),
+                            result: DevReportResult::Failed,
+                            failure: Some(error.to_string()),
+                        })?;
+                        return Err(error);
+                    }
+                };
+            if let Err(error) = axion_runtime::run_launch_request(launch_request) {
+                write_dev_report_if_requested(&DevReportInput {
+                    args: &args,
+                    app: &app,
+                    dev_server_status: &dev_server_status,
+                    packaged_fallback_status: &packaged_fallback_status,
+                    launch_mode: Some(launch_mode),
+                    launch_error: None,
+                    frontend_command: frontend_process.as_ref(),
+                    frontend_wait_result: frontend_wait_result.as_ref(),
+                    launch_count,
+                    restart_count: launch_count.saturating_sub(1),
+                    result: DevReportResult::Failed,
+                    failure: Some(error.to_string()),
+                })?;
+                return Err(error.into());
+            }
             let restart_requested = watch_guard
                 .as_ref()
                 .is_some_and(DevWatchGuard::restart_requested);
@@ -107,6 +196,20 @@ pub fn run(args: DevArgs) -> Result<(), AxionCliError> {
             }
             break;
         }
+        write_dev_report_if_requested(&DevReportInput {
+            args: &args,
+            app: &app,
+            dev_server_status: &dev_server_status,
+            packaged_fallback_status: &packaged_fallback_status,
+            launch_mode: Some(launch_mode),
+            launch_error: None,
+            frontend_command: frontend_process.as_ref(),
+            frontend_wait_result: frontend_wait_result.as_ref(),
+            launch_count,
+            restart_count: launch_count.saturating_sub(1),
+            result: DevReportResult::Ok,
+            failure: None,
+        })?;
         drop(frontend_process);
         return Ok(());
     }
@@ -120,7 +223,38 @@ pub fn run(args: DevArgs) -> Result<(), AxionCliError> {
     println!("runtime_plan:");
     println!("{plan}");
 
-    run_foreground_watch_if_requested(&args, app.config(), dev_events)?;
+    if let Err(error) = run_foreground_watch_if_requested(&args, app.config(), dev_events) {
+        write_dev_report_if_requested(&DevReportInput {
+            args: &args,
+            app: &app,
+            dev_server_status: &dev_server_status,
+            packaged_fallback_status: &packaged_fallback_status,
+            launch_mode: launch_mode.as_ref().ok().copied(),
+            launch_error: launch_mode.as_ref().err().map(ToString::to_string),
+            frontend_command: frontend_process.as_ref(),
+            frontend_wait_result: frontend_wait_result.as_ref(),
+            launch_count: 0,
+            restart_count: 0,
+            result: DevReportResult::Failed,
+            failure: Some(error.to_string()),
+        })?;
+        return Err(error);
+    }
+
+    write_dev_report_if_requested(&DevReportInput {
+        args: &args,
+        app: &app,
+        dev_server_status: &dev_server_status,
+        packaged_fallback_status: &packaged_fallback_status,
+        launch_mode: launch_mode.as_ref().ok().copied(),
+        launch_error: launch_mode.as_ref().err().map(ToString::to_string),
+        frontend_command: frontend_process.as_ref(),
+        frontend_wait_result: frontend_wait_result.as_ref(),
+        launch_count: 0,
+        restart_count: 0,
+        result: DevReportResult::Ok,
+        failure: None,
+    })?;
 
     drop(frontend_process);
     Ok(())
@@ -746,6 +880,218 @@ fn optional_json_string_literal(value: Option<&str>) -> String {
         .unwrap_or_else(|| "null".to_owned())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DevReportResult {
+    Ok,
+    Failed,
+}
+
+struct DevReportInput<'a> {
+    args: &'a DevArgs,
+    app: &'a App,
+    dev_server_status: &'a DevServerStatus,
+    packaged_fallback_status: &'a PackagedFallbackStatus,
+    launch_mode: Option<RunMode>,
+    launch_error: Option<String>,
+    frontend_command: Option<&'a FrontendProcess>,
+    frontend_wait_result: Option<&'a DevServerWaitResult>,
+    launch_count: usize,
+    restart_count: usize,
+    result: DevReportResult,
+    failure: Option<String>,
+}
+
+fn write_dev_report_if_requested(input: &DevReportInput<'_>) -> Result<(), AxionCliError> {
+    let Some(path) = &input.args.report_path else {
+        return Ok(());
+    };
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+
+    fs::write(path, dev_report_json(input))?;
+    Ok(())
+}
+
+fn dev_report_json(input: &DevReportInput<'_>) -> String {
+    let launch_mode = input.launch_mode.map(|mode| mode.to_string());
+    let launch_state = launch_mode.as_deref().unwrap_or("blocked");
+    let next_step = dev_next_step(
+        input.dev_server_status,
+        input.packaged_fallback_status,
+        input.args.fallback_packaged,
+    );
+    let result = match input.result {
+        DevReportResult::Ok => "ok",
+        DevReportResult::Failed => "failed",
+    };
+
+    format!(
+        concat!(
+            "{{",
+            "\"schema\":\"axion.dev-report.v1\",",
+            "\"manifestPath\":{},",
+            "\"appName\":{},",
+            "\"identifier\":{},",
+            "\"appVersion\":{},",
+            "\"launchMode\":{},",
+            "\"launchError\":{},",
+            "\"devServer\":{},",
+            "\"packagedFallback\":{},",
+            "\"options\":{},",
+            "\"frontendCommand\":{},",
+            "\"launches\":{},",
+            "\"restarts\":{},",
+            "\"nextStep\":{},",
+            "\"failure\":{},",
+            "\"result\":{}",
+            "}}"
+        ),
+        json_string_literal(&input.args.manifest_path.display().to_string()),
+        json_string_literal(input.app.config().identity.name.as_str()),
+        optional_json_string_literal(input.app.config().identity.identifier.as_deref()),
+        optional_json_string_literal(input.app.config().identity.version.as_deref()),
+        json_string_literal(launch_state),
+        optional_json_string_literal(input.launch_error.as_deref()),
+        dev_server_report_json(input.dev_server_status),
+        packaged_fallback_report_json(input.packaged_fallback_status),
+        dev_options_report_json(input.args),
+        frontend_command_report_json(input.frontend_command, input.frontend_wait_result),
+        input.launch_count,
+        input.restart_count,
+        json_string_literal(&next_step),
+        optional_json_string_literal(input.failure.as_deref()),
+        json_string_literal(result),
+    )
+}
+
+fn dev_server_report_json(status: &DevServerStatus) -> String {
+    let (status_label, url) = match status {
+        DevServerStatus::Unconfigured => ("unconfigured", None),
+        DevServerStatus::InvalidEndpoint { url } => ("invalid_endpoint", Some(url.as_str())),
+        DevServerStatus::Unreachable { url } => ("unreachable", Some(url.as_str())),
+        DevServerStatus::Reachable { url } => ("reachable", Some(url.as_str())),
+    };
+
+    format!(
+        "{{\"status\":{},\"url\":{}}}",
+        json_string_literal(status_label),
+        optional_json_string_literal(url)
+    )
+}
+
+fn packaged_fallback_report_json(status: &PackagedFallbackStatus) -> String {
+    match status {
+        PackagedFallbackStatus::Available { url } => format!(
+            "{{\"status\":\"available\",\"url\":{},\"reason\":null}}",
+            json_string_literal(url)
+        ),
+        PackagedFallbackStatus::Unavailable { reason } => format!(
+            "{{\"status\":\"unavailable\",\"url\":null,\"reason\":{}}}",
+            json_string_literal(reason)
+        ),
+    }
+}
+
+fn dev_options_report_json(args: &DevArgs) -> String {
+    format!(
+        concat!(
+            "{{",
+            "\"launch\":{},",
+            "\"fallbackPackaged\":{},",
+            "\"watch\":{},",
+            "\"reload\":{},",
+            "\"restartOnChange\":{},",
+            "\"jsonEvents\":{},",
+            "\"eventLog\":{},",
+            "\"reportPath\":{},",
+            "\"openDevtools\":{}",
+            "}}"
+        ),
+        args.launch,
+        args.fallback_packaged,
+        args.watch,
+        args.reload,
+        args.restart_on_change,
+        args.json_events,
+        optional_json_string_literal(
+            args.event_log
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .as_deref()
+        ),
+        optional_json_string_literal(
+            args.report_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .as_deref()
+        ),
+        args.open_devtools,
+    )
+}
+
+fn frontend_command_report_json(
+    process: Option<&FrontendProcess>,
+    wait_result: Option<&DevServerWaitResult>,
+) -> String {
+    let Some(process) = process else {
+        return "{\"configured\":false,\"command\":null,\"cwd\":null,\"wait\":\"not_configured\",\"statusCode\":null,\"stderr\":null}".to_owned();
+    };
+
+    let (wait, status_code, stderr) = match wait_result {
+        Some(DevServerWaitResult::Reachable) => ("reachable", None, None),
+        Some(DevServerWaitResult::Timeout) => ("timeout", None, None),
+        Some(DevServerWaitResult::ExitedEarly {
+            status,
+            stderr_summary,
+        }) => ("exited_early", *status, Some(stderr_summary.as_str())),
+        None => ("not_waited", None, None),
+    };
+
+    format!(
+        concat!(
+            "{{",
+            "\"configured\":true,",
+            "\"command\":{},",
+            "\"cwd\":{},",
+            "\"wait\":{},",
+            "\"statusCode\":{},",
+            "\"stderr\":{}",
+            "}}"
+        ),
+        json_string_literal(&process.command),
+        json_string_literal(&process.cwd.display().to_string()),
+        json_string_literal(wait),
+        status_code
+            .map(|status| status.to_string())
+            .unwrap_or_else(|| "null".to_owned()),
+        optional_json_string_literal(stderr),
+    )
+}
+
+fn dev_next_step(
+    dev_server_status: &DevServerStatus,
+    packaged_fallback_status: &PackagedFallbackStatus,
+    fallback_packaged: bool,
+) -> String {
+    next_step_lines(
+        dev_server_status,
+        packaged_fallback_status,
+        fallback_packaged,
+    )
+    .into_iter()
+    .next()
+    .map(|line| {
+        line.strip_prefix("next_steps: ")
+            .unwrap_or(line.as_str())
+            .to_owned()
+    })
+    .unwrap_or_else(|| "no next step available".to_owned())
+}
+
 impl DevWatchGuard {
     fn spawn(
         args: &DevArgs,
@@ -1369,6 +1715,12 @@ fn dev_option_lines(args: &DevArgs) -> Vec<String> {
             path.display()
         ));
     }
+    if let Some(path) = &args.report_path {
+        lines.push(format!(
+            "dev_report: enabled; writing axion.dev-report.v1 to {}",
+            path.display()
+        ));
+    }
     if args.open_devtools {
         lines.push(
             "devtools: requested but unsupported by the current Servo backend; continuing without opening devtools.".to_owned(),
@@ -1460,6 +1812,7 @@ mod tests {
             restart_on_change: false,
             json_events: false,
             event_log: None,
+            report_path: None,
             open_devtools: false,
             frontend_command: None,
             frontend_cwd: None,
@@ -1675,6 +2028,7 @@ mod tests {
             restart_on_change: true,
             json_events: true,
             event_log: Some("target/dev-events.jsonl".into()),
+            report_path: Some("target/dev-report.json".into()),
             open_devtools: true,
             ..dev_args()
         });
@@ -1702,6 +2056,9 @@ mod tests {
         assert!(lines.iter().any(
             |line| line == "event_log: enabled; writing JSON lines to target/dev-events.jsonl"
         ));
+        assert!(lines.iter().any(|line| {
+            line == "dev_report: enabled; writing axion.dev-report.v1 to target/dev-report.json"
+        }));
         assert!(
             lines
                 .iter()
@@ -1916,6 +2273,112 @@ mod tests {
         assert!(body.contains("\"schema\":\"axion.dev-event.v1\""));
         assert!(body.contains("\"event\":\"restart_applied\""));
         assert!(body.contains("\"launch\":2"));
+    }
+
+    #[test]
+    fn dev_report_serializes_stable_json_schema() {
+        let app = app_with_frontend(Some("http://127.0.0.1:3000"), 1);
+        let dev_status = DevServerStatus::Reachable {
+            url: "http://127.0.0.1:3000/".to_owned(),
+        };
+        let fallback_status = packaged_fallback_status(&app);
+        let args = DevArgs {
+            launch: true,
+            fallback_packaged: true,
+            watch: true,
+            reload: true,
+            restart_on_change: true,
+            json_events: true,
+            event_log: Some("target/dev-events.jsonl".into()),
+            report_path: Some("target/dev-report.json".into()),
+            ..dev_args()
+        };
+        let json = super::dev_report_json(&super::DevReportInput {
+            args: &args,
+            app: &app,
+            dev_server_status: &dev_status,
+            packaged_fallback_status: &fallback_status,
+            launch_mode: Some(RunMode::Development),
+            launch_error: None,
+            frontend_command: None,
+            frontend_wait_result: None,
+            launch_count: 2,
+            restart_count: 1,
+            result: super::DevReportResult::Ok,
+            failure: None,
+        });
+
+        assert!(json.contains("\"schema\":\"axion.dev-report.v1\""));
+        assert!(json.contains("\"launchMode\":\"development\""));
+        assert!(json.contains("\"status\":\"reachable\""));
+        assert!(json.contains("\"restartOnChange\":true"));
+        assert!(json.contains("\"eventLog\":\"target/dev-events.jsonl\""));
+        assert!(json.contains("\"reportPath\":\"target/dev-report.json\""));
+        assert!(json.contains("\"launches\":2"));
+        assert!(json.contains("\"restarts\":1"));
+        assert!(json.contains("\"result\":\"ok\""));
+    }
+
+    #[test]
+    fn dev_report_records_blocked_launch_failure() {
+        let app = app_with_frontend(Some("http://127.0.0.1:3000"), 1);
+        let dev_status = DevServerStatus::Unreachable {
+            url: "http://127.0.0.1:3000/".to_owned(),
+        };
+        let fallback_status = packaged_fallback_status(&app);
+        let args = dev_args();
+        let json = super::dev_report_json(&super::DevReportInput {
+            args: &args,
+            app: &app,
+            dev_server_status: &dev_status,
+            packaged_fallback_status: &fallback_status,
+            launch_mode: None,
+            launch_error: Some("dev server is unreachable".to_owned()),
+            frontend_command: None,
+            frontend_wait_result: None,
+            launch_count: 0,
+            restart_count: 0,
+            result: super::DevReportResult::Failed,
+            failure: Some("dev server is unreachable".to_owned()),
+        });
+
+        assert!(json.contains("\"launchMode\":\"blocked\""));
+        assert!(json.contains("\"launchError\":\"dev server is unreachable\""));
+        assert!(json.contains("\"failure\":\"dev server is unreachable\""));
+        assert!(json.contains("\"result\":\"failed\""));
+        assert!(json.contains("start the frontend dev server"));
+    }
+
+    #[test]
+    fn dev_report_writer_creates_parent_directories() {
+        let root = temp_dir();
+        let report_path = root.join("nested").join("dev-report.json");
+        let app = app_with_frontend(None, 1);
+        let dev_status = DevServerStatus::Unconfigured;
+        let fallback_status = packaged_fallback_status(&app);
+        let args = DevArgs {
+            report_path: Some(report_path.clone()),
+            ..dev_args()
+        };
+
+        super::write_dev_report_if_requested(&super::DevReportInput {
+            args: &args,
+            app: &app,
+            dev_server_status: &dev_status,
+            packaged_fallback_status: &fallback_status,
+            launch_mode: None,
+            launch_error: Some("dev server is not configured".to_owned()),
+            frontend_command: None,
+            frontend_wait_result: None,
+            launch_count: 0,
+            restart_count: 0,
+            result: super::DevReportResult::Ok,
+            failure: None,
+        })
+        .expect("dev report should be written");
+
+        let body = fs::read_to_string(report_path).expect("dev report should exist");
+        assert!(body.contains("\"schema\":\"axion.dev-report.v1\""));
     }
 
     #[test]

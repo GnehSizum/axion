@@ -48,6 +48,9 @@ pub struct DevArgs {
     #[arg(long)]
     pub event_log: Option<PathBuf>,
 
+    #[arg(long)]
+    pub report_path: Option<PathBuf>,
+
     #[arg(long, default_value_t = false)]
     pub open_devtools: bool,
 
@@ -101,6 +104,9 @@ pub struct CheckArgs {
 
     #[arg(long, default_value_t = false)]
     pub bundle: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub dev: bool,
 
     #[arg(long, default_value_t = false)]
     pub json: bool,

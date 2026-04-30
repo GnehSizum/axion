@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.1.23.0 - Preview
+
+Axion v0.1.23.0 adds archived development-session reporting on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.23`.
+- Axion public release metadata is `v0.1.23.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion dev --report-path <path>` for stable `axion.dev-report.v1` JSON reports.
+- Added dev report fields for launch mode, dev-server status, packaged fallback status, frontend command wait result, enabled dev options, launch count, restart count, next step, failure, and final result.
+- Added `axion check --dev` for lightweight development-loop preflight covering dev-server status, watch-root validation, packaged fallback availability, frontend command settings, and recommended event/report artifact paths.
+- Added unit coverage for dev report serialization, blocked launch diagnostics, report parent directory creation, dev preflight JSON, and the new CLI option lines.
+
+### Changed
+
+- Updated generated app README guidance to recommend `--restart-on-change`, `--event-log`, and `--report-path` for local development sessions.
+- Updated public docs and release metadata for v0.1.23.0.
+
 ## v0.1.22.0 - Preview
 
 Axion v0.1.22.0 strengthens the frontend development loop on the current Servo `0.1` baseline.

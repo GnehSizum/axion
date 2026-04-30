@@ -20,7 +20,7 @@ This directory contains public, user-facing documentation for Axion.
 
 ## Current Version
 
-Axion is at **v0.1.22.0 developer preview**. The current preview focuses on the core desktop framework loop:
+Axion is at **v0.1.23.0 developer preview**. The current preview focuses on the core desktop framework loop:
 
 1. load an app manifest
 2. build a runtime plan
@@ -36,11 +36,11 @@ Axion is at **v0.1.22.0 developer preview**. The current preview focuses on the 
 12. validate release gates through MSRV-aware `axion doctor`, CI example self-tests, and diagnostics artifacts
 13. reuse a shared diagnostics report model and run GUI smoke checks for examples and generated apps through `axion-cli gui-smoke`
 14. optionally run Servo-backed GUI smoke in GitHub Actions through `workflow_dispatch`
-15. inspect frontend dev-server readiness, run external frontend commands, watch frontend assets with debounce/ignore rules, reload live windows during `--launch`, restart on changes when reload is unavailable, export JSONL dev events, use packaged fallback, and inspect reserved devtools behavior through `axion-cli dev`
+15. inspect frontend dev-server readiness, run external frontend commands, watch frontend assets with debounce/ignore rules, reload live windows during `--launch`, restart on changes when reload is unavailable, export JSONL dev events, archive dev reports, use packaged fallback, and inspect reserved devtools behavior through `axion-cli dev`
 16. observe built-in host lifecycle events such as `app.ready`, `window.created`, `window.ready`, focus, resize, move, and close events from frontend code
 17. close windows and request application shutdown through capability-gated lifecycle commands, including prevented, completed, and timed-out close outcomes
 18. inspect per-window capability risk, remote-navigation scope, protocol consistency, profile expansion, command categories, release readiness, and CI gate results through `axion doctor` or `doctor --json`
-19. run the default generated-app validation loop through `axion check`
+19. run the default generated-app validation loop through `axion check`, including optional dev and bundle preflight
 20. export stable bundle reports through `axion bundle --json` and `--report-path`
 21. run a preview artifact workflow through `axion release`, including artifact inventory and archive verification
 
