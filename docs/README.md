@@ -15,12 +15,13 @@ This directory contains public, user-facing documentation for Axion.
 - `versioning.md`: public release and Cargo version mapping.
 - `architecture.md`: high-level runtime architecture.
 - `security.md`: capabilities, bridge permissions, navigation, and CSP.
+- `../examples/*/README.md`: example-specific run and validation notes.
 - `../CONTRIBUTING.md`: contributor workflow and local checks.
 - `../SECURITY.md`: vulnerability reporting and policy summary.
 
 ## Current Version
 
-Axion is at **v0.1.24.0 developer preview**. The current preview focuses on the core desktop framework loop:
+Axion is at **v0.1.25.0 developer preview**. The current preview focuses on the core desktop framework loop:
 
 1. load an app manifest
 2. build a runtime plan
@@ -43,5 +44,7 @@ Axion is at **v0.1.24.0 developer preview**. The current preview focuses on the 
 19. run the default generated-app validation loop through `axion check`, including optional dev/bundle preflight and report artifacts
 20. export stable bundle reports through `axion bundle --json` and `--report-path`
 21. run a preview artifact workflow through `axion release`, including artifact inventory and archive verification
+22. generate a focused native API demo template with `axion new --template native-api-demo`
+23. use example-specific README files for smoke app purpose, run commands, GUI smoke commands, and expected warnings
 
 Project-internal milestone plans and release notes are intentionally not part of the public documentation set.

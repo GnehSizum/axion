@@ -12,6 +12,7 @@ Generate a minimal application with local artifact hygiene, panic reporting, a d
 
 ```sh
 cargo run -p axion-cli -- new demo-app --template vanilla --path /tmp/demo-app
+cargo run -p axion-cli -- new native-demo --template native-api-demo --path /tmp/native-demo --run-check
 ```
 
 Project names are normalized to lowercase kebab-case for package use.
@@ -19,7 +20,9 @@ Project names are normalized to lowercase kebab-case for package use.
 Options:
 
 - `--template vanilla`: generate a plain HTML/CSS/JavaScript app with bridge, native API, custom command, capability-denial, and bundle-icon demos.
+- `--template native-api-demo`: generate the same no-dependency app structure with UI copy, a Native API Workbench "Run all checks" button, and README guidance focused on app/window metadata, clipboard, app-data filesystem, dialogs, input compatibility, and GUI smoke diagnostics.
 - `--path <path>`: choose the output directory.
+- `--run-check`: run `check --dev --bundle` immediately after generation.
 
 ## `dev`
 

@@ -4,6 +4,36 @@ Axion exposes built-in native APIs as bridge commands. Every command must be lis
 
 For application-defined Rust commands, see `custom-commands.md`.
 
+To generate a runnable project that exercises the current preview native API surface, use:
+
+```sh
+cargo run -p axion-cli -- new native-demo --template native-api-demo --path /tmp/native-demo --run-check
+```
+
+The generated app includes UI and GUI smoke coverage for app/window metadata, clipboard text, app-data file reads and writes, headless dialog responses, input compatibility, and capability denial. Its Native API Workbench card includes a "Run all checks" button that executes the same checks exposed through `window.__AXION_GUI_SMOKE__()`.
+
+## Command Reference Format
+
+Built-in commands are capability-gated. A command is callable only when the active window's `[capabilities.<window>]` entry includes either the command directly or a profile that expands to it.
+
+Each command below follows this shape:
+
+- `profile`: the manifest profile that usually enables the command
+- `payload`: the JSON value passed to `window.__AXION__.invoke`
+- `response`: the JSON value returned on success
+- `errors`: common failure conditions
+
+Common profiles:
+
+- `app-info`: `app.ping`, `app.info`, `app.version`, `app.echo`
+- `app-control`: `app.exit`
+- `window-control`: current-window control commands
+- `multi-window`: targeted window control including `window.list`
+- `clipboard-access`: `clipboard.write_text`, `clipboard.read_text`
+- `file-access`: `fs.write_text`, `fs.read_text`
+- `dialog-access`: `dialog.open`, `dialog.save`
+- `app-events`: frontend event emission such as `app.log`
+
 ## Bridge Compatibility Helpers
 
 The injected `window.__AXION__` bootstrap also exposes small frontend compatibility helpers under `window.__AXION__.compat`.
@@ -97,7 +127,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.24", release: "v0.1.24.0", framework: "axion" }
+// { version: "0.1.25", release: "v0.1.25.0", framework: "axion" }
 ```
 
 ### `app.echo`

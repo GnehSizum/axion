@@ -2,11 +2,11 @@
 
 Axion is a Rust desktop application framework built on a vendored Servo engine. It provides an explicit manifest, capability-gated JavaScript bridge, packaged app assets, runtime diagnostics, and a `winit` desktop backend.
 
-Axion is currently at the **v0.1.24.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
+Axion is currently at the **v0.1.25.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
 
 ## What Works Today
 
-- Generate a guided Axion application with `axion-cli new --template vanilla`, optionally using `--run-check` for immediate validation.
+- Generate a guided Axion application with `axion-cli new --template vanilla` or `--template native-api-demo`, optionally using `--run-check` for immediate validation.
 - Run the lightweight application validation loop with `axion-cli check`, including dev preflight, bundle preflight, `--json` output, and `--report-path` artifacts for CI.
 - Inspect development-server readiness, run external frontend commands, watch frontend files with debounce/ignore rules, reload live windows when launched, restart on changes when reload is unavailable, export JSONL dev events, and archive dev-session reports through `axion-cli dev`.
 - Reuse bridge-provided text-input compatibility helpers in generated apps and custom frontends.
@@ -49,6 +49,7 @@ Generate a new application:
 
 ```sh
 cargo run -p axion-cli -- new demo-app --template vanilla --path /tmp/demo-app
+cargo run -p axion-cli -- new native-demo --template native-api-demo --path /tmp/native-demo --run-check
 cd /tmp/demo-app
 cargo run -- --plan
 cargo run --features servo-runtime
@@ -70,6 +71,8 @@ cargo run --features servo-runtime
 - `examples/`: smoke applications
 - `docs/`: public user-facing documentation
 - `servo/`: vendored engine source; do not modify for Axion framework features
+
+Each checked-in example includes a local `README.md` with its purpose, run commands, `check` command, GUI smoke command, and expected warnings.
 
 ## Documentation
 
@@ -120,4 +123,4 @@ Servo warnings from the vendored `servo/` subtree are not Axion release blockers
 
 ## Versioning
 
-Axion public releases use four-part tags such as `v0.1.24.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.24`. See `docs/versioning.md`.
+Axion public releases use four-part tags such as `v0.1.25.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.25`. See `docs/versioning.md`.

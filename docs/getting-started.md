@@ -109,6 +109,8 @@ cargo run --features servo-runtime
 
 `--run-check` immediately runs `axion check --dev --bundle` against the generated manifest. Omit it if you only want to create files.
 
+Use `--template native-api-demo` when you want generated UI and README guidance focused on the preview native API surface: app/window metadata, clipboard text, app-data file reads and writes, dialogs, input compatibility, and GUI smoke diagnostics. The generated Native API Workbench includes a "Run all checks" button for manual validation inside the app window.
+
 Generated projects contain:
 
 - `Cargo.toml`: path dependencies back to this Axion checkout

@@ -249,4 +249,5 @@ pub struct NewArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum NewTemplate {
     Vanilla,
+    NativeApiDemo,
 }

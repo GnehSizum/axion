@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.1.25.0 - Preview
+
+Axion v0.1.25.0 adds a focused generated native API demo template on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.25`.
+- Axion public release metadata is `v0.1.25.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion new --template native-api-demo` for a generated no-dependency app focused on app/window metadata, clipboard, app-data filesystem, dialogs, input compatibility, and GUI smoke diagnostics.
+- Added template-specific generated README guidance, manifest description, UI copy, and GUI smoke source identifiers for the native API demo.
+- Added a Native API Workbench "Run all checks" button that runs the generated app's GUI smoke checks inside the window and renders a structured result.
+- Added example README files for `hello-axion`, `file-access-demo`, `multi-window`, and `bridge-diagnostics-demo` with run, check, GUI smoke, and expected-warning notes.
+- Added unit coverage for native API demo template generation and generated next-step artifact commands.
+
+### Changed
+
+- Generated app Cargo versions now use `0.1.25`.
+- Updated public docs and release metadata for v0.1.25.0.
+
 ## v0.1.24.0 - Preview
 
 Axion v0.1.24.0 strengthens CI artifact output and dev preflight guidance on the current Servo `0.1` baseline.
