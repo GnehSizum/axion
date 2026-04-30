@@ -107,7 +107,7 @@ cargo run -- --plan
 cargo run --features servo-runtime
 ```
 
-`--run-check` immediately runs `axion check --bundle` against the generated manifest. Omit it if you only want to create files.
+`--run-check` immediately runs `axion check --dev --bundle` against the generated manifest. Omit it if you only want to create files.
 
 Generated projects contain:
 
@@ -136,7 +136,7 @@ Generated apps install Axion panic reporting by default. Crash reports are writt
 From the Axion repository root:
 
 ```sh
-cargo run -p axion-cli -- check --manifest-path /tmp/demo-app/axion.toml --dev --bundle
+cargo run -p axion-cli -- check --manifest-path /tmp/demo-app/axion.toml --dev --bundle --report-path target/axion/reports/check.json
 cargo run -p axion-cli -- doctor --manifest-path /tmp/demo-app/axion.toml --deny-warnings --max-risk medium
 cargo run -p axion-cli -- self-test --manifest-path /tmp/demo-app/axion.toml
 cargo run -p axion-cli -- gui-smoke \
@@ -151,7 +151,7 @@ cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml --buil
 cargo run -p axion-cli -- release --manifest-path /tmp/demo-app/axion.toml --json --report-path target/axion/reports/demo-app-release.json --bundle-report-path target/axion/reports/demo-app-bundle.json --archive
 ```
 
-`check` is the fastest default validation loop: it runs the doctor gate, readiness, quiet self-test staging, and optional dev/bundle preflight. Use `check --dev --bundle --json` for CI and `doctor` when you need the full diagnostics detail. Continue when development, bundle, and GUI smoke readiness are all `true`; otherwise resolve the printed `readiness.blocker` or `dev.blocker` lines first.
+`check` is the fastest default validation loop: it runs the doctor gate, readiness, quiet self-test staging, and optional dev/bundle preflight. Use `check --dev --bundle --json --report-path target/axion/reports/check.json` for CI and `doctor` when you need the full diagnostics detail. Continue when development, bundle, and GUI smoke readiness are all `true`; otherwise resolve the printed `readiness.blocker` or `dev.blocker` lines first. `dev.warning` entries are advisory and commonly report a missing or unreachable dev server when packaged fallback is available. The check report includes `artifacts[]` with recommended report paths under `target/axion/reports/`.
 
 `self-test` prints app metadata, native dialog backend, each window's configured commands/events/protocols, runtime command/event counts, host events, navigation origins, and staged asset paths. Add `--json` to print an `axion.diagnostics-report.v1` report, or `--report-path <path>` to write that report while keeping the default text output. Add `--quiet` with `--report-path` in CI when only the exit code and report file are needed.
 

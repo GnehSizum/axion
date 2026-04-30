@@ -108,6 +108,9 @@ pub struct CheckArgs {
     #[arg(long, default_value_t = false)]
     pub dev: bool,
 
+    #[arg(long)]
+    pub report_path: Option<PathBuf>,
+
     #[arg(long, default_value_t = false)]
     pub json: bool,
 

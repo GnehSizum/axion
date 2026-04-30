@@ -24,17 +24,9 @@ pub fn run_new(args: NewArgs) -> Result<(), AxionCliError> {
     println!("template: {}", project.template.name());
     println!("path: {}", project.root.display());
     println!("next:");
-    println!("  cd {}", project.root.display());
-    println!("  cargo run -- --plan");
-    println!(
-        "  cargo run -p axion-cli -- check --manifest-path {} --dev --bundle",
-        project.root.join("axion.toml").display()
-    );
-    println!(
-        "  cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {} --launch --fallback-packaged --watch --reload --restart-on-change --report-path target/axion/reports/dev-report.json",
-        project.root.join("axion.toml").display()
-    );
-    println!("  cargo run --features servo-runtime");
+    for step in project.next_steps() {
+        println!("  {step}");
+    }
     if run_check {
         println!("running initial check:");
         check::run(CheckArgs {
@@ -42,6 +34,7 @@ pub fn run_new(args: NewArgs) -> Result<(), AxionCliError> {
             max_risk: DoctorRisk::Medium,
             bundle: true,
             dev: true,
+            report_path: None,
             json: false,
             keep_artifacts: false,
         })?;
@@ -102,6 +95,21 @@ impl NewProject {
         Ok(())
     }
 
+    fn next_steps(&self) -> Vec<String> {
+        let manifest = self.root.join("axion.toml").display().to_string();
+        vec![
+            format!("cd {}", self.root.display()),
+            "cargo run -- --plan".to_owned(),
+            format!(
+                "cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle --json --report-path target/axion/reports/check.json"
+            ),
+            format!(
+                "cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest} --launch --fallback-packaged --watch --reload --restart-on-change --event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json"
+            ),
+            "cargo run --features servo-runtime".to_owned(),
+        ]
+    }
+
     fn readme(&self) -> String {
         format!(
             r#"# {title}
@@ -155,6 +163,16 @@ cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-pat
 
 Expected output includes `target`, `layout`, `bundle_dir`, `bundle_manifest`, `platform_metadata`, `verification: ok`, `checked_files`, `fingerprinted_files`, and `bundle_bytes`. JSON output uses `axion.bundle-report.v1` for scripted release checks and can be written with `--report-path`. Release JSON uses `axion.release-report.v1` and includes `artifacts[]`, `failure_phase`, `failed_reasons`, and archive verification details.
 
+## Release Checks
+
+Use `target/axion/reports/` as the local and CI report directory. Start with `check --dev --bundle --report-path` to capture `axion.check-report.v1`, then run bundle and release reports when you need distributable preview artifacts.
+
+```sh
+cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle --json --report-path target/axion/reports/check.json
+cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable --json --report-path target/axion/reports/bundle.json
+cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
+```
+
 ## Runtime Artifacts
 
 Runtime data, staged bundles, and crash reports are written under `target/` and ignored by `.gitignore`. Panic reports are installed in `src/main.rs` and written to `target/axion/crash-reports/`.
@@ -172,7 +190,7 @@ The generated frontend includes a small text input and textarea wired to `window
 Run these commands from the Axion repository root so `gui-smoke` can reuse the checkout build cache through `--cargo-target-dir target`:
 
 ```sh
-cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle
+cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle --report-path target/axion/reports/check.json
 cargo run -p axion-cli -- doctor --manifest-path {manifest} --deny-warnings --max-risk medium
 cargo run -p axion-cli -- self-test --manifest-path {manifest}
 cargo run -p axion-cli -- gui-smoke --manifest-path {manifest} --report-path target/axion/reports/gui-smoke.json --timeout-ms 30000 --cargo-target-dir target --serial-build
@@ -203,7 +221,7 @@ cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-pat
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.1.23\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.1.24\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root
@@ -1034,12 +1052,17 @@ mod tests {
         assert!(readme.contains("cargo run -p axion-cli -- gui-smoke"));
         assert!(readme.contains("cargo run -p axion-cli -- check"));
         assert!(readme.contains("--dev --bundle"));
+        assert!(readme.contains("--json --report-path target/axion/reports/check.json"));
+        assert!(readme.contains("--report-path target/axion/reports/check.json"));
+        assert!(readme.contains("--event-log target/axion/reports/dev-events.jsonl"));
         assert!(readme.contains("--deny-warnings --max-risk medium"));
         assert!(readme.contains("--cargo-target-dir target"));
         assert!(readme.contains("--serial-build"));
         assert!(readme.contains("cargo run -p axion-cli -- bundle"));
         assert!(readme.contains("--build-executable"));
         assert!(readme.contains("Packaging Preview"));
+        assert!(readme.contains("Release Checks"));
+        assert!(readme.contains("target/axion/reports/"));
         assert!(readme.contains("verification: ok"));
         assert!(readme.contains("fingerprinted_files"));
         assert!(readme.contains("Custom Command Demo"));
@@ -1054,6 +1077,24 @@ mod tests {
         assert!(readme.contains("target/axion/crash-reports/"));
         assert!(readme.contains(".gitignore"));
         assert!(readme.contains("icons/app.icns"));
+    }
+
+    #[test]
+    fn generated_project_next_steps_use_report_artifacts() {
+        let root = axion_root_for_templates().expect("template root should resolve");
+        let project = NewProject {
+            name: "hello-axion".to_owned(),
+            root: std::path::PathBuf::from("/tmp/hello-axion"),
+            axion_root: root,
+            template: NewTemplate::Vanilla,
+        };
+
+        let next_steps = project.next_steps();
+        assert!(next_steps.iter().any(|step| step
+            == "cargo run -p axion-cli -- check --manifest-path /tmp/hello-axion/axion.toml --dev --bundle --json --report-path target/axion/reports/check.json"));
+        assert!(next_steps.iter().any(|step| step.contains(
+            "--event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json"
+        )));
     }
 
     #[test]

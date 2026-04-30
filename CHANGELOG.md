@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.1.24.0 - Preview
+
+Axion v0.1.24.0 strengthens CI artifact output and dev preflight guidance on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.24`.
+- Axion public release metadata is `v0.1.24.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion check --report-path <path>` to write stable `axion.check-report.v1` JSON reports while keeping the existing stdout mode.
+- Added `artifacts[]` to `axion.check-report.v1` so CI can discover recommended check, dev, bundle, and release report paths.
+- Added `dev_preflight.warnings` and `dev_preflight.recommended_commands` to separate advisory dev-loop issues from blockers.
+- Added generated-app README guidance for `check --dev --bundle --report-path target/axion/reports/check.json`.
+- Added unit coverage for check artifact inventory, grouped human output, check report writing, dev preflight warning/blocker classification, and recommended command output.
+
+### Changed
+
+- `check` human output now starts with `result` and `next_step`, then groups details under stable sections while preserving grep-friendly line prefixes.
+- `check --dev` now treats unreachable or missing dev servers as warnings when packaged fallback and frontend assets remain valid.
+- `check --dev` now validates `[dev] cwd` and warns when a configured frontend command relies on the default timeout.
+- Generated-app next steps now include CI-style `check --json --report-path` and archived dev-session event/report paths.
+- Updated public docs and release metadata for v0.1.24.0.
+
 ## v0.1.23.0 - Preview
 
 Axion v0.1.23.0 adds archived development-session reporting on the current Servo `0.1` baseline.

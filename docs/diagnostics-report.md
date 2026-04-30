@@ -9,6 +9,7 @@ The CLI report is generated through the shared `axion_runtime::DiagnosticsReport
 - `axion self-test --report-path <path>`: writes the same non-GUI report to disk.
 - `axion doctor --json`: prints environment, manifest, runtime, and structured security diagnostics.
 - `axion check --json`: prints aggregate validation output using `axion.check-report.v1`.
+- `axion check --report-path <path>`: writes the same aggregate validation report to disk.
 - `axion bundle --json`: prints bundle staging and verification output using `axion.bundle-report.v1`.
 - `axion bundle --report-path <path>`: writes the same bundle report to disk.
 - `axion release --json`: prints the aggregate release artifact workflow using `axion.release-report.v1`.
@@ -55,7 +56,11 @@ CLI-generated GUI smoke failure reports use `source = "axion-cli gui-smoke"` and
 
 ## Aggregate CLI Reports
 
-`axion.check-report.v1` summarizes doctor gate status, readiness, quiet self-test, optional dev preflight, optional bundle preflight, `next_step`, and `result`. When `check --dev` is used, `dev_preflight` includes dev-server status, frontend command settings, watch-root validation, packaged fallback status, recommended event/report artifact paths, blockers, and recommendations.
+`axion.check-report.v1` summarizes doctor gate status, readiness, quiet self-test, artifact inventory, optional dev preflight, optional bundle preflight, optional `report_path`, `next_step`, and `result`. Use `check --report-path <path>` to write this JSON schema to disk for CI artifacts.
+
+Check reports include `artifacts[]` entries with `kind`, `path`, `required`, and `exists`. Kinds include `check_report`, `dev_event_log_hint`, `dev_report_hint`, `bundle_report_hint`, and `release_report_hint`. These entries are an upload guide for local and CI workflows; hint entries may not exist yet during a lightweight check.
+
+When `check --dev` is used, `dev_preflight` includes dev-server status, frontend command settings, watch-root validation, packaged fallback status, recommended event/report artifact paths, blockers, warnings, recommendations, and `recommended_commands[]`. Unreachable or missing dev servers are warnings when packaged fallback remains usable; blockers are reserved for invalid frontend assets, missing packaged fallback, invalid app configuration, or empty frontend command declarations.
 
 `axion.bundle-report.v1` summarizes the staged bundle target, layout, generated paths, platform metadata paths, copied icon and executable, verification counters, checked paths, readiness blockers, warnings, optional `report_path`, and `result`. It is intended for release automation that needs bundle-specific output rather than the broader diagnostics report schema.
 

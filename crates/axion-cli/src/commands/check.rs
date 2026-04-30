@@ -6,7 +6,13 @@ use crate::commands::doctor::{doctor_gate_for_manifest, doctor_readiness_for_man
 use crate::error::AxionCliError;
 
 pub fn run(args: CheckArgs) -> Result<(), AxionCliError> {
-    let report = check_report(&args);
+    let mut report = check_report(&args);
+
+    if args.report_path.is_some() {
+        report.mark_check_report_artifact_exists();
+    }
+
+    write_check_report_if_requested(&args, &report)?;
 
     if args.json {
         println!("{}", report.to_json());
@@ -18,6 +24,24 @@ pub fn run(args: CheckArgs) -> Result<(), AxionCliError> {
         return Err(std::io::Error::other("check failed").into());
     }
 
+    Ok(())
+}
+
+fn write_check_report_if_requested(
+    args: &CheckArgs,
+    report: &CheckReport,
+) -> Result<(), AxionCliError> {
+    let Some(path) = &args.report_path else {
+        return Ok(());
+    };
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    std::fs::write(path, report.to_json())?;
     Ok(())
 }
 
@@ -107,11 +131,59 @@ fn bundle_preflight(manifest_path: &std::path::Path) -> Result<(), AxionCliError
     Ok(())
 }
 
+fn check_artifacts(args: &CheckArgs) -> Vec<CheckArtifact> {
+    vec![
+        check_artifact(
+            "check_report",
+            args.report_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "target/axion/reports/check.json".to_owned()),
+            args.report_path.is_some(),
+        ),
+        check_artifact(
+            "dev_event_log_hint",
+            "target/axion/reports/dev-events.jsonl",
+            false,
+        ),
+        check_artifact(
+            "dev_report_hint",
+            "target/axion/reports/dev-report.json",
+            false,
+        ),
+        check_artifact(
+            "bundle_report_hint",
+            "target/axion/reports/bundle.json",
+            args.bundle,
+        ),
+        check_artifact(
+            "release_report_hint",
+            "target/axion/reports/release.json",
+            false,
+        ),
+    ]
+}
+
+fn check_artifact(
+    kind: impl Into<String>,
+    path: impl Into<String>,
+    required: bool,
+) -> CheckArtifact {
+    let path = path.into();
+    CheckArtifact {
+        exists: std::path::Path::new(&path).exists(),
+        kind: kind.into(),
+        path,
+        required,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CheckReport {
     manifest_path: String,
     max_risk: String,
     bundle_requested: bool,
+    report_path: Option<String>,
     doctor_passed: bool,
     doctor_failures: Vec<String>,
     ready_for_dev: bool,
@@ -121,6 +193,7 @@ struct CheckReport {
     readiness_warnings: Vec<String>,
     self_test_passed: bool,
     self_test_error: Option<String>,
+    artifacts: Vec<CheckArtifact>,
     bundle_preflight_checked: bool,
     bundle_preflight_passed: Option<bool>,
     bundle_preflight_error: Option<String>,
@@ -129,12 +202,24 @@ struct CheckReport {
     result: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CheckArtifact {
+    kind: String,
+    path: String,
+    required: bool,
+    exists: bool,
+}
+
 impl CheckReport {
     fn new(args: &CheckArgs) -> Self {
         Self {
             manifest_path: args.manifest_path.display().to_string(),
             max_risk: args.max_risk.as_str().to_owned(),
             bundle_requested: args.bundle,
+            report_path: args
+                .report_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
             doctor_passed: false,
             doctor_failures: Vec::new(),
             ready_for_dev: false,
@@ -144,6 +229,7 @@ impl CheckReport {
             readiness_warnings: Vec::new(),
             self_test_passed: false,
             self_test_error: None,
+            artifacts: check_artifacts(args),
             bundle_preflight_checked: false,
             bundle_preflight_passed: None,
             bundle_preflight_error: None,
@@ -185,27 +271,52 @@ impl CheckReport {
         };
     }
 
+    fn mark_check_report_artifact_exists(&mut self) {
+        if let Some(artifact) = self
+            .artifacts
+            .iter_mut()
+            .find(|artifact| artifact.kind == "check_report")
+        {
+            artifact.exists = true;
+        }
+    }
+
     fn print_human(&self) {
-        println!("Axion check");
-        println!("manifest: {}", self.manifest_path);
-        println!(
+        for line in self.human_lines() {
+            println!("{line}");
+        }
+    }
+
+    fn human_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.push("Axion check".to_owned());
+        lines.push(format!("manifest: {}", self.manifest_path));
+        lines.push(format!("result: {}", self.result));
+        lines.push(format!("next_step: {}", self.next_step));
+        lines.push(String::new());
+        lines.push("[gate]".to_owned());
+        lines.push(format!(
             "doctor: {}",
             if self.doctor_passed { "ok" } else { "failed" }
-        );
+        ));
         for reason in &self.doctor_failures {
-            println!("doctor.failure: {reason}");
+            lines.push(format!("doctor.failure: {reason}"));
         }
-        println!(
+        lines.push(String::new());
+        lines.push("[readiness]".to_owned());
+        lines.push(format!(
             "readiness: dev={}, bundle={}, gui_smoke={}",
             self.ready_for_dev, self.ready_for_bundle, self.ready_for_gui_smoke
-        );
+        ));
         for blocker in &self.readiness_blockers {
-            println!("readiness.blocker: {blocker}");
+            lines.push(format!("readiness.blocker: {blocker}"));
         }
         for warning in &self.readiness_warnings {
-            println!("readiness.warning: {warning}");
+            lines.push(format!("readiness.warning: {warning}"));
         }
-        println!(
+        lines.push(String::new());
+        lines.push("[self_test]".to_owned());
+        lines.push(format!(
             "self_test: {}",
             if self.self_test_passed {
                 "ok"
@@ -214,41 +325,53 @@ impl CheckReport {
             } else {
                 "skipped"
             }
-        );
+        ));
         if let Some(error) = &self.self_test_error {
-            println!("self_test.error: {error}");
+            lines.push(format!("self_test.error: {error}"));
         }
+        lines.push(String::new());
+        lines.push("[artifacts]".to_owned());
+        for artifact in &self.artifacts {
+            lines.push(format!(
+                "artifact: kind={}, required={}, exists={}, path={}",
+                artifact.kind, artifact.required, artifact.exists, artifact.path
+            ));
+        }
+        lines.push(String::new());
+        lines.push("[bundle_preflight]".to_owned());
         if self.bundle_preflight_checked {
             match self.bundle_preflight_passed {
-                Some(true) => println!(
+                Some(true) => lines.push(format!(
                     "bundle.preflight: ok (target={})",
                     axion_packager::current_bundle_target().as_str()
-                ),
-                Some(false) => println!(
+                )),
+                Some(false) => lines.push(format!(
                     "bundle.preflight: failed ({})",
                     self.bundle_preflight_error.as_deref().unwrap_or("unknown")
-                ),
-                None => println!("bundle.preflight: skipped"),
+                )),
+                None => lines.push("bundle.preflight: skipped".to_owned()),
             }
         } else {
-            println!("bundle.preflight: skipped (pass --bundle to enable)");
+            lines.push("bundle.preflight: skipped (pass --bundle to enable)".to_owned());
         }
+        lines.push(String::new());
+        lines.push("[dev_preflight]".to_owned());
         if let Some(dev) = &self.dev_preflight {
-            dev.print_human();
+            lines.extend(dev.human_lines());
         } else {
-            println!("dev.preflight: skipped (pass --dev to enable)");
+            lines.push("dev.preflight: skipped (pass --dev to enable)".to_owned());
         }
-        println!("next_step: {}", self.next_step);
-        println!("result: {}", self.result);
+        lines
     }
 
     fn to_json(&self) -> String {
         format!(
-            "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"max_risk\":{},\"bundle_requested\":{},\"dev_requested\":{},\"doctor\":{{\"passed\":{},\"failed_reasons\":{}}},\"readiness\":{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}},\"self_test\":{{\"passed\":{},\"error\":{}}},\"bundle_preflight\":{{\"checked\":{},\"passed\":{},\"error\":{}}},\"dev_preflight\":{},\"next_step\":{},\"result\":{}}}",
+            "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"max_risk\":{},\"bundle_requested\":{},\"dev_requested\":{},\"report_path\":{},\"doctor\":{{\"passed\":{},\"failed_reasons\":{}}},\"readiness\":{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}},\"self_test\":{{\"passed\":{},\"error\":{}}},\"artifacts\":{},\"bundle_preflight\":{{\"checked\":{},\"passed\":{},\"error\":{}}},\"dev_preflight\":{},\"next_step\":{},\"result\":{}}}",
             json_string_literal(&self.manifest_path),
             json_string_literal(&self.max_risk),
             self.bundle_requested,
             self.dev_preflight.is_some(),
+            optional_json_string_literal(self.report_path.as_deref()),
             self.doctor_passed,
             json_string_array_literal(&self.doctor_failures),
             self.ready_for_dev,
@@ -258,6 +381,7 @@ impl CheckReport {
             json_string_array_literal(&self.readiness_warnings),
             self.self_test_passed,
             optional_json_string_literal(self.self_test_error.as_deref()),
+            check_artifact_array_json(&self.artifacts),
             self.bundle_preflight_checked,
             optional_json_bool(self.bundle_preflight_passed),
             optional_json_string_literal(self.bundle_preflight_error.as_deref()),
@@ -284,7 +408,9 @@ struct DevPreflightReport {
     event_log_hint: String,
     report_path_hint: String,
     blockers: Vec<String>,
+    warnings: Vec<String>,
     recommendations: Vec<String>,
+    recommended_commands: Vec<String>,
 }
 
 impl DevPreflightReport {
@@ -301,7 +427,9 @@ impl DevPreflightReport {
             event_log_hint: "target/axion/reports/dev-events.jsonl".to_owned(),
             report_path_hint: "target/axion/reports/dev-report.json".to_owned(),
             blockers: vec![error.into()],
+            warnings: Vec::new(),
             recommendations: Vec::new(),
+            recommended_commands: Vec::new(),
         }
     }
 
@@ -309,44 +437,52 @@ impl DevPreflightReport {
         self.blockers.is_empty()
     }
 
-    fn print_human(&self) {
-        println!(
+    fn human_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.push(format!(
             "dev.preflight: {}",
             if self.passed() { "ok" } else { "failed" }
-        );
-        println!("dev.server: {}", self.dev_server_status);
+        ));
+        lines.push(format!("dev.server: {}", self.dev_server_status));
         if let Some(url) = &self.dev_server_url {
-            println!("dev.server.url: {url}");
+            lines.push(format!("dev.server.url: {url}"));
         }
-        println!("dev.watch_root: {}", self.watch_root);
-        println!("dev.packaged_fallback: {}", self.packaged_fallback);
-        println!(
+        lines.push(format!("dev.watch_root: {}", self.watch_root));
+        lines.push(format!("dev.packaged_fallback: {}", self.packaged_fallback));
+        lines.push(format!(
             "dev.frontend_command: {}",
             if self.frontend_command_configured {
                 "configured"
             } else {
                 "not configured"
             }
-        );
+        ));
         if let Some(cwd) = &self.frontend_cwd {
-            println!("dev.frontend_cwd: {cwd}");
+            lines.push(format!("dev.frontend_cwd: {cwd}"));
         }
         if let Some(timeout_ms) = self.frontend_timeout_ms {
-            println!("dev.frontend_timeout_ms: {timeout_ms}");
+            lines.push(format!("dev.frontend_timeout_ms: {timeout_ms}"));
         }
-        println!("dev.event_log_hint: {}", self.event_log_hint);
-        println!("dev.report_path_hint: {}", self.report_path_hint);
+        lines.push(format!("dev.event_log_hint: {}", self.event_log_hint));
+        lines.push(format!("dev.report_path_hint: {}", self.report_path_hint));
         for blocker in &self.blockers {
-            println!("dev.blocker: {blocker}");
+            lines.push(format!("dev.blocker: {blocker}"));
+        }
+        for warning in &self.warnings {
+            lines.push(format!("dev.warning: {warning}"));
         }
         for recommendation in &self.recommendations {
-            println!("dev.recommendation: {recommendation}");
+            lines.push(format!("dev.recommendation: {recommendation}"));
         }
+        for command in &self.recommended_commands {
+            lines.push(format!("dev.recommended_command: {command}"));
+        }
+        lines
     }
 
     fn to_json(&self) -> String {
         format!(
-            "{{\"checked\":true,\"passed\":{},\"manifest_loaded\":{},\"dev_server\":{{\"status\":{},\"url\":{}}},\"frontend_command\":{{\"configured\":{},\"cwd\":{},\"timeout_ms\":{}}},\"watch_root\":{},\"packaged_fallback\":{},\"event_log_hint\":{},\"report_path_hint\":{},\"blockers\":{},\"recommendations\":{}}}",
+            "{{\"checked\":true,\"passed\":{},\"manifest_loaded\":{},\"dev_server\":{{\"status\":{},\"url\":{}}},\"frontend_command\":{{\"configured\":{},\"cwd\":{},\"timeout_ms\":{}}},\"watch_root\":{},\"packaged_fallback\":{},\"event_log_hint\":{},\"report_path_hint\":{},\"blockers\":{},\"warnings\":{},\"recommendations\":{},\"recommended_commands\":{}}}",
             self.passed(),
             self.manifest_loaded,
             json_string_literal(&self.dev_server_status),
@@ -361,7 +497,9 @@ impl DevPreflightReport {
             json_string_literal(&self.event_log_hint),
             json_string_literal(&self.report_path_hint),
             json_string_array_literal(&self.blockers),
+            json_string_array_literal(&self.warnings),
             json_string_array_literal(&self.recommendations),
+            json_string_array_literal(&self.recommended_commands),
         )
     }
 }
@@ -373,6 +511,7 @@ fn dev_preflight(manifest_path: &std::path::Path) -> DevPreflightReport {
     };
 
     let mut blockers = Vec::new();
+    let mut warnings = Vec::new();
     let mut recommendations = Vec::new();
 
     let watch_root =
@@ -419,13 +558,13 @@ fn dev_preflight(manifest_path: &std::path::Path) -> DevPreflightReport {
             ("reachable".to_owned(), Some(dev_server.url.to_string()))
         }
         Some(dev_server) => {
-            recommendations.push(
+            warnings.push(
                 "dev server is not reachable; start it or pass --fallback-packaged".to_owned(),
             );
             ("unreachable".to_owned(), Some(dev_server.url.to_string()))
         }
         None => {
-            recommendations.push(
+            warnings.push(
                 "no [dev] server is configured; use --fallback-packaged or add [dev] url"
                     .to_owned(),
             );
@@ -454,16 +593,39 @@ fn dev_preflight(manifest_path: &std::path::Path) -> DevPreflightReport {
     }) {
         blockers.push("[dev] command is configured but empty".to_owned());
     }
+    if let Some(dev) = &config.dev {
+        if let Some(cwd) = &dev.cwd {
+            if !cwd.exists() {
+                blockers.push(format!("[dev] cwd does not exist: {}", cwd.display()));
+            } else if !cwd.is_dir() {
+                blockers.push(format!("[dev] cwd is not a directory: {}", cwd.display()));
+            }
+        }
+        if frontend_command_configured && dev.timeout_ms.is_none() {
+            warnings.push(
+                "[dev] command is configured without timeout_ms; default timeout will be used"
+                    .to_owned(),
+            );
+        }
+    }
     if let Some(timeout_ms) = frontend_timeout_ms {
         if timeout_ms < 1000 {
-            recommendations
-                .push("[dev] timeout_ms is very short; consider at least 5000ms".to_owned());
+            warnings.push("[dev] timeout_ms is very short; consider at least 5000ms".to_owned());
         }
     }
 
     recommendations.push(
         "archive dev sessions with --event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json".to_owned(),
     );
+    let manifest = manifest_path.display().to_string();
+    let recommended_commands = vec![
+        format!(
+            "axion check --manifest-path {manifest} --dev --bundle --report-path target/axion/reports/check.json"
+        ),
+        format!(
+            "axion dev --manifest-path {manifest} --launch --fallback-packaged --watch --reload --restart-on-change --event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json"
+        ),
+    ];
 
     DevPreflightReport {
         manifest_loaded: true,
@@ -477,7 +639,9 @@ fn dev_preflight(manifest_path: &std::path::Path) -> DevPreflightReport {
         event_log_hint: "target/axion/reports/dev-events.jsonl".to_owned(),
         report_path_hint: "target/axion/reports/dev-report.json".to_owned(),
         blockers,
+        warnings,
         recommendations,
+        recommended_commands,
     }
 }
 
@@ -491,6 +655,24 @@ fn optional_json_string_literal(value: Option<&str>) -> String {
     value
         .map(json_string_literal)
         .unwrap_or_else(|| "null".to_owned())
+}
+
+fn check_artifact_array_json(values: &[CheckArtifact]) -> String {
+    let values = values
+        .iter()
+        .map(|artifact| {
+            format!(
+                "{{\"kind\":{},\"path\":{},\"required\":{},\"exists\":{}}}",
+                json_string_literal(&artifact.kind),
+                json_string_literal(&artifact.path),
+                artifact.required,
+                artifact.exists,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!("[{values}]")
 }
 
 fn json_string_array_literal(values: &[String]) -> String {
@@ -578,6 +760,7 @@ profiles = ["app-info"]
             max_risk: DoctorRisk::Medium,
             bundle: true,
             dev: false,
+            report_path: None,
             json: false,
             keep_artifacts: false,
         })
@@ -591,6 +774,7 @@ profiles = ["app-info"]
             max_risk: DoctorRisk::Medium,
             bundle: true,
             dev: true,
+            report_path: Some("target/axion/reports/check.json".into()),
             json: true,
             keep_artifacts: false,
         });
@@ -599,15 +783,57 @@ profiles = ["app-info"]
         assert_eq!(report.result, "ok");
         assert!(json.contains("\"schema\":\"axion.check-report.v1\""));
         assert!(json.contains("\"dev_requested\":true"));
+        assert!(json.contains("\"report_path\":\"target/axion/reports/check.json\""));
+        assert!(json.contains("\"artifacts\":["));
+        assert!(json.contains("\"kind\":\"check_report\""));
+        assert!(json.contains("\"kind\":\"dev_event_log_hint\""));
+        assert!(json.contains("\"kind\":\"bundle_report_hint\""));
         assert!(json.contains("\"doctor\":{\"passed\":true"));
         assert!(json.contains("\"ready_for_dev\":true"));
         assert!(json.contains("\"bundle_preflight\":{\"checked\":true,\"passed\":true"));
         assert!(json.contains("\"dev_preflight\":{\"checked\":true,\"passed\":true"));
         assert!(json.contains("\"dev_server\":{\"status\":\"not configured\""));
+        assert!(json.contains("\"warnings\":[\"no [dev] server is configured"));
+        assert!(json.contains("\"recommended_commands\":["));
+        assert!(json.contains("axion check --manifest-path"));
+        assert!(json.contains("axion dev --manifest-path"));
         assert!(json.contains(
             "\"next_step\":\"run axion gui-smoke, then axion bundle --build-executable\""
         ));
         assert!(json.contains("\"result\":\"ok\""));
+    }
+
+    #[test]
+    fn check_human_output_is_grouped_but_keeps_stable_prefixes() {
+        let report = check_report(&CheckArgs {
+            manifest_path: write_check_manifest(),
+            max_risk: DoctorRisk::Medium,
+            bundle: true,
+            dev: true,
+            report_path: Some("target/axion/reports/check.json".into()),
+            json: false,
+            keep_artifacts: false,
+        });
+        let lines = report.human_lines();
+
+        assert!(lines.contains(&"[gate]".to_owned()));
+        assert!(lines.contains(&"[readiness]".to_owned()));
+        assert!(lines.contains(&"[self_test]".to_owned()));
+        assert!(lines.contains(&"[artifacts]".to_owned()));
+        assert!(lines.contains(&"[bundle_preflight]".to_owned()));
+        assert!(lines.contains(&"[dev_preflight]".to_owned()));
+        assert!(lines.iter().any(|line| line.starts_with("artifact: kind=")));
+        assert!(lines.iter().any(|line| line.starts_with("dev.warning: ")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("dev.recommended_command: axion check"))
+        );
+        assert!(
+            lines.iter().any(|line| line
+                == "next_step: run axion gui-smoke, then axion bundle --build-executable")
+        );
+        assert!(lines.iter().any(|line| line == "result: ok"));
     }
 
     #[test]
@@ -629,6 +855,7 @@ timeout_ms = 500
             max_risk: DoctorRisk::Medium,
             bundle: false,
             dev: true,
+            report_path: None,
             json: true,
             keep_artifacts: false,
         });
@@ -637,7 +864,68 @@ timeout_ms = 500
         assert_eq!(report.result, "ok");
         assert!(json.contains("\"status\":\"unreachable\""));
         assert!(json.contains("\"frontend_command\":{\"configured\":true"));
-        assert!(json.contains("dev server is not reachable"));
-        assert!(json.contains("timeout_ms is very short"));
+        assert!(json.contains("\"warnings\":[\"dev server is not reachable"));
+        assert!(json.contains("[dev] timeout_ms is very short"));
+        assert!(json.contains("\"blockers\":[]"));
+    }
+
+    #[test]
+    fn check_dev_preflight_rejects_missing_frontend_cwd() {
+        let manifest = write_check_manifest();
+        let mut body = fs::read_to_string(&manifest).unwrap();
+        body.push_str(
+            r#"
+[dev]
+url = "http://127.0.0.1:9"
+command = "python3 -m http.server 3000"
+cwd = "missing-frontend"
+"#,
+        );
+        fs::write(&manifest, body).unwrap();
+
+        let report = check_report(&CheckArgs {
+            manifest_path: manifest,
+            max_risk: DoctorRisk::Medium,
+            bundle: false,
+            dev: true,
+            report_path: None,
+            json: true,
+            keep_artifacts: false,
+        });
+        let json = report.to_json();
+
+        assert_eq!(report.result, "failed");
+        assert!(json.contains("[dev] cwd does not exist"));
+        assert!(json.contains(
+            "[dev] command is configured without timeout_ms; default timeout will be used"
+        ));
+        assert!(json.contains(
+            "\"next_step\":\"fix dev preflight blockers before using axion dev --launch\""
+        ));
+    }
+
+    #[test]
+    fn check_report_writes_json_to_report_path() {
+        let root = temp_dir();
+        let report_path = root.join("reports").join("check.json");
+
+        run(CheckArgs {
+            manifest_path: write_check_manifest(),
+            max_risk: DoctorRisk::Medium,
+            bundle: true,
+            dev: true,
+            report_path: Some(report_path.clone()),
+            json: false,
+            keep_artifacts: false,
+        })
+        .expect("check should write report");
+
+        let body = fs::read_to_string(report_path).expect("check report should exist");
+        assert!(body.contains("\"schema\":\"axion.check-report.v1\""));
+        assert!(body.contains("\"artifacts\":["));
+        assert!(body.contains("\"kind\":\"check_report\",\"path\":\""));
+        assert!(body.contains("\"required\":true,\"exists\":true"));
+        assert!(body.contains("\"dev_preflight\":{\"checked\":true"));
+        assert!(body.contains("\"bundle_preflight\":{\"checked\":true"));
     }
 }
