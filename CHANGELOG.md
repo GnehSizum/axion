@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.1.21.0 - Preview
+
+Axion v0.1.21.0 stabilizes lifecycle GUI smoke coverage on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.21`.
+- Axion public release metadata is `v0.1.21.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added a third `preview` window to the `multi-window` example so GUI smoke can close secondary windows without losing the reporting window.
+- Added GUI smoke coverage for `window.close_completed`, `window.close_timed_out`, and `window.closed` lifecycle events.
+- Added targeted close-decision helpers in the `multi-window` frontend for deterministic confirm and timeout paths.
+
+### Changed
+
+- Updated the `multi-window` manual close buttons to explicitly confirm targeted close requests instead of relying on implicit command-close decisions.
+- Updated release metadata and public documentation for v0.1.21.0.
+
 ## v0.1.20.0 - Preview
 
 Axion v0.1.20.0 adds an application-level exit lifecycle event on the current Servo `0.1` baseline.

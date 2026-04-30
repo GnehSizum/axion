@@ -22,6 +22,14 @@ height = 420
 resizable = false
 visible = true
 
+[[windows]]
+id = "preview"
+title = "Preview"
+width = 520
+height = 420
+resizable = false
+visible = true
+
 [build]
 frontend_dist = "frontend"
 entry = "frontend/index.html"
@@ -44,6 +52,12 @@ allowed_navigation_origins = []
 allow_remote_navigation = false
 
 [capabilities.settings]
+profiles = ["app-events"]
+commands = ["window.info", "window.reload", "window.focus", "window.set_title", "window.close", "window.confirm_close", "window.prevent_close"]
+allowed_navigation_origins = ["https://docs.example"]
+allow_remote_navigation = false
+
+[capabilities.preview]
 profiles = ["app-events"]
 commands = ["window.info", "window.reload", "window.focus", "window.set_title", "window.close", "window.confirm_close", "window.prevent_close"]
 allowed_navigation_origins = ["https://docs.example"]

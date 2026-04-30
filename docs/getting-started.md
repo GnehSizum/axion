@@ -45,8 +45,8 @@ To inspect per-window capability behavior:
 cargo run -p multi-window --features servo-runtime
 ```
 
-The `main` window can call app-level commands, while the `settings` window is restricted to window-local controls such as `window.info`, `window.focus`, and `window.set_title`.
-The updated example also lets the `main` window use `window.list` plus `{ target: "settings" }` to inspect and rename the `settings` window.
+The `main` window can call app-level commands, while the `settings` and `preview` windows are restricted to window-local controls such as `window.info`, `window.focus`, and `window.set_title`.
+The updated example also lets the `main` window use `window.list` plus `{ target: "settings" }` or `{ target: "preview" }` to inspect, rename, and close secondary windows.
 
 To inspect controlled filesystem and dialog capabilities:
 

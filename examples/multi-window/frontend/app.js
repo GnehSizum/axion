@@ -2,6 +2,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   const status = document.getElementById('bridge-status');
   const details = document.getElementById('bridge-details');
   const closeSettingsButton = document.getElementById('close-settings');
+  const closePreviewButton = document.getElementById('close-preview');
   const appExitButton = document.getElementById('app-exit');
   const preventCloseCheckbox = document.getElementById('prevent-close');
   if (!window.__AXION__) {
@@ -37,6 +38,29 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
     throw new Error(`timed out after ${timeoutMs}ms`);
   };
+  const waitForLifecycleEvent = (name, predicate, timeoutMs = 4200) =>
+    waitFor(
+      () =>
+        results.lifecycleEvents.find(
+          (event) => event.name === name && (!predicate || predicate(event.payload)),
+        ),
+      timeoutMs,
+    );
+
+  const closeTargetWithDecision = async (target, decision) => {
+    const closeRequest = await bridge.invoke('window.close', { target });
+    const requestId = closeRequest?.requestId;
+    if (typeof requestId !== 'string') {
+      throw new Error(`window.close did not return requestId for ${target}`);
+    }
+    if (decision === 'confirm') {
+      await bridge.invoke('window.confirm_close', { requestId });
+    } else if (decision === 'prevent') {
+      await bridge.invoke('window.prevent_close', { requestId });
+    }
+    return closeRequest;
+  };
+
   window.__AXION_GUI_SMOKE__ = async () => {
     const checks = [];
     const addCheck = (id, status, detail) => checks.push({ id, status, detail });
@@ -124,6 +148,85 @@ window.addEventListener('DOMContentLoaded', async () => {
         }
       } else {
         addCheck('window.close.lifecycle', 'skip', 'close lifecycle commands not available');
+      }
+
+      const targetedCloseAvailable =
+        bridge.commands.includes('window.list') &&
+        bridge.commands.includes('window.close') &&
+        bridge.commands.includes('window.confirm_close') &&
+        bridge.hostEvents.includes('window.close_completed') &&
+        bridge.hostEvents.includes('window.close_timed_out') &&
+        bridge.hostEvents.includes('window.closed');
+      if (targetedCloseAvailable) {
+        const settingsClose = await closeTargetWithDecision('settings', 'confirm');
+        addCheck(
+          'window.close.settings.pending',
+          settingsClose?.pending === true && settingsClose?.window?.id === 'settings'
+            ? 'pass'
+            : 'fail',
+          formatPretty(settingsClose),
+        );
+
+        const completedEvent = await waitForLifecycleEvent(
+          'window.close_completed',
+          (payload) =>
+            payload?.windowId === 'settings' &&
+            payload?.requestId === settingsClose.requestId &&
+            payload?.status === 'completed',
+        );
+        addCheck(
+          'window.close_completed.event',
+          completedEvent?.payload?.status === 'completed' ? 'pass' : 'fail',
+          formatPretty(completedEvent?.payload),
+        );
+
+        const settingsClosedEvent = await waitForLifecycleEvent(
+          'window.closed',
+          (payload) => payload?.windowId === 'settings',
+        );
+        addCheck(
+          'window.closed.settings.event',
+          settingsClosedEvent?.payload?.windowId === 'settings' ? 'pass' : 'fail',
+          formatPretty(settingsClosedEvent?.payload),
+        );
+
+        const previewClose = await closeTargetWithDecision('preview', 'timeout');
+        addCheck(
+          'window.close.preview.pending',
+          previewClose?.pending === true && previewClose?.window?.id === 'preview'
+            ? 'pass'
+            : 'fail',
+          formatPretty(previewClose),
+        );
+
+        const timedOutEvent = await waitForLifecycleEvent(
+          'window.close_timed_out',
+          (payload) =>
+            payload?.windowId === 'preview' &&
+            payload?.requestId === previewClose.requestId &&
+            payload?.status === 'timed_out',
+        );
+        addCheck(
+          'window.close_timed_out.event',
+          timedOutEvent?.payload?.status === 'timed_out' ? 'pass' : 'fail',
+          formatPretty(timedOutEvent?.payload),
+        );
+
+        const previewClosedEvent = await waitForLifecycleEvent(
+          'window.closed',
+          (payload) => payload?.windowId === 'preview',
+        );
+        addCheck(
+          'window.closed.preview.event',
+          previewClosedEvent?.payload?.windowId === 'preview' ? 'pass' : 'fail',
+          formatPretty(previewClosedEvent?.payload),
+        );
+      } else {
+        addCheck(
+          'window.close.targeted_lifecycle',
+          'skip',
+          'targeted close lifecycle is not fully available',
+        );
       }
 
       const appExitLifecycleAvailable =
@@ -246,6 +349,10 @@ window.addEventListener('DOMContentLoaded', async () => {
           render();
           return;
         }
+        if (payload?.reason === 'command') {
+          render();
+          return;
+        }
         const shouldPrevent = preventCloseCheckbox?.checked === true;
         const command = shouldPrevent ? 'window.prevent_close' : 'window.confirm_close';
         if (!results.manualCloseDecision && bridge.commands.includes(command)) {
@@ -307,15 +414,34 @@ window.addEventListener('DOMContentLoaded', async () => {
       );
       closeSettingsButton.addEventListener('click', async () => {
         try {
-          results.allowedCalls.closedSettings = await bridge.invoke('window.close', {
-            target: 'settings',
-          });
+          results.allowedCalls.closedSettings = await closeTargetWithDecision('settings', 'confirm');
           if (bridge.commands.includes('window.list')) {
             results.allowedCalls.windowListAfterClose = await bridge.invoke('window.list', null);
           }
           render();
         } catch (error) {
           results.deniedProbes['window.close'] =
+            error instanceof Error ? error.message : String(error);
+          render();
+        }
+      });
+    }
+    if (closePreviewButton) {
+      closePreviewButton.disabled = !(
+        bridge.commands.includes('window.close') && bridge.commands.includes('window.list')
+      );
+      closePreviewButton.addEventListener('click', async () => {
+        try {
+          results.allowedCalls.closedPreview = await closeTargetWithDecision('preview', 'confirm');
+          if (bridge.commands.includes('window.list')) {
+            results.allowedCalls.windowListAfterPreviewClose = await bridge.invoke(
+              'window.list',
+              null,
+            );
+          }
+          render();
+        } catch (error) {
+          results.deniedProbes['window.close.preview'] =
             error instanceof Error ? error.message : String(error);
           render();
         }

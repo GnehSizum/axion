@@ -387,8 +387,12 @@ mod enabled {
                 return;
             }
 
-            if (self.self_test_bridge || self.gui_smoke) && !self.self_test_started.replace(true) {
-                self.start_self_test(webview);
+            if self.self_test_bridge || self.gui_smoke {
+                if self.is_first_webview(webview.id()) && !self.self_test_started.replace(true) {
+                    self.start_self_test(webview);
+                } else {
+                    self.queue_startup_events(&webview);
+                }
             } else {
                 self.queue_startup_events(&webview);
             }
@@ -424,6 +428,13 @@ mod enabled {
                 .borrow()
                 .first()
                 .map(|runtime_window| runtime_window.webview.clone())
+        }
+
+        fn is_first_webview(&self, webview_id: servo::WebViewId) -> bool {
+            self.windows
+                .borrow()
+                .first()
+                .is_some_and(|runtime_window| runtime_window.webview.id() == webview_id)
         }
 
         fn binding_for_webview(

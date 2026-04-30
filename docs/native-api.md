@@ -97,7 +97,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.20", release: "v0.1.20.0", framework: "axion" }
+// { version: "0.1.21", release: "v0.1.21.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -227,7 +227,7 @@ Requests application shutdown by asking all runtime windows to close. If windows
 
 ```js
 await window.__AXION__.invoke("app.exit", null);
-// { pending: true, requestId: "axion-exit-1", windowCount: 2, requestCount: 2 }
+// { pending: true, requestId: "axion-exit-1", windowCount: 3, requestCount: 3 }
 ```
 
 ### Host Lifecycle Events

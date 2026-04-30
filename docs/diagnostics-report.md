@@ -83,7 +83,7 @@ The command exits non-zero if manifest loading, runtime diagnostics, asset stagi
 
 ## Local GUI Smoke
 
-`axion gui-smoke` is the preferred local entrypoint. It runs the Servo-backed window, captures the returned diagnostics report, validates the schema and `result: "ok"`, optionally writes it to `--report-path`, prints a `smoke_checks` summary for human runs, and exits. Lifecycle-aware demos should cover `window.close_requested`, window close outcome events such as `window.close_prevented`, `app.exit_requested`, and app exit outcome events such as `app.exit_prevented` when those capabilities are enabled. The bridge diagnostics demo implements the required `window.__AXION_GUI_SMOKE__()` hook.
+`axion gui-smoke` is the preferred local entrypoint. It runs the Servo-backed window, captures the returned diagnostics report, validates the schema and `result: "ok"`, optionally writes it to `--report-path`, prints a `smoke_checks` summary for human runs, and exits. Lifecycle-aware demos should cover `window.close_requested`, window close outcome events such as `window.close_prevented`, `window.close_completed`, and `window.close_timed_out`, `app.exit_requested`, and app exit outcome events such as `app.exit_prevented` when those capabilities are enabled. The bridge diagnostics demo implements the required `window.__AXION_GUI_SMOKE__()` hook.
 
 ```sh
 cargo run -p axion-cli -- gui-smoke \
