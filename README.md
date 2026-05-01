@@ -2,7 +2,7 @@
 
 Axion is a Rust desktop application framework built on a vendored Servo engine. It provides an explicit manifest, capability-gated JavaScript bridge, packaged app assets, runtime diagnostics, and a `winit` desktop backend.
 
-Axion is currently at the **v0.1.29.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
+Axion is currently at the **v0.1.30.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
 
 ## What Works Today
 
@@ -80,6 +80,7 @@ Each checked-in example includes a local `README.md` with its purpose, run comma
 - Public docs: `docs/README.md`
 - Getting started: `docs/getting-started.md`
 - CLI reference: `docs/cli.md`
+- CI validation guide: `docs/ci.md`
 - Packaging guide: `docs/packaging.md`
 - Diagnostics report schema: `docs/diagnostics-report.md`
 - Manifest guide: `docs/manifest.md`
@@ -115,7 +116,8 @@ cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --json
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-bundle.json
 cargo run -p axion-cli -- release --manifest-path examples/hello-axion/axion.toml --check-report-path target/axion/reports/hello-check.json --json --report-path target/axion/reports/hello-release.json --bundle-report-path target/axion/reports/hello-bundle.json --archive --archive-path target/axion/reports/hello-bundle.tar
-cargo run -p axion-cli -- report target/axion/reports/hello-release.json
+cargo run -p axion-cli -- report target/axion/reports/hello-release.json --output target/axion/reports/hello-release-summary.json
+cargo run -p axion-cli -- report target/axion/reports/hello-gui-smoke.json --allow-failed --output target/axion/reports/hello-gui-smoke-summary.json
 cargo run -p axion-cli -- doctor --manifest-path examples/file-access-demo/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/file-access-demo/axion.toml
 cargo run -p axion-cli -- gui-smoke --manifest-path examples/file-access-demo/axion.toml --report-path target/axion/reports/file-access-gui-smoke.json --timeout-ms 30000
@@ -132,4 +134,4 @@ Servo warnings from the vendored `servo/` subtree are not Axion release blockers
 
 ## Versioning
 
-Axion public releases use four-part tags such as `v0.1.29.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.29`. See `docs/versioning.md`.
+Axion public releases use four-part tags such as `v0.1.30.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.30`. See `docs/versioning.md`.

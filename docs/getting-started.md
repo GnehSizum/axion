@@ -151,7 +151,7 @@ cargo run -p axion-cli -- build --manifest-path /tmp/demo-app/axion.toml
 cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml --build-executable
 cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml --build-executable --json --report-path target/axion/reports/demo-app-bundle.json
 cargo run -p axion-cli -- release --manifest-path /tmp/demo-app/axion.toml --check-report-path target/axion/reports/check.json --json --report-path target/axion/reports/demo-app-release.json --bundle-report-path target/axion/reports/demo-app-bundle.json --archive
-cargo run -p axion-cli -- report target/axion/reports/demo-app-release.json
+cargo run -p axion-cli -- report target/axion/reports/demo-app-release.json --output target/axion/reports/demo-app-release-summary.json
 ```
 
 `check` is the fastest default validation loop: it runs the doctor gate, readiness, quiet self-test staging, and optional dev/bundle preflight. Use `check --dev --bundle --json --report-path target/axion/reports/check.json` for CI and `doctor` when you need the full diagnostics detail. Continue when development, bundle, and GUI smoke readiness are all `true`; otherwise resolve the printed `readiness.blocker` or `dev.blocker` lines first. `dev.warning` entries are advisory and commonly report a missing or unreachable dev server when packaged fallback is available. The check report includes `artifacts[]` with recommended report paths under `target/axion/reports/`.

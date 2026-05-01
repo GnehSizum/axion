@@ -282,6 +282,7 @@ Summarize an Axion JSON report without rerunning the original command. The comma
 cargo run -p axion-cli -- report target/axion/reports/hello-release.json
 cargo run -p axion-cli -- report target/axion/reports/hello-gui-smoke.json --json
 cargo run -p axion-cli -- report target/axion/reports/failed-gui-smoke.json --allow-failed
+cargo run -p axion-cli -- report target/axion/reports/hello-release.json --output target/axion/reports/hello-release-summary.json
 ```
 
-Human output includes schema, kind, manifest, result, failure phase, next step, typed next-action kinds, smoke-check failures, error codes, and artifact inventory when those fields exist. By default, `report` exits non-zero when the source report has `result = "failed"` so CI can fail on summarized artifacts. Use `--allow-failed` when a later CI step should summarize and upload failed reports without changing the job status.
+Human output includes schema, kind, manifest, result, failure phase, next step, typed next-action kinds, smoke-check failures, error codes, and artifact inventory when those fields exist. Use `--output <path>` to write the normalized `axion.report-summary.v1` JSON summary while preserving the selected stdout mode. The command accepts check, release, bundle, diagnostics, and dev-session reports; it rejects unsupported schemas, incomplete JSON objects, and reports without a top-level string `result`. By default, `report` exits non-zero when the source report has `result = "failed"` so CI can fail on summarized artifacts. Use `--allow-failed` when a later CI step should summarize and upload failed reports without changing the job status.

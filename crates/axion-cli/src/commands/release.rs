@@ -224,6 +224,16 @@ struct ArtifactReport {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReleaseSummary {
+    artifacts_total: usize,
+    artifacts_missing: usize,
+    artifacts_with_errors: usize,
+    check_report_reused: bool,
+    archive_requested: bool,
+    archive_passed: bool,
+}
+
 impl ReleaseReport {
     fn new(args: &ReleaseArgs) -> Self {
         Self {
@@ -364,9 +374,35 @@ impl ReleaseReport {
         self.artifacts = artifacts;
     }
 
+    fn summary(&self) -> ReleaseSummary {
+        ReleaseSummary {
+            artifacts_total: self.artifacts.len(),
+            artifacts_missing: self
+                .artifacts
+                .iter()
+                .filter(|artifact| !artifact.exists)
+                .count(),
+            artifacts_with_errors: self
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.error.is_some())
+                .count(),
+            check_report_reused: self.check_report_reused,
+            archive_requested: self.archive.requested,
+            archive_passed: self.archive.passed,
+        }
+    }
+
     fn print_human(&self) {
+        let summary = self.summary();
         println!("Axion release");
         println!("manifest: {}", self.manifest_path);
+        println!(
+            "summary: result={}, phase={}, next_step={}",
+            self.result,
+            self.failure_phase.as_deref().unwrap_or("none"),
+            self.next_step
+        );
         println!(
             "doctor: {}",
             if self.doctor_passed { "ok" } else { "failed" }
@@ -468,6 +504,10 @@ impl ReleaseReport {
                 println!("check_report.error: {error}");
             }
         }
+        println!(
+            "artifacts: total={}, missing={}, errors={}",
+            summary.artifacts_total, summary.artifacts_missing, summary.artifacts_with_errors
+        );
         for artifact in &self.artifacts {
             println!(
                 "artifact: kind={}, exists={}, path={}",
@@ -497,8 +537,9 @@ impl ReleaseReport {
     }
 
     fn to_json(&self) -> String {
+        let summary = self.summary();
         format!(
-            "{{\"schema\":\"axion.release-report.v1\",\"manifest_path\":{},\"max_risk\":{},\"report_path\":{},\"bundle_report_path\":{},\"check_report\":{{\"path\":{},\"reused\":{},\"error\":{}}},\"doctor\":{{\"passed\":{},\"failed_reasons\":{}}},\"readiness\":{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}},\"self_test\":{{\"passed\":{},\"error\":{}}},\"bundle\":{{\"passed\":{},\"error\":{},\"build_executable\":{},\"bundle_dir\":{},\"bundle_manifest\":{},\"bundle_bytes\":{},\"report\":{}}},\"archive\":{},\"artifacts\":{},\"failure_phase\":{},\"failed_reasons\":{},\"next_step\":{},\"result\":{}}}",
+            "{{\"schema\":\"axion.release-report.v1\",\"manifest_path\":{},\"max_risk\":{},\"report_path\":{},\"bundle_report_path\":{},\"check_report\":{{\"path\":{},\"reused\":{},\"error\":{}}},\"doctor\":{{\"passed\":{},\"failed_reasons\":{}}},\"readiness\":{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}},\"self_test\":{{\"passed\":{},\"error\":{}}},\"bundle\":{{\"passed\":{},\"error\":{},\"build_executable\":{},\"bundle_dir\":{},\"bundle_manifest\":{},\"bundle_bytes\":{},\"report\":{}}},\"archive\":{},\"artifacts\":{},\"summary\":{},\"failure_phase\":{},\"failed_reasons\":{},\"next_step\":{},\"result\":{}}}",
             json_string_literal(&self.manifest_path),
             json_string_literal(&self.max_risk),
             optional_json_string_literal(self.report_path.as_deref()),
@@ -524,10 +565,25 @@ impl ReleaseReport {
             self.bundle_report.as_deref().unwrap_or("null"),
             self.archive.to_json(),
             artifact_array_json(&self.artifacts),
+            summary.json(),
             optional_json_string_literal(self.failure_phase.as_deref()),
             json_string_array_literal(&self.failed_reasons),
             json_string_literal(&self.next_step),
             json_string_literal(&self.result),
+        )
+    }
+}
+
+impl ReleaseSummary {
+    fn json(&self) -> String {
+        format!(
+            "{{\"artifacts_total\":{},\"artifacts_missing\":{},\"artifacts_with_errors\":{},\"check_report_reused\":{},\"archive_requested\":{},\"archive_passed\":{}}}",
+            self.artifacts_total,
+            self.artifacts_missing,
+            self.artifacts_with_errors,
+            self.check_report_reused,
+            self.archive_requested,
+            self.archive_passed,
         )
     }
 }
@@ -966,9 +1022,16 @@ mod tests {
         assert!(json.contains("\"schema\":\"axion.release-report.v1\""));
         assert!(json.contains("\"bundle\":{\"passed\":false"));
         assert!(json.contains("\"archive\":{\"requested\":true,\"passed\":false"));
+        assert!(json.contains("\"summary\":{\"artifacts_total\":"));
+        assert!(json.contains("\"artifacts_missing\":"));
+        assert!(json.contains("\"artifacts_with_errors\":"));
+        assert!(json.contains("\"check_report_reused\":false"));
+        assert!(json.contains("\"archive_requested\":true"));
+        assert!(json.contains("\"archive_passed\":false"));
         assert!(json.contains("\"failure_phase\":"));
         assert!(json.contains("\"failed_reasons\":["));
         assert!(json.contains("\"result\":\"failed\""));
+        assert_eq!(report.summary().artifacts_total, report.artifacts.len());
     }
 
     #[test]

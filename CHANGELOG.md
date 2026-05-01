@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.1.30.0 - Preview
+
+Axion v0.1.30.0 hardens report consumption and CI guidance on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.30`.
+- Axion public release metadata is `v0.1.30.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added stricter `axion report` validation for unsupported schemas, incomplete JSON objects, and missing top-level `result` fields.
+- Added `axion report --output <path>` and `axion.dev-report.v1` summary support for CI artifact normalization.
+- Added compact release artifact summary fields for release reports and human output.
+- Added CI-focused documentation for `check -> gui-smoke -> release -> report` artifact flows.
+- Added GitHub Actions report summary generation and artifact upload paths for check, GUI smoke, and release preview jobs.
+
+### Changed
+
+- Generated app Cargo versions now use `0.1.30`.
+- Generated app README sections now separate local run, CI validation, and release preview commands.
+- Updated public docs and release metadata for v0.1.30.0.
+
 ## v0.1.29.0 - Preview
 
 Axion v0.1.29.0 stabilizes report consumption and release report reuse on the current Servo `0.1` baseline.

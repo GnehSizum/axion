@@ -6,6 +6,7 @@ This directory contains public, user-facing documentation for Axion.
 
 - `getting-started.md`: create and run a minimal Axion app.
 - `cli.md`: command reference for `axion-cli`.
+- `ci.md`: CI validation flow and report artifact guidance.
 - `manifest.md`: `axion.toml` configuration guide.
 - `capabilities.md`: profile expansion, permission risk, and least-privilege examples.
 - `packaging.md`: bundle layouts, verification, icons, and release checks.
@@ -22,7 +23,7 @@ This directory contains public, user-facing documentation for Axion.
 
 ## Current Version
 
-Axion is at **v0.1.29.0 developer preview**. The current preview focuses on the core desktop framework loop:
+Axion is at **v0.1.30.0 developer preview**. The current preview focuses on the core desktop framework loop:
 
 1. load an app manifest
 2. build a runtime plan
@@ -46,7 +47,8 @@ Axion is at **v0.1.29.0 developer preview**. The current preview focuses on the 
 20. export stable bundle reports through `axion bundle --json` and `--report-path`
 21. run a preview artifact workflow through `axion release`, including check report reuse, artifact inventory, and archive verification
 22. summarize existing check, release, bundle, and GUI diagnostics reports through `axion report`
-22. generate a focused native API demo template with `axion new --template native-api-demo`
-23. use example-specific README files for smoke app purpose, run commands, GUI smoke commands, and expected warnings
+23. reject malformed report artifacts early while allowing failed-report summaries with `axion report --allow-failed`
+24. generate a focused native API demo template with `axion new --template native-api-demo`
+25. use example-specific README files for smoke app purpose, run commands, GUI smoke commands, and expected warnings
 
 Project-internal milestone plans and release notes are intentionally not part of the public documentation set.

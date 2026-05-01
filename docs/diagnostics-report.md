@@ -14,7 +14,7 @@ The CLI report is generated through the shared `axion_runtime::DiagnosticsReport
 - `axion bundle --report-path <path>`: writes the same bundle report to disk.
 - `axion release --json`: prints the aggregate release artifact workflow using `axion.release-report.v1`.
 - `axion release --report-path <path>`: writes the same release report to disk.
-- `axion report <path>`: reads an existing Axion report and prints a normalized `axion.report-summary.v1` summary with `--json`. Use `--allow-failed` to summarize failed reports without returning a failed exit status.
+- `axion report <path>`: reads an existing Axion report and prints a normalized `axion.report-summary.v1` summary with `--json` or writes it with `--output <path>`. Use `--allow-failed` to summarize failed reports without returning a failed exit status.
 - `axion gui-smoke --report-path <path>`: runs a Servo-backed GUI smoke check and writes the returned GUI report.
 - `examples/bridge-diagnostics-demo`: exports a GUI-side report from app-data.
 - `window.__AXION__.diagnostics.reportSchema`: exposes the active schema string to frontends.
@@ -67,7 +67,7 @@ When `check --dev` is used, `dev_preflight` includes dev-server status, frontend
 
 `axion.bundle-report.v1` summarizes the staged bundle target, layout, generated paths, platform metadata paths, copied icon and executable, verification counters, checked paths, readiness blockers, warnings, optional `report_path`, and `result`. It is intended for release automation that needs bundle-specific output rather than the broader diagnostics report schema.
 
-`axion.release-report.v1` summarizes the full preview artifact workflow: optional reused check report metadata, doctor gate, readiness, self-test, embedded bundle report, optional archive artifact metadata, artifact inventory, first failure diagnostics, `next_step`, and `result`. `release --check-report-path` only reuses a matching check report when `result`, doctor, self-test, bundle preflight, and release readiness all pass.
+`axion.release-report.v1` summarizes the full preview artifact workflow: optional reused check report metadata, doctor gate, readiness, self-test, embedded bundle report, optional archive artifact metadata, artifact inventory, compact artifact `summary`, first failure diagnostics, `next_step`, and `result`. `release --check-report-path` only reuses a matching check report when `result`, doctor, self-test, bundle preflight, and release readiness all pass.
 
 Release reports include:
 
@@ -78,7 +78,7 @@ Release reports include:
 
 The release report artifact itself records only path and existence because report size or fingerprint would be self-referential. Other file artifacts include byte counts and `fnv1a64` when they exist and can be read.
 
-`axion.report-summary.v1` is emitted by `axion report --json`. It does not replace the source report; it provides a small normalized view with `source_schema`, `kind`, `manifest_path`, `result`, `failure_phase`, `next_step`, `next_action_kinds`, optional smoke-check summary, and artifact inventory.
+`axion.report-summary.v1` is emitted by `axion report --json` and written by `axion report --output <path>`. It does not replace the source report; it provides a small normalized view with `source_schema`, `kind`, `manifest_path`, `result`, `failure_phase`, `next_step`, `next_action_kinds`, optional smoke-check summary, and artifact inventory. The source report must be a complete JSON object with one of the supported Axion report schemas and a top-level string `result`. Supported source schemas are `axion.check-report.v1`, `axion.release-report.v1`, `axion.bundle-report.v1`, `axion.diagnostics-report.v1`, and `axion.dev-report.v1`.
 
 ## Dev Event Stream
 

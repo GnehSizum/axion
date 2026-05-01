@@ -5,21 +5,27 @@ use axion_runtime::json_string_literal;
 use crate::cli::ReportArgs;
 use crate::commands::report_util::{
     json_array_section, json_bool_field, json_string_array_literal, json_string_field,
-    json_string_fields, next_json_object, optional_json_string_field, optional_json_string_literal,
+    json_string_fields, matching_json_delimiter, next_json_object, optional_json_string_field,
+    optional_json_string_literal,
 };
 use crate::error::AxionCliError;
 
 pub fn run(args: ReportArgs) -> Result<(), AxionCliError> {
     let body = std::fs::read_to_string(&args.path)?;
     let summary = ReportSummary::from_json(&args.path, &body)?;
+    let summary_json = summary.to_json();
 
     if args.json {
-        println!("{}", summary.to_json());
+        println!("{summary_json}");
     } else {
         summary.print_human();
     }
 
-    if summary.result.as_deref() == Some("failed") && !args.allow_failed {
+    if let Some(output) = &args.output {
+        write_summary_json(output, &summary_json)?;
+    }
+
+    if summary.result == "failed" && !args.allow_failed {
         return Err(std::io::Error::other("report result is failed").into());
     }
 
@@ -32,7 +38,7 @@ struct ReportSummary {
     schema: String,
     kind: String,
     manifest_path: Option<String>,
-    result: Option<String>,
+    result: String,
     failure_phase: Option<String>,
     next_step: Option<String>,
     next_action_kinds: Vec<String>,
@@ -51,14 +57,38 @@ struct ReportArtifact {
 
 impl ReportSummary {
     fn from_json(path: &Path, body: &str) -> Result<Self, AxionCliError> {
+        validate_report_shape(body)?;
         let schema = json_string_field(body, "schema").ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "report is missing schema")
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "report is missing schema; expected one of: {}",
+                    supported_report_schemas().join(", ")
+                ),
+            )
         })?;
-        let kind = report_kind(&schema).to_owned();
-        let manifest_path = json_string_field(body, "manifest_path");
-        let result = json_string_field(body, "result");
+        let kind = report_kind(&schema)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "unsupported report schema '{schema}'; expected one of: {}",
+                        supported_report_schemas().join(", ")
+                    ),
+                )
+            })?
+            .to_owned();
+        let manifest_path = json_string_field(body, "manifest_path")
+            .or_else(|| json_string_field(body, "manifestPath"));
+        let result = json_string_field(body, "result").ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "report is missing string result field",
+            )
+        })?;
         let failure_phase = optional_json_string_field(body, "failure_phase");
-        let next_step = json_string_field(body, "next_step");
+        let next_step =
+            json_string_field(body, "next_step").or_else(|| json_string_field(body, "nextStep"));
         let next_action_kinds = json_array_section(body, "\"next_actions\"")
             .map(|section| json_string_fields(section, "kind"))
             .unwrap_or_default();
@@ -96,7 +126,7 @@ impl ReportSummary {
         if let Some(manifest_path) = &self.manifest_path {
             println!("manifest: {manifest_path}");
         }
-        println!("result: {}", self.result.as_deref().unwrap_or("unknown"));
+        println!("result: {}", self.result);
         println!(
             "failure_phase: {}",
             self.failure_phase.as_deref().unwrap_or("none")
@@ -140,7 +170,7 @@ impl ReportSummary {
             json_string_literal(&self.schema),
             json_string_literal(&self.kind),
             optional_json_string_literal(self.manifest_path.as_deref()),
-            optional_json_string_literal(self.result.as_deref()),
+            json_string_literal(&self.result),
             optional_json_string_literal(self.failure_phase.as_deref()),
             optional_json_string_literal(self.next_step.as_deref()),
             json_string_array_literal(&self.next_action_kinds),
@@ -157,14 +187,63 @@ struct SmokeSummary {
     error_codes: Vec<String>,
 }
 
-fn report_kind(schema: &str) -> &'static str {
-    match schema {
-        "axion.check-report.v1" => "check",
-        "axion.release-report.v1" => "release",
-        "axion.bundle-report.v1" => "bundle",
-        "axion.diagnostics-report.v1" => "diagnostics",
-        _ => "unknown",
+fn validate_report_shape(body: &str) -> Result<(), AxionCliError> {
+    let body = body.trim();
+    if !body.starts_with('{') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "report must be a JSON object",
+        )
+        .into());
     }
+
+    let object_end = matching_json_delimiter(body, 0, '{', '}').ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "report is not a complete JSON object",
+        )
+    })?;
+    if object_end != body.len() - 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "report contains trailing data after the top-level JSON object",
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+fn supported_report_schemas() -> Vec<&'static str> {
+    vec![
+        "axion.check-report.v1",
+        "axion.release-report.v1",
+        "axion.bundle-report.v1",
+        "axion.diagnostics-report.v1",
+        "axion.dev-report.v1",
+    ]
+}
+
+fn report_kind(schema: &str) -> Option<&'static str> {
+    match schema {
+        "axion.check-report.v1" => Some("check"),
+        "axion.release-report.v1" => Some("release"),
+        "axion.bundle-report.v1" => Some("bundle"),
+        "axion.diagnostics-report.v1" => Some("diagnostics"),
+        "axion.dev-report.v1" => Some("dev"),
+        _ => None,
+    }
+}
+
+fn write_summary_json(path: &Path, summary_json: &str) -> Result<(), AxionCliError> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    std::fs::write(path, format!("{summary_json}\n"))?;
+    Ok(())
 }
 
 fn report_artifacts(section: &str) -> Vec<ReportArtifact> {
@@ -271,7 +350,7 @@ mod tests {
             .expect("summary should parse");
 
         assert_eq!(summary.kind, "check");
-        assert_eq!(summary.result.as_deref(), Some("ok"));
+        assert_eq!(summary.result, "ok");
         assert_eq!(summary.failure_phase, None);
         assert_eq!(summary.next_action_kinds, vec!["gui_smoke".to_owned()]);
     }
@@ -294,6 +373,56 @@ mod tests {
     }
 
     #[test]
+    fn summarizes_dev_report_with_camel_case_fields() {
+        let report = concat!(
+            "{\"schema\":\"axion.dev-report.v1\",",
+            "\"manifestPath\":\"app/axion.toml\",",
+            "\"nextStep\":\"use packaged fallback\",",
+            "\"result\":\"ok\"}"
+        );
+        let summary = ReportSummary::from_json(std::path::Path::new("dev.json"), report)
+            .expect("summary should parse");
+
+        assert_eq!(summary.kind, "dev");
+        assert_eq!(summary.manifest_path.as_deref(), Some("app/axion.toml"));
+        assert_eq!(summary.next_step.as_deref(), Some("use packaged fallback"));
+        assert_eq!(summary.result, "ok");
+    }
+
+    #[test]
+    fn rejects_unsupported_report_schema() {
+        let error = ReportSummary::from_json(
+            std::path::Path::new("unknown.json"),
+            r#"{"schema":"axion.unknown.v1","result":"ok"}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unsupported report schema"));
+    }
+
+    #[test]
+    fn rejects_incomplete_json_report() {
+        let error = ReportSummary::from_json(
+            std::path::Path::new("broken.json"),
+            r#"{"schema":"axion.check-report.v1","result":"ok""#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not a complete JSON object"));
+    }
+
+    #[test]
+    fn rejects_missing_result_field() {
+        let error = ReportSummary::from_json(
+            std::path::Path::new("missing-result.json"),
+            r#"{"schema":"axion.check-report.v1"}"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("missing string result"));
+    }
+
+    #[test]
     fn failed_reports_require_allow_failed() {
         let path = temp_report_path("axion-report-failed");
         std::fs::write(
@@ -305,6 +434,7 @@ mod tests {
         let error = run(ReportArgs {
             path: path.clone(),
             json: true,
+            output: None,
             allow_failed: false,
         })
         .unwrap_err();
@@ -325,10 +455,38 @@ mod tests {
         run(ReportArgs {
             path: path.clone(),
             json: true,
+            output: None,
             allow_failed: true,
         })
         .expect("allow_failed should preserve summary success");
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn report_output_writes_summary_json_before_failed_exit() {
+        let source = temp_report_path("axion-report-output-source");
+        let output = temp_report_path("axion-report-output-summary");
+        std::fs::write(
+            &source,
+            r#"{"schema":"axion.check-report.v1","result":"failed"}"#,
+        )
+        .unwrap();
+
+        let error = run(ReportArgs {
+            path: source.clone(),
+            json: false,
+            output: Some(output.clone()),
+            allow_failed: false,
+        })
+        .unwrap_err();
+        let summary = std::fs::read_to_string(&output).expect("summary should be written");
+
+        assert!(error.to_string().contains("report result is failed"));
+        assert!(summary.contains("\"schema\":\"axion.report-summary.v1\""));
+        assert!(summary.contains("\"result\":\"failed\""));
+
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
     }
 }
