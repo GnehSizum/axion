@@ -56,9 +56,11 @@ CLI-generated GUI smoke failure reports use `source = "axion-cli gui-smoke"` and
 
 ## Aggregate CLI Reports
 
-`axion.check-report.v1` summarizes doctor gate status, readiness, quiet self-test, artifact inventory, optional dev preflight, optional bundle preflight, optional `report_path`, `next_step`, and `result`. Use `check --report-path <path>` to write this JSON schema to disk for CI artifacts.
+`axion.check-report.v1` summarizes doctor gate status, capability expansion, readiness, quiet self-test, artifact inventory, optional dev preflight, optional bundle preflight, optional `report_path`, `next_step`, and `result`. Use `check --report-path <path>` to write this JSON schema to disk for CI artifacts.
 
 Check reports include `artifacts[]` entries with `kind`, `path`, `required`, and `exists`. Kinds include `check_report`, `dev_event_log_hint`, `dev_report_hint`, `bundle_report_hint`, and `release_report_hint`. These entries are an upload guide for local and CI workflows; hint entries may not exist yet during a lightweight check.
+
+Check reports also include `capabilities.windows[]` entries with `profiles`, `profile_expansions`, explicit and effective commands/events/protocols, navigation settings, `bridge_enabled`, and `risk`. Use this field when CI needs a stable least-privilege summary without parsing `doctor` human output.
 
 When `check --dev` is used, `dev_preflight` includes dev-server status, frontend command settings, watch-root validation, packaged fallback status, recommended event/report artifact paths, blockers, warnings, recommendations, and `recommended_commands[]`. Unreachable or missing dev servers are warnings when packaged fallback remains usable; blockers are reserved for invalid frontend assets, missing packaged fallback, invalid app configuration, or empty frontend command declarations.
 

@@ -60,6 +60,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     typeof diagnostics?.toPrettyJson === 'function'
       ? diagnostics.toPrettyJson(value)
       : JSON.stringify(value, null, 2);
+  const normalizeError = (error) =>
+    typeof diagnostics?.normalizeError === 'function'
+      ? diagnostics.normalizeError(error)
+      : {
+          code: null,
+          message: error instanceof Error ? error.message : String(error),
+          cause: error ?? null,
+        };
 
   const render = () => {
     summaryApp.textContent = state.appInfo
@@ -132,8 +140,9 @@ window.addEventListener('DOMContentLoaded', async () => {
       setStatus(`${name} succeeded.`);
       return result;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setLastOperation(name, false, { error: message, payload });
+      const normalized = normalizeError(error);
+      const message = normalized.message;
+      setLastOperation(name, false, { error: message, code: normalized.code, payload });
       setStatus(`${name} failed: ${message}`);
       throw error;
     } finally {
@@ -150,8 +159,9 @@ window.addEventListener('DOMContentLoaded', async () => {
       setStatus(`${name} emitted successfully.`);
       return result;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setLastOperation(name, false, { error: message, payload });
+      const normalized = normalizeError(error);
+      const message = normalized.message;
+      setLastOperation(name, false, { error: message, code: normalized.code, payload });
       setStatus(`${name} failed: ${message}`);
       throw error;
     } finally {
@@ -356,20 +366,20 @@ window.addEventListener('DOMContentLoaded', async () => {
       await bridge.invoke('fs.write_text', { path: errorFile, contents: 'error probes' });
       const missingError = await bridge.invoke('fs.read_text', { path: `${errorDir}/missing.txt` })
         .then(() => 'unexpected success')
-        .catch((error) => error instanceof Error ? error.message : String(error));
+        .catch(normalizeError);
       const listFileError = await bridge.invoke('fs.list_dir', { path: errorFile })
         .then(() => 'unexpected success')
-        .catch((error) => error instanceof Error ? error.message : String(error));
+        .catch(normalizeError);
       const removeNonEmptyError = await bridge.invoke('fs.remove', { path: errorDir })
         .then(() => 'unexpected success')
-        .catch((error) => error instanceof Error ? error.message : String(error));
+        .catch(normalizeError);
       await bridge.invoke('fs.remove', { path: errorDir, recursive: true });
       pushCheck(
         'fs.expected_errors',
         'fs expected error codes',
-        missingError.includes('fs.not-found') &&
-          listFileError.includes('fs.not-directory') &&
-          removeNonEmptyError.includes('fs.directory-not-empty')
+        missingError.code === 'fs.not-found' &&
+          listFileError.code === 'fs.not-directory' &&
+          removeNonEmptyError.code === 'fs.directory-not-empty'
           ? 'pass'
           : 'fail',
         { missingError, listFileError, removeNonEmptyError },
@@ -396,6 +406,20 @@ window.addEventListener('DOMContentLoaded', async () => {
       );
     } catch (error) {
       pushCheck('dialog.preview', 'dialog preview', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      const dialogPayloadError = await bridge.invoke('dialog.save', { multiple: true })
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
+      pushCheck(
+        'dialog.expected_errors',
+        'dialog expected error codes',
+        dialogPayloadError.code === 'dialog.invalid-payload' ? 'pass' : 'fail',
+        { dialogPayloadError },
+      );
+    } catch (error) {
+      pushCheck('dialog.expected_errors', 'dialog expected error codes', 'fail', error instanceof Error ? error.message : String(error));
     }
 
     const inputSnapshot =
@@ -564,8 +588,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         event.currentTarget,
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setFeedback(fileFeedback, `Rejected missing file as expected: ${message}`);
+      const normalized = normalizeError(error);
+      setFeedback(fileFeedback, `Rejected missing file as expected: ${normalized.code} ${normalized.message}`);
     }
   });
 
@@ -579,8 +603,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         event.currentTarget,
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setFeedback(fileFeedback, `Rejected list-file as expected: ${message}`);
+      const normalized = normalizeError(error);
+      setFeedback(fileFeedback, `Rejected list-file as expected: ${normalized.code} ${normalized.message}`);
     }
   });
 
@@ -600,8 +624,8 @@ window.addEventListener('DOMContentLoaded', async () => {
         event.currentTarget,
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setFeedback(fileFeedback, `Rejected non-empty directory as expected: ${message}`);
+      const normalized = normalizeError(error);
+      setFeedback(fileFeedback, `Rejected non-empty directory as expected: ${normalized.code} ${normalized.message}`);
     } finally {
       try {
         await bridge.invoke('fs.remove', { path: directory, recursive: true });

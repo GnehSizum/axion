@@ -213,6 +213,20 @@ cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest
 - A `window.__AXION_GUI_SMOKE__()` hook for Servo-backed GUI smoke diagnostics.
 {native_api_focus}
 
+## Capability Profiles
+
+The generated manifest grants the main window these profiles:
+
+- `app-info`: app metadata, version, ping, and echo commands.
+- `app-control`: `app.exit`.
+- `window-control`: current-window metadata, reload, focus, title, size, visibility, and close decisions.
+- `clipboard-access`: text clipboard read/write.
+- `file-access`: app-data filesystem create/exists/list/read/remove/write.
+- `dialog-access`: `dialog.open` and `dialog.save`.
+- `app-events`: frontend `app.log` event emission.
+
+The custom `demo.greet` command is explicit because it is app-specific. Inspect the effective surface with `cargo run -p axion-cli -- check --manifest-path {manifest} --json` or see `docs/capabilities.md` in the Axion checkout for the full profile mapping.
+
 ## Packaging Preview
 
 `axion bundle` creates a platform bundle scaffold, copies `frontend/`, writes app metadata, copies `icons/app.icns`, emits `axion-bundle-manifest.json`, and verifies file references plus fingerprints. It is a staging bundle, not a signed installer.
@@ -285,7 +299,7 @@ cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-pat
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.1.26\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.1.27\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root
@@ -599,6 +613,14 @@ textarea {
     typeof diagnostics?.toPrettyJson === 'function'
       ? diagnostics.toPrettyJson(value)
       : JSON.stringify(value, null, 2);
+  const normalizeError = (error) =>
+    typeof diagnostics?.normalizeError === 'function'
+      ? diagnostics.normalizeError(error)
+      : {
+          code: null,
+          message: error instanceof Error ? error.message : String(error),
+          cause: error ?? null,
+        };
   const installTextInputSelectionPatch = axion.compat?.installTextInputSelectionPatch;
   const hostEventLog = [];
   renderList('command-list', axion.commands);
@@ -783,6 +805,30 @@ textarea {
     }
 
     try {
+      const clipboardPayloadError = await axion.invoke('clipboard.write_text', {})
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
+      const dialogPayloadError = await axion.invoke('dialog.save', { multiple: true })
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
+      const windowPayloadError = await axion.invoke('window.set_size', { width: 0, height: 480 })
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
+      pushCheck(
+        'native.expected_errors',
+        'native expected error codes',
+        clipboardPayloadError.code === 'clipboard.invalid-payload' &&
+          dialogPayloadError.code === 'dialog.invalid-payload' &&
+          windowPayloadError.code === 'window.invalid-size'
+          ? 'pass'
+          : 'fail',
+        { clipboardPayloadError, dialogPayloadError, windowPayloadError },
+      );
+    } catch (error) {
+      pushCheck('native.expected_errors', 'native expected error codes', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    try {
       const fsDir = `notes/gui-smoke-${Date.now().toString(36)}`;
       const fsPath = `${fsDir}/hello.txt`;
       const fsCreateDir = await axion.invoke('fs.create_dir', { path: fsDir });
@@ -821,20 +867,20 @@ textarea {
       await axion.invoke('fs.write_text', { path: errorFile, contents: 'error probes' });
       const missingError = await axion.invoke('fs.read_text', { path: `${errorDir}/missing.txt` })
         .then(() => 'unexpected success')
-        .catch((error) => error instanceof Error ? error.message : String(error));
+        .catch(normalizeError);
       const listFileError = await axion.invoke('fs.list_dir', { path: errorFile })
         .then(() => 'unexpected success')
-        .catch((error) => error instanceof Error ? error.message : String(error));
+        .catch(normalizeError);
       const removeNonEmptyError = await axion.invoke('fs.remove', { path: errorDir })
         .then(() => 'unexpected success')
-        .catch((error) => error instanceof Error ? error.message : String(error));
+        .catch(normalizeError);
       await axion.invoke('fs.remove', { path: errorDir, recursive: true });
       pushCheck(
         'fs.expected_errors',
         'fs expected error codes',
-        missingError.includes('fs.not-found') &&
-          listFileError.includes('fs.not-directory') &&
-          removeNonEmptyError.includes('fs.directory-not-empty')
+        missingError.code === 'fs.not-found' &&
+          listFileError.code === 'fs.not-directory' &&
+          removeNonEmptyError.code === 'fs.directory-not-empty'
           ? 'pass'
           : 'fail',
         { missingError, listFileError, removeNonEmptyError },
@@ -1237,6 +1283,8 @@ mod tests {
                 .contains("Generated by Axion using the `native-api-demo` template.")
         );
         assert!(project.readme().contains("Native API Demo Focus"));
+        assert!(project.readme().contains("Capability Profiles"));
+        assert!(project.readme().contains("docs/capabilities.md"));
         assert!(project.readme().contains("Run all checks"));
         assert!(
             project
@@ -1256,16 +1304,21 @@ mod tests {
         assert!(project.app_js().contains("runNativeApiChecks"));
         assert!(project.app_js().contains("Native API checks"));
         assert!(project.app_js().contains("clipboard.roundtrip"));
+        assert!(project.app_js().contains("native.expected_errors"));
+        assert!(project.app_js().contains("clipboard.invalid-payload"));
+        assert!(project.app_js().contains("dialog.invalid-payload"));
+        assert!(project.app_js().contains("window.invalid-size"));
         assert!(project.app_js().contains("fs.create_dir"));
         assert!(project.app_js().contains("fs.exists"));
         assert!(project.app_js().contains("fs.list_dir"));
         assert!(project.app_js().contains("fs.remove"));
         assert!(project.app_js().contains("fs.expected_errors"));
         assert!(project.app_js().contains("fs.directory-not-empty"));
+        assert!(project.app_js().contains("normalizeError"));
         assert!(project.app_js().contains("dialog.open"));
         assert!(project.app_js().contains("fs.write_text"));
         assert!(project.style_css().contains("button:disabled"));
-        assert!(project.cargo_toml().contains("version = \"0.1.26\""));
+        assert!(project.cargo_toml().contains("version = \"0.1.27\""));
     }
 
     #[test]
@@ -1307,6 +1360,9 @@ mod tests {
         assert!(readme.contains("verification: ok"));
         assert!(readme.contains("fingerprinted_files"));
         assert!(readme.contains("Custom Command Demo"));
+        assert!(readme.contains("Capability Profiles"));
+        assert!(readme.contains("check --manifest-path"));
+        assert!(readme.contains("docs/capabilities.md"));
         assert!(readme.contains("demo.greet"));
         assert!(readme.contains("Capability denial"));
         assert!(readme.contains("Input Compatibility Demo"));

@@ -16,7 +16,7 @@ pub use axion_bridge::{
     WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-pub const AXION_RELEASE_VERSION: &str = "v0.1.26.0";
+pub const AXION_RELEASE_VERSION: &str = "v0.1.27.0";
 pub const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 pub trait RuntimePlugin: Send + Sync {
@@ -517,7 +517,7 @@ impl ClipboardStore {
         self.text
             .lock()
             .map(|text| text.clone())
-            .map_err(|_| "clipboard state lock was poisoned".to_owned())
+            .map_err(|_| clipboard_error("state-unavailable", "clipboard state lock was poisoned"))
     }
 
     fn write_memory_text(&self, text: String) -> Result<(), String> {
@@ -526,7 +526,7 @@ impl ClipboardStore {
             .map(|mut stored| {
                 *stored = text;
             })
-            .map_err(|_| "clipboard state lock was poisoned".to_owned())
+            .map_err(|_| clipboard_error("state-unavailable", "clipboard state lock was poisoned"))
     }
 }
 
@@ -600,7 +600,9 @@ pub enum DialogRequestError {
 impl std::fmt::Display for DialogRequestError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidPayload { message } => formatter.write_str(message),
+            Self::InvalidPayload { message } => {
+                write!(formatter, "{}", dialog_error("invalid-payload", message))
+            }
         }
     }
 }
@@ -1184,7 +1186,10 @@ fn register_builtin_commands(
         let clipboard = clipboard.clone();
         builder.register_command("clipboard.write_text", move |_context, request| {
             let text = json_string_field(&request.payload, "text").ok_or_else(|| {
-                "clipboard.write_text requires a JSON string field named 'text'".to_owned()
+                clipboard_error(
+                    "invalid-payload",
+                    "clipboard.write_text requires a JSON string field named 'text'",
+                )
             })?;
             let response = clipboard.write_text(text)?;
             Ok(format!(
@@ -1288,8 +1293,10 @@ fn register_builtin_commands(
             async move {
                 let request_id =
                     json_string_field(&request.payload, "requestId").ok_or_else(|| {
-                        "window.confirm_close requires a JSON string field named 'requestId'"
-                            .to_owned()
+                        window_error(
+                            "invalid-payload",
+                            "window.confirm_close requires a JSON string field named 'requestId'",
+                        )
                     })?;
                 execute_window_control_json(
                     &window_control,
@@ -1310,8 +1317,10 @@ fn register_builtin_commands(
             async move {
                 let request_id =
                     json_string_field(&request.payload, "requestId").ok_or_else(|| {
-                        "window.prevent_close requires a JSON string field named 'requestId'"
-                            .to_owned()
+                        window_error(
+                            "invalid-payload",
+                            "window.prevent_close requires a JSON string field named 'requestId'",
+                        )
                     })?;
                 execute_window_control_json(
                     &window_control,
@@ -1368,7 +1377,10 @@ fn register_builtin_commands(
             async move {
                 let target_window_id = json_string_field(&request.payload, "target");
                 let title = json_string_field(&request.payload, "title").ok_or_else(|| {
-                    "window.set_title requires a JSON string field named 'title'".to_owned()
+                    window_error(
+                        "invalid-payload",
+                        "window.set_title requires a JSON string field named 'title'",
+                    )
                 })?;
                 execute_window_control_json(
                     &window_control,
@@ -1389,13 +1401,22 @@ fn register_builtin_commands(
             async move {
                 let target_window_id = json_string_field(&request.payload, "target");
                 let width = json_u32_field(&request.payload, "width").ok_or_else(|| {
-                    "window.set_size requires a JSON number field named 'width'".to_owned()
+                    window_error(
+                        "invalid-payload",
+                        "window.set_size requires a JSON number field named 'width'",
+                    )
                 })?;
                 let height = json_u32_field(&request.payload, "height").ok_or_else(|| {
-                    "window.set_size requires a JSON number field named 'height'".to_owned()
+                    window_error(
+                        "invalid-payload",
+                        "window.set_size requires a JSON number field named 'height'",
+                    )
                 })?;
                 if width == 0 || height == 0 {
-                    return Err("window.set_size requires non-zero width and height".to_owned());
+                    return Err(window_error(
+                        "invalid-size",
+                        "window.set_size requires non-zero width and height",
+                    ));
                 }
                 execute_window_control_json(
                     &window_control,
@@ -1877,10 +1898,14 @@ fn execute_window_control_json(
     target_window_id: Option<&str>,
     request: WindowControlRequest,
 ) -> Result<String, String> {
-    match window_control.execute(target_window_id, request)? {
-        WindowControlResponse::AppExit { .. } => {
-            Err("window control backend returned an unexpected app exit response".to_owned())
-        }
+    match window_control
+        .execute(target_window_id, request)
+        .map_err(|error| window_error("control-failed", &error))?
+    {
+        WindowControlResponse::AppExit { .. } => Err(window_error(
+            "unexpected-response",
+            "window control backend returned an unexpected app exit response",
+        )),
         WindowControlResponse::CloseRequested { request_id, window } => Ok(format!(
             "{{\"pending\":true,\"requestId\":{},\"window\":{}}}",
             json_string_literal(&request_id),
@@ -1900,7 +1925,10 @@ fn execute_window_control_json(
 }
 
 fn execute_app_exit_json(window_control: &WindowControlHandle) -> Result<String, String> {
-    match window_control.execute(None, WindowControlRequest::ExitApp)? {
+    match window_control
+        .execute(None, WindowControlRequest::ExitApp)
+        .map_err(|error| app_error("exit-failed", &error))?
+    {
         WindowControlResponse::AppExit {
             request_id,
             window_count,
@@ -1912,9 +1940,10 @@ fn execute_app_exit_json(window_control: &WindowControlHandle) -> Result<String,
         WindowControlResponse::CloseRequested { .. }
         | WindowControlResponse::ClosePrevented { .. }
         | WindowControlResponse::State(_)
-        | WindowControlResponse::List(_) => {
-            Err("window control backend returned an unexpected non-exit response".to_owned())
-        }
+        | WindowControlResponse::List(_) => Err(app_error(
+            "unexpected-response",
+            "window control backend returned an unexpected non-exit response",
+        )),
     }
 }
 
@@ -1925,14 +1954,18 @@ fn current_window_state(
 ) -> Result<WindowStateSnapshot, String> {
     match window_control.execute(target_window_id, WindowControlRequest::GetState) {
         Ok(WindowControlResponse::State(state)) => Ok(state),
-        Ok(WindowControlResponse::List(_)) => {
-            Err("window control backend returned an unexpected list response".to_owned())
-        }
+        Ok(WindowControlResponse::List(_)) => Err(window_error(
+            "unexpected-response",
+            "window control backend returned an unexpected list response",
+        )),
         Ok(
             WindowControlResponse::AppExit { .. }
             | WindowControlResponse::CloseRequested { .. }
             | WindowControlResponse::ClosePrevented { .. },
-        ) => Err("window control backend returned an unexpected app exit response".to_owned()),
+        ) => Err(window_error(
+            "unexpected-response",
+            "window control backend returned an unexpected app exit response",
+        )),
         Err(_) if target_window_id.is_none_or(|target| target == context.window.id) => {
             Ok(WindowStateSnapshot {
                 id: context.window.id.clone(),
@@ -1944,7 +1977,7 @@ fn current_window_state(
                 focused: false,
             })
         }
-        Err(error) => Err(error),
+        Err(error) => Err(window_error("control-failed", &error)),
     }
 }
 
@@ -2742,7 +2775,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.26.0\""));
+        assert!(version.contains("\"release\":\"v0.1.27.0\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
@@ -2785,7 +2818,32 @@ mod tests {
         ))
         .expect_err("dialog.save should reject multiple=true");
 
+        assert!(format!("{error:?}").contains("dialog.invalid-payload"));
         assert!(format!("{error:?}").contains("does not support 'multiple=true'"));
+    }
+
+    #[test]
+    fn builtin_native_commands_report_stable_non_fs_error_codes() {
+        let request = launch_request(&app_with_native_commands(), axion_core::RunMode::Production)
+            .expect("launch request should build");
+        let binding = request
+            .window_bindings
+            .first()
+            .expect("main window binding should exist");
+
+        let clipboard_error = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("clipboard.write_text", "{}"),
+        ))
+        .expect_err("clipboard.write_text should reject missing text");
+        assert!(format!("{clipboard_error:?}").contains("clipboard.invalid-payload"));
+
+        let dialog_error = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("dialog.open", "{\"filters\":\"bad\"}"),
+        ))
+        .expect_err("dialog.open should reject invalid filters");
+        assert!(format!("{dialog_error:?}").contains("dialog.invalid-payload"));
     }
 
     #[test]
@@ -3457,8 +3515,22 @@ mod tests {
         assert!(matches!(
             missing,
             axion_bridge::CommandDispatchError::Handler(message)
-                if message.contains("unavailable")
+                if message.contains("window.control-failed") && message.contains("unavailable")
         ));
+
+        let invalid_title = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("window.set_title", "{}"),
+        ))
+        .expect_err("window.set_title should require title");
+        assert!(format!("{invalid_title:?}").contains("window.invalid-payload"));
+
+        let invalid_size = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("window.set_size", "{\"width\":0,\"height\":480}"),
+        ))
+        .expect_err("window.set_size should reject zero width");
+        assert!(format!("{invalid_size:?}").contains("window.invalid-size"));
     }
 
     #[test]
@@ -4028,6 +4100,18 @@ fn app_data_dir_entry_json(relative_dir: &str, entry: std::fs::DirEntry) -> Resu
     ))
 }
 
+fn app_error(code: &str, message: &str) -> String {
+    format!("app.{code}: {message}")
+}
+
+fn clipboard_error(code: &str, message: &str) -> String {
+    format!("clipboard.{code}: {message}")
+}
+
+fn dialog_error(code: &str, message: &str) -> String {
+    format!("dialog.{code}: {message}")
+}
+
 fn fs_error(code: &str, message: &str) -> String {
     format!("fs.{code}: {message}")
 }
@@ -4041,4 +4125,8 @@ fn fs_io_error(operation: &str, error: &std::io::Error) -> String {
         _ => "io-error",
     };
     fs_error(code, &format!("failed to {operation}: {error}"))
+}
+
+fn window_error(code: &str, message: &str) -> String {
+    format!("window.{code}: {message}")
 }

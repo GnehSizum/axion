@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.1.27.0 - Preview
+
+Axion v0.1.27.0 formalizes bridge error envelopes and Native API error diagnostics on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.27`.
+- Axion public release metadata is `v0.1.27.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added structured bridge error envelopes with `{ code, message }` while keeping thrown `Error(message)` compatibility.
+- Added `window.__AXION__.diagnostics.normalizeError(error)` for frontend examples and generated apps.
+- Added structured error-code coverage to `file-access-demo` and generated `native-api-demo` GUI smoke reports.
+- Added stable preview error-code prefixes for clipboard, dialog, window, and app lifecycle command failures.
+- Added `check --json` capability summaries with profile expansion, explicit permissions, effective permissions, navigation settings, and per-window risk.
+- Added public capability profile documentation and generated-app README guidance for least-privilege inspection.
+
+### Changed
+
+- Generated app Cargo versions now use `0.1.27`.
+- Updated public docs and release metadata for v0.1.27.0.
+
 ## v0.1.26.0 - Preview
 
 Axion v0.1.26.0 expands app-data filesystem coverage and tightens generated-app and checked-in example guidance on the current Servo `0.1` baseline.

@@ -23,6 +23,31 @@ Each command below follows this shape:
 - `response`: the JSON value returned on success
 - `errors`: common failure conditions
 
+Bridge failures are returned in an error envelope:
+
+```json
+{
+  "ok": false,
+  "id": "axion_request_id",
+  "payload": null,
+  "error": {
+    "code": "fs.not-found",
+    "message": "fs.not-found: failed to access app data path: No such file or directory"
+  }
+}
+```
+
+Frontend code still receives a thrown `Error(message)` for compatibility. The thrown error also carries `error.code` and `error.details`. Use `window.__AXION__.diagnostics.normalizeError(error)` when code needs to handle both old string errors and structured envelopes.
+
+Stable preview error-code prefixes:
+
+- `bridge.*`: bridge transport, capability, request id, payload, or handler envelope failures
+- `app.*`: app lifecycle command failures, currently `app.exit-failed` and `app.unexpected-response`
+- `window.*`: window command payload/control failures, including `window.invalid-payload`, `window.invalid-size`, `window.control-failed`, and `window.unexpected-response`
+- `clipboard.*`: clipboard command failures, including `clipboard.invalid-payload` and `clipboard.state-unavailable`
+- `dialog.*`: dialog command payload validation failures, currently `dialog.invalid-payload`
+- `fs.*`: app-data filesystem validation and host I/O failures
+
 Common profiles:
 
 - `app-info`: `app.ping`, `app.info`, `app.version`, `app.echo`
@@ -33,6 +58,8 @@ Common profiles:
 - `file-access`: `fs.create_dir`, `fs.exists`, `fs.write_text`, `fs.read_text`, `fs.list_dir`, `fs.remove`
 - `dialog-access`: `dialog.open`, `dialog.save`
 - `app-events`: frontend event emission such as `app.log`
+
+See `capabilities.md` for the full profile mapping, risk guidance, and least-privilege examples.
 
 ## Bridge Compatibility Helpers
 
@@ -94,6 +121,21 @@ Formats a value using the same pretty JSON layout used by the examples.
 pre.textContent = window.__AXION__.diagnostics.toPrettyJson(snapshot);
 ```
 
+### `normalizeError`
+
+Normalizes thrown bridge errors and legacy string errors to `{ code, message, cause }`.
+
+```js
+try {
+  await window.__AXION__.invoke("fs.read_text", { path: "missing.txt" });
+} catch (error) {
+  const normalized = window.__AXION__.diagnostics.normalizeError(error);
+  if (normalized.code === "fs.not-found") {
+    console.log("expected missing file", normalized.message);
+  }
+}
+```
+
 ## App Commands
 
 ### `app.ping`
@@ -127,7 +169,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.26", release: "v0.1.26.0", framework: "axion" }
+// { version: "0.1.27", release: "v0.1.27.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -141,6 +183,8 @@ await window.__AXION__.invoke("app.echo", { value: 1 });
 ## Window Commands
 
 Most window commands operate on the current window by default. Pass `{ target: "settings" }` to address another window by id.
+
+Common errors: `window.invalid-payload`, `window.invalid-size`, `window.control-failed`, `window.unexpected-response`.
 
 ### `window.list`
 
@@ -260,6 +304,8 @@ await window.__AXION__.invoke("app.exit", null);
 // { pending: true, requestId: "axion-exit-1", windowCount: 3, requestCount: 3 }
 ```
 
+Errors: `app.exit-failed`, `app.unexpected-response`.
+
 ### Host Lifecycle Events
 
 Axion host events are listen-only and come from the native runtime. Application lifecycle events currently include:
@@ -319,6 +365,8 @@ await window.__AXION__.invoke("clipboard.write_text", {
 // { bytes: 16, backend: "memory" }
 ```
 
+Errors: `clipboard.invalid-payload`, `clipboard.state-unavailable`.
+
 ### `clipboard.read_text`
 
 Reads the current clipboard text from the configured backend.
@@ -327,6 +375,8 @@ Reads the current clipboard text from the configured backend.
 await window.__AXION__.invoke("clipboard.read_text", null);
 // { text: "Hello from Axion", backend: "memory" }
 ```
+
+Errors: `clipboard.state-unavailable`.
 
 ## File Commands
 
@@ -449,6 +499,8 @@ Supported request fields:
 - `filters: [{ name: string, extensions: string[] }]`
 
 `dialog.save` rejects `directory=true` and `multiple=true`. `filters` are validated for shape today and reserved for richer native backends.
+
+Errors: `dialog.invalid-payload`.
 
 ```js
 await window.__AXION__.invoke("dialog.open", {

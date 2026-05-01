@@ -2457,9 +2457,55 @@ mod enabled {
             format!(
                 "{{\"ok\":false,\"id\":{},\"payload\":null,\"error\":{}}}",
                 optional_json_string_literal(request_id),
-                json_string_literal(message),
+                json_error_object(status, message),
             ),
         )
+    }
+
+    fn json_error_object(status: StatusCode, message: &str) -> String {
+        format!(
+            "{{\"code\":{},\"message\":{}}}",
+            json_string_literal(&error_code(status, message)),
+            json_string_literal(message),
+        )
+    }
+
+    fn error_code(status: StatusCode, message: &str) -> String {
+        if let Some(code) = prefixed_error_code(message) {
+            return code.to_owned();
+        }
+
+        match status {
+            StatusCode::FORBIDDEN => "bridge.forbidden",
+            StatusCode::NOT_FOUND => "bridge.not-found",
+            StatusCode::PAYLOAD_TOO_LARGE => "bridge.payload-too-large",
+            StatusCode::INTERNAL_SERVER_ERROR => "bridge.internal-error",
+            StatusCode::BAD_REQUEST => "bridge.bad-request",
+            _ => "bridge.error",
+        }
+        .to_owned()
+    }
+
+    fn prefixed_error_code(message: &str) -> Option<&str> {
+        let (code, _message) = message.split_once(": ")?;
+        let mut segments = code.split('.');
+        let first = segments.next()?;
+        if segments.next().is_none() || !valid_error_code_segment(first) {
+            return None;
+        }
+        if code.split('.').all(valid_error_code_segment) {
+            Some(code)
+        } else {
+            None
+        }
+    }
+
+    fn valid_error_code_segment(segment: &str) -> bool {
+        let mut chars = segment.chars();
+        matches!(chars.next(), Some(first) if first.is_ascii_lowercase())
+            && chars.all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            })
     }
 
     fn json_response(request: &Request, status: StatusCode, body: String) -> Response {
@@ -2587,7 +2633,9 @@ mod enabled {
     mod tests {
         use std::time::Duration;
 
-        use super::parse_timeout_ms;
+        use http::StatusCode;
+
+        use super::{error_code, json_error_object, parse_timeout_ms};
 
         #[test]
         fn parse_timeout_ms_accepts_positive_values() {
@@ -2603,6 +2651,33 @@ mod enabled {
             assert_eq!(parse_timeout_ms("0"), None);
             assert_eq!(parse_timeout_ms("-1"), None);
             assert_eq!(parse_timeout_ms("abc"), None);
+        }
+
+        #[test]
+        fn bridge_error_object_preserves_prefixed_codes() {
+            assert_eq!(
+                error_code(StatusCode::BAD_REQUEST, "fs.not-found: missing"),
+                "fs.not-found"
+            );
+            assert_eq!(
+                json_error_object(StatusCode::BAD_REQUEST, "fs.not-found: missing"),
+                "{\"code\":\"fs.not-found\",\"message\":\"fs.not-found: missing\"}"
+            );
+        }
+
+        #[test]
+        fn bridge_error_object_falls_back_to_status_codes() {
+            assert_eq!(
+                error_code(StatusCode::FORBIDDEN, "Axion protocol is not allowed"),
+                "bridge.forbidden"
+            );
+            assert_eq!(
+                error_code(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Axion command returned invalid JSON payload"
+                ),
+                "bridge.internal-error"
+            );
         }
     }
 }

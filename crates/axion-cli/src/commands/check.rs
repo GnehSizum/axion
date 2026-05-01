@@ -1,4 +1,4 @@
-use axion_core::{Builder, RunMode};
+use axion_core::{AppConfig, Builder, RunMode};
 use axion_runtime::json_string_literal;
 
 use crate::cli::{CheckArgs, DoctorArgs, SelfTestArgs};
@@ -184,6 +184,7 @@ struct CheckReport {
     max_risk: String,
     bundle_requested: bool,
     report_path: Option<String>,
+    capability_summary: CapabilitySummary,
     doctor_passed: bool,
     doctor_failures: Vec<String>,
     ready_for_dev: bool,
@@ -220,6 +221,7 @@ impl CheckReport {
                 .report_path
                 .as_ref()
                 .map(|path| path.display().to_string()),
+            capability_summary: CapabilitySummary::from_manifest(&args.manifest_path),
             doctor_passed: false,
             doctor_failures: Vec::new(),
             ready_for_dev: false,
@@ -303,6 +305,9 @@ impl CheckReport {
             lines.push(format!("doctor.failure: {reason}"));
         }
         lines.push(String::new());
+        lines.push("[capabilities]".to_owned());
+        lines.extend(self.capability_summary.human_lines());
+        lines.push(String::new());
         lines.push("[readiness]".to_owned());
         lines.push(format!(
             "readiness: dev={}, bundle={}, gui_smoke={}",
@@ -366,7 +371,7 @@ impl CheckReport {
 
     fn to_json(&self) -> String {
         format!(
-            "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"max_risk\":{},\"bundle_requested\":{},\"dev_requested\":{},\"report_path\":{},\"doctor\":{{\"passed\":{},\"failed_reasons\":{}}},\"readiness\":{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}},\"self_test\":{{\"passed\":{},\"error\":{}}},\"artifacts\":{},\"bundle_preflight\":{{\"checked\":{},\"passed\":{},\"error\":{}}},\"dev_preflight\":{},\"next_step\":{},\"result\":{}}}",
+            "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"max_risk\":{},\"bundle_requested\":{},\"dev_requested\":{},\"report_path\":{},\"doctor\":{{\"passed\":{},\"failed_reasons\":{}}},\"capabilities\":{},\"readiness\":{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}},\"self_test\":{{\"passed\":{},\"error\":{}}},\"artifacts\":{},\"bundle_preflight\":{{\"checked\":{},\"passed\":{},\"error\":{}}},\"dev_preflight\":{},\"next_step\":{},\"result\":{}}}",
             json_string_literal(&self.manifest_path),
             json_string_literal(&self.max_risk),
             self.bundle_requested,
@@ -374,6 +379,7 @@ impl CheckReport {
             optional_json_string_literal(self.report_path.as_deref()),
             self.doctor_passed,
             json_string_array_literal(&self.doctor_failures),
+            self.capability_summary.to_json(),
             self.ready_for_dev,
             self.ready_for_bundle,
             self.ready_for_gui_smoke,
@@ -392,6 +398,225 @@ impl CheckReport {
             json_string_literal(&self.next_step),
             json_string_literal(&self.result),
         )
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CapabilitySummary {
+    manifest_loaded: bool,
+    error: Option<String>,
+    windows: Vec<CapabilityWindowSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapabilityWindowSummary {
+    id: String,
+    bridge_enabled: bool,
+    profiles: Vec<String>,
+    profile_expansions: Vec<axion_core::CapabilityProfileConfig>,
+    explicit_commands: Vec<String>,
+    explicit_events: Vec<String>,
+    explicit_protocols: Vec<String>,
+    commands: Vec<String>,
+    events: Vec<String>,
+    protocols: Vec<String>,
+    allowed_navigation_origins: Vec<String>,
+    allow_remote_navigation: bool,
+    risk: String,
+}
+
+impl CapabilitySummary {
+    fn from_manifest(manifest_path: &std::path::Path) -> Self {
+        match axion_manifest::load_app_config_from_path(manifest_path) {
+            Ok(config) => Self::from_config(&config),
+            Err(error) => Self {
+                manifest_loaded: false,
+                error: Some(error.to_string()),
+                windows: Vec::new(),
+            },
+        }
+    }
+
+    fn from_config(config: &AppConfig) -> Self {
+        let windows = config
+            .windows
+            .iter()
+            .map(|window| {
+                let capability = config.capabilities.get(window.id.as_str());
+                let bridge_enabled = capability.is_some_and(|capability| {
+                    capability
+                        .protocols
+                        .iter()
+                        .any(|protocol| protocol == "axion")
+                });
+                let commands = capability
+                    .map(|capability| capability.commands.clone())
+                    .unwrap_or_default();
+                let allowed_navigation_origins = capability
+                    .map(|capability| capability.allowed_navigation_origins.clone())
+                    .unwrap_or_default();
+                let allow_remote_navigation = capability
+                    .map(|capability| capability.allow_remote_navigation)
+                    .unwrap_or_default();
+                let risk = capability_summary_risk(
+                    bridge_enabled,
+                    allow_remote_navigation,
+                    &allowed_navigation_origins,
+                    &commands,
+                )
+                .to_owned();
+
+                CapabilityWindowSummary {
+                    id: window.id.as_str().to_owned(),
+                    bridge_enabled,
+                    profiles: capability
+                        .map(|capability| capability.profiles.clone())
+                        .unwrap_or_default(),
+                    profile_expansions: capability
+                        .map(|capability| capability.profile_expansions.clone())
+                        .unwrap_or_default(),
+                    explicit_commands: capability
+                        .map(|capability| capability.explicit_commands.clone())
+                        .unwrap_or_default(),
+                    explicit_events: capability
+                        .map(|capability| capability.explicit_events.clone())
+                        .unwrap_or_default(),
+                    explicit_protocols: capability
+                        .map(|capability| capability.explicit_protocols.clone())
+                        .unwrap_or_default(),
+                    commands,
+                    events: capability
+                        .map(|capability| capability.events.clone())
+                        .unwrap_or_default(),
+                    protocols: capability
+                        .map(|capability| capability.protocols.clone())
+                        .unwrap_or_default(),
+                    allowed_navigation_origins,
+                    allow_remote_navigation,
+                    risk,
+                }
+            })
+            .collect();
+
+        Self {
+            manifest_loaded: true,
+            error: None,
+            windows,
+        }
+    }
+
+    fn human_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!(
+            "capabilities.summary: manifest_loaded={}, windows={}",
+            self.manifest_loaded,
+            self.windows.len()
+        )];
+        if let Some(error) = &self.error {
+            lines.push(format!("capabilities.error: {error}"));
+        }
+        for window in &self.windows {
+            lines.push(format!(
+                "capabilities.window.{}: bridge={}, risk={}, profiles={}, commands={}, events={}, protocols={}, navigation_origins={}, remote_navigation={}",
+                window.id,
+                if window.bridge_enabled { "enabled" } else { "disabled" },
+                window.risk,
+                list_or_none(&window.profiles),
+                list_or_none(&window.commands),
+                list_or_none(&window.events),
+                list_or_none(&window.protocols),
+                list_or_none(&window.allowed_navigation_origins),
+                window.allow_remote_navigation,
+            ));
+            for expansion in &window.profile_expansions {
+                lines.push(format!(
+                    "capabilities.window.{}.profile.{}: commands={}, events={}, protocols={}",
+                    window.id,
+                    expansion.profile,
+                    list_or_none(&expansion.commands),
+                    list_or_none(&expansion.events),
+                    list_or_none(&expansion.protocols),
+                ));
+            }
+        }
+        lines
+    }
+
+    fn to_json(&self) -> String {
+        let windows = self
+            .windows
+            .iter()
+            .map(CapabilityWindowSummary::to_json)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{{\"manifest_loaded\":{},\"error\":{},\"windows\":[{}]}}",
+            self.manifest_loaded,
+            optional_json_string_literal(self.error.as_deref()),
+            windows,
+        )
+    }
+}
+
+impl CapabilityWindowSummary {
+    fn to_json(&self) -> String {
+        let profile_expansions = self
+            .profile_expansions
+            .iter()
+            .map(capability_profile_expansion_json)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{{\"id\":{},\"bridge_enabled\":{},\"risk\":{},\"profiles\":{},\"profile_expansions\":[{}],\"explicit_commands\":{},\"explicit_events\":{},\"explicit_protocols\":{},\"commands\":{},\"events\":{},\"protocols\":{},\"allowed_navigation_origins\":{},\"allow_remote_navigation\":{}}}",
+            json_string_literal(&self.id),
+            self.bridge_enabled,
+            json_string_literal(&self.risk),
+            json_string_array_literal(&self.profiles),
+            profile_expansions,
+            json_string_array_literal(&self.explicit_commands),
+            json_string_array_literal(&self.explicit_events),
+            json_string_array_literal(&self.explicit_protocols),
+            json_string_array_literal(&self.commands),
+            json_string_array_literal(&self.events),
+            json_string_array_literal(&self.protocols),
+            json_string_array_literal(&self.allowed_navigation_origins),
+            self.allow_remote_navigation,
+        )
+    }
+}
+
+fn capability_profile_expansion_json(expansion: &axion_core::CapabilityProfileConfig) -> String {
+    format!(
+        "{{\"profile\":{},\"commands\":{},\"events\":{},\"protocols\":{}}}",
+        json_string_literal(&expansion.profile),
+        json_string_array_literal(&expansion.commands),
+        json_string_array_literal(&expansion.events),
+        json_string_array_literal(&expansion.protocols),
+    )
+}
+
+fn capability_summary_risk(
+    bridge_enabled: bool,
+    allow_remote_navigation: bool,
+    allowed_navigation_origins: &[String],
+    commands: &[String],
+) -> &'static str {
+    if allow_remote_navigation {
+        "high"
+    } else if !bridge_enabled {
+        "low"
+    } else if !allowed_navigation_origins.is_empty()
+        || commands.iter().any(|command| {
+            command.starts_with("fs.")
+                || command.starts_with("clipboard.")
+                || command.starts_with("dialog.")
+                || command == "app.exit"
+                || command == "window.close"
+                || command == "window.reload"
+        })
+    {
+        "medium"
+    } else {
+        "low"
     }
 }
 
@@ -651,6 +876,14 @@ fn optional_json_bool(value: Option<bool>) -> String {
         .unwrap_or_else(|| "null".to_owned())
 }
 
+fn list_or_none(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_owned()
+    } else {
+        values.join(",")
+    }
+}
+
 fn optional_json_string_literal(value: Option<&str>) -> String {
     value
         .map(json_string_literal)
@@ -789,6 +1022,13 @@ profiles = ["app-info"]
         assert!(json.contains("\"kind\":\"dev_event_log_hint\""));
         assert!(json.contains("\"kind\":\"bundle_report_hint\""));
         assert!(json.contains("\"doctor\":{\"passed\":true"));
+        assert!(json.contains("\"capabilities\":{\"manifest_loaded\":true"));
+        assert!(json.contains("\"profile_expansions\":["));
+        assert!(json.contains("\"profile\":\"app-info\""));
+        assert!(
+            json.contains("\"commands\":[\"app.echo\",\"app.info\",\"app.ping\",\"app.version\"]")
+        );
+        assert!(json.contains("\"risk\":\"low\""));
         assert!(json.contains("\"ready_for_dev\":true"));
         assert!(json.contains("\"bundle_preflight\":{\"checked\":true,\"passed\":true"));
         assert!(json.contains("\"dev_preflight\":{\"checked\":true,\"passed\":true"));
@@ -817,12 +1057,15 @@ profiles = ["app-info"]
         let lines = report.human_lines();
 
         assert!(lines.contains(&"[gate]".to_owned()));
+        assert!(lines.contains(&"[capabilities]".to_owned()));
         assert!(lines.contains(&"[readiness]".to_owned()));
         assert!(lines.contains(&"[self_test]".to_owned()));
         assert!(lines.contains(&"[artifacts]".to_owned()));
         assert!(lines.contains(&"[bundle_preflight]".to_owned()));
         assert!(lines.contains(&"[dev_preflight]".to_owned()));
         assert!(lines.iter().any(|line| line.starts_with("artifact: kind=")));
+        assert!(lines.iter().any(|line| line
+            == "capabilities.window.main.profile.app-info: commands=app.echo,app.info,app.ping,app.version, events=none, protocols=axion"));
         assert!(lines.iter().any(|line| line.starts_with("dev.warning: ")));
         assert!(
             lines

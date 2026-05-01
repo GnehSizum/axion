@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 pub const BRIDGE_MAX_NAME_BYTES: usize = 128;
 pub const BRIDGE_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const BRIDGE_MAX_REQUEST_ID_BYTES: usize = 128;
-const AXION_RELEASE_VERSION: &str = "v0.1.26.0";
+const AXION_RELEASE_VERSION: &str = "v0.1.27.0";
 const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1292,7 +1292,7 @@ impl BootstrapConfig {
         let diagnostics_helpers = bootstrap_diagnostics_helpers();
 
         format!(
-            "(function() {{\n  if (window.__AXION__) return;\n  const state = Object.freeze({{\n    appName: {app_name},\n    bridgeToken: {bridge_token},\n    commands: Object.freeze([{commands}]),\n    events: Object.freeze([{events}]),\n    hostEvents: Object.freeze([{host_events}]),\n    trustedOrigins: Object.freeze([{trusted_origins}]),\n    protocol: 'axion',\n    version: {bridge_version},\n    diagnosticsReportSchema: {diagnostics_report_schema}\n  }});\n  const listeners = new Map();\n  const lastEvents = new Map();\n\n  function currentOrigin() {{\n    const url = new URL(window.location.href);\n    return `${{url.protocol}}//${{url.host}}`;\n  }}\n\n  if (!state.trustedOrigins.includes(currentOrigin())) return;\n\n  function isListenableEvent(event) {{\n    return state.events.includes(event) || state.hostEvents.includes(event);\n  }}\n\n  function dispatch(event, payload) {{\n    if (!isListenableEvent(event)) return false;\n    lastEvents.set(event, payload);\n    const handlers = listeners.get(event);\n    if (handlers) {{\n      for (const handler of handlers) {{\n        try {{ handler(payload); }} catch (error) {{ console.error('Axion listener error', error); }}\n      }}\n    }}\n    window.dispatchEvent(new CustomEvent(`axion:${{event}}`, {{ detail: payload }}));\n    return true;\n  }}\n\n  function nextRequestId() {{\n    return `axion_${{Date.now().toString(36)}}_${{Math.random().toString(16).slice(2)}}`;\n  }}\n\n  function bridgeUrl(kind, name, payload, requestId) {{\n    const encodedName = encodeURIComponent(name);\n    const payloadJson = encodeURIComponent(JSON.stringify(payload ?? null));\n    const encodedId = encodeURIComponent(requestId);\n    return `${{state.protocol}}://app/__axion__/${{kind}}/${{encodedName}}?payload=${{payloadJson}}&id=${{encodedId}}`;\n  }}\n\n  async function bridgeFetch(kind, name, payload) {{\n    const requestId = nextRequestId();\n    const response = await fetch(bridgeUrl(kind, name, payload, requestId), {{\n      headers: {{ 'X-Axion-Bridge-Token': state.bridgeToken }}\n    }});\n    const envelope = await response.json();\n    if (envelope.id && envelope.id !== requestId) {{\n      throw new Error(`Axion bridge returned an unexpected request id for ${{name}}`);\n    }}\n    if (!response.ok || envelope.ok === false) {{\n      throw new Error(envelope.error || `Axion bridge request failed: ${{name}}`);\n    }}\n    return envelope.payload;\n  }}\n\n  async function invoke(command, payload) {{\n    if (!state.commands.includes(command)) {{\n      throw new Error(`Axion command is not allowed: ${{command}}`);\n    }}\n\n    return bridgeFetch('invoke', command, payload);\n  }}\n\n  async function emit(event, payload) {{\n    if (!state.events.includes(event)) {{\n      throw new Error(`Axion event is not allowed: ${{event}}`);\n    }}\n\n    await bridgeFetch('emit', event, payload);\n    dispatch(event, payload);\n    return true;\n  }}\n\n  function listen(event, handler) {{\n    if (!isListenableEvent(event)) {{\n      throw new Error(`Axion event is not listenable: ${{event}}`);\n    }}\n    if (typeof handler !== 'function') {{\n      throw new Error('Axion listen() requires a function handler');\n    }}\n    const handlers = listeners.get(event) || new Set();\n    handlers.add(handler);\n    listeners.set(event, handlers);\n    if (lastEvents.has(event)) {{\n      handler(lastEvents.get(event));\n    }}\n    return () => {{\n      const current = listeners.get(event);\n      if (!current) return;\n      current.delete(handler);\n      if (current.size === 0) listeners.delete(event);\n    }};\n  }}\n\n{compat_helpers}\n{diagnostics_helpers}\n  window.__AXION__ = Object.freeze({{\n    ready: true,\n    appName: state.appName,\n    commands: state.commands,\n    events: state.events,\n    hostEvents: state.hostEvents,\n    trustedOrigins: state.trustedOrigins,\n    protocol: state.protocol,\n    version: state.version,\n    compat: Object.freeze({{\n      installTextInputSelectionPatch\n    }}),\n    diagnostics: Object.freeze({{\n      reportSchema: state.diagnosticsReportSchema,\n      currentOrigin,\n      describeBridge,\n      snapshotTextControl,\n      toPrettyJson\n    }}),\n    invoke,\n    emit,\n    listen,\n    __dispatchFromHost(token, event, payload) {{\n      if (token !== state.bridgeToken || !state.hostEvents.includes(event)) return false;\n      return dispatch(event, payload);\n    }}\n  }});\n}})();\n"
+            "(function() {{\n  if (window.__AXION__) return;\n  const state = Object.freeze({{\n    appName: {app_name},\n    bridgeToken: {bridge_token},\n    commands: Object.freeze([{commands}]),\n    events: Object.freeze([{events}]),\n    hostEvents: Object.freeze([{host_events}]),\n    trustedOrigins: Object.freeze([{trusted_origins}]),\n    protocol: 'axion',\n    version: {bridge_version},\n    diagnosticsReportSchema: {diagnostics_report_schema}\n  }});\n  const listeners = new Map();\n  const lastEvents = new Map();\n\n  function currentOrigin() {{\n    const url = new URL(window.location.href);\n    return `${{url.protocol}}//${{url.host}}`;\n  }}\n\n  if (!state.trustedOrigins.includes(currentOrigin())) return;\n\n  function isListenableEvent(event) {{\n    return state.events.includes(event) || state.hostEvents.includes(event);\n  }}\n\n  function dispatch(event, payload) {{\n    if (!isListenableEvent(event)) return false;\n    lastEvents.set(event, payload);\n    const handlers = listeners.get(event);\n    if (handlers) {{\n      for (const handler of handlers) {{\n        try {{ handler(payload); }} catch (error) {{ console.error('Axion listener error', error); }}\n      }}\n    }}\n    window.dispatchEvent(new CustomEvent(`axion:${{event}}`, {{ detail: payload }}));\n    return true;\n  }}\n\n  function nextRequestId() {{\n    return `axion_${{Date.now().toString(36)}}_${{Math.random().toString(16).slice(2)}}`;\n  }}\n\n  function bridgeUrl(kind, name, payload, requestId) {{\n    const encodedName = encodeURIComponent(name);\n    const payloadJson = encodeURIComponent(JSON.stringify(payload ?? null));\n    const encodedId = encodeURIComponent(requestId);\n    return `${{state.protocol}}://app/__axion__/${{kind}}/${{encodedName}}?payload=${{payloadJson}}&id=${{encodedId}}`;\n  }}\n\n  function createBridgeError(errorLike, fallbackMessage) {{\n    const normalized = normalizeError(errorLike, fallbackMessage);\n    const error = new Error(normalized.message);\n    error.code = normalized.code;\n    error.details = normalized;\n    return error;\n  }}\n\n  async function bridgeFetch(kind, name, payload) {{\n    const requestId = nextRequestId();\n    const response = await fetch(bridgeUrl(kind, name, payload, requestId), {{\n      headers: {{ 'X-Axion-Bridge-Token': state.bridgeToken }}\n    }});\n    const envelope = await response.json();\n    if (envelope.id && envelope.id !== requestId) {{\n      throw createBridgeError({{ code: 'bridge.request-id-mismatch', message: `Axion bridge returned an unexpected request id for ${{name}}` }});\n    }}\n    if (!response.ok || envelope.ok === false) {{\n      throw createBridgeError(envelope.error, `Axion bridge request failed: ${{name}}`);\n    }}\n    return envelope.payload;\n  }}\n\n  async function invoke(command, payload) {{\n    if (!state.commands.includes(command)) {{\n      throw createBridgeError({{ code: 'bridge.command-not-allowed', message: `Axion command is not allowed: ${{command}}` }});\n    }}\n\n    return bridgeFetch('invoke', command, payload);\n  }}\n\n  async function emit(event, payload) {{\n    if (!state.events.includes(event)) {{\n      throw createBridgeError({{ code: 'bridge.event-not-allowed', message: `Axion event is not allowed: ${{event}}` }});\n    }}\n\n    await bridgeFetch('emit', event, payload);\n    dispatch(event, payload);\n    return true;\n  }}\n\n  function listen(event, handler) {{\n    if (!isListenableEvent(event)) {{\n      throw createBridgeError({{ code: 'bridge.event-not-listenable', message: `Axion event is not listenable: ${{event}}` }});\n    }}\n    if (typeof handler !== 'function') {{\n      throw createBridgeError({{ code: 'bridge.invalid-listener', message: 'Axion listen() requires a function handler' }});\n    }}\n    const handlers = listeners.get(event) || new Set();\n    handlers.add(handler);\n    listeners.set(event, handlers);\n    if (lastEvents.has(event)) {{\n      handler(lastEvents.get(event));\n    }}\n    return () => {{\n      const current = listeners.get(event);\n      if (!current) return;\n      current.delete(handler);\n      if (current.size === 0) listeners.delete(event);\n    }};\n  }}\n\n{compat_helpers}\n{diagnostics_helpers}\n  window.__AXION__ = Object.freeze({{\n    ready: true,\n    appName: state.appName,\n    commands: state.commands,\n    events: state.events,\n    hostEvents: state.hostEvents,\n    trustedOrigins: state.trustedOrigins,\n    protocol: state.protocol,\n    version: state.version,\n    compat: Object.freeze({{\n      installTextInputSelectionPatch\n    }}),\n    diagnostics: Object.freeze({{\n      reportSchema: state.diagnosticsReportSchema,\n      currentOrigin,\n      describeBridge,\n      snapshotTextControl,\n      normalizeError,\n      toPrettyJson\n    }}),\n    invoke,\n    emit,\n    listen,\n    __dispatchFromHost(token, event, payload) {{\n      if (token !== state.bridgeToken || !state.hostEvents.includes(event)) return false;\n      return dispatch(event, payload);\n    }}\n  }});\n}})();\n"
         )
     }
 }
@@ -1727,6 +1727,33 @@ fn bootstrap_compat_helpers() -> &'static str {
 fn bootstrap_diagnostics_helpers() -> &'static str {
     r#"  function toPrettyJson(value) {
     return JSON.stringify(value, null, 2);
+  }
+
+  function errorCodeFromMessage(message) {
+    const match = String(message ?? '').match(/^([a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+):\s/);
+    return match ? match[1] : null;
+  }
+
+  function normalizeError(error, fallbackMessage = 'Axion bridge request failed') {
+    if (error && typeof error === 'object') {
+      const message = typeof error.message === 'string' && error.message.length > 0
+        ? error.message
+        : fallbackMessage;
+      return {
+        code: typeof error.code === 'string' && error.code.length > 0
+          ? error.code
+          : errorCodeFromMessage(message) ?? 'bridge.error',
+        message,
+        cause: error
+      };
+    }
+
+    const message = typeof error === 'string' && error.length > 0 ? error : fallbackMessage;
+    return {
+      code: errorCodeFromMessage(message) ?? 'bridge.error',
+      message,
+      cause: error ?? null
+    };
   }
 
   function snapshotTextControl(element, detail = null) {
@@ -2295,6 +2322,8 @@ mod tests {
         assert!(script.contains("axion.diagnostics-report.v1"));
         assert!(script.contains("describeBridge"));
         assert!(script.contains("snapshotTextControl"));
+        assert!(script.contains("normalizeError"));
+        assert!(script.contains("createBridgeError"));
         assert!(script.contains("toPrettyJson"));
         assert!(script.contains("__dispatchFromHost"));
         assert!(script.contains("__dispatchFromHost(token, event, payload)"));
