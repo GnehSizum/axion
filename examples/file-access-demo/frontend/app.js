@@ -60,6 +60,14 @@ window.addEventListener('DOMContentLoaded', async () => {
     typeof diagnostics?.toPrettyJson === 'function'
       ? diagnostics.toPrettyJson(value)
       : JSON.stringify(value, null, 2);
+  const normalizeError = (error) =>
+    typeof diagnostics?.normalizeError === 'function'
+      ? diagnostics.normalizeError(error)
+      : {
+          code: null,
+          message: error instanceof Error ? error.message : String(error),
+          cause: error ?? null,
+        };
 
   const render = () => {
     summaryApp.textContent = state.appInfo
@@ -132,8 +140,9 @@ window.addEventListener('DOMContentLoaded', async () => {
       setStatus(`${name} succeeded.`);
       return result;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setLastOperation(name, false, { error: message, payload });
+      const normalized = normalizeError(error);
+      const message = normalized.message;
+      setLastOperation(name, false, { error: message, code: normalized.code, payload });
       setStatus(`${name} failed: ${message}`);
       throw error;
     } finally {
@@ -150,8 +159,9 @@ window.addEventListener('DOMContentLoaded', async () => {
       setStatus(`${name} emitted successfully.`);
       return result;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setLastOperation(name, false, { error: message, payload });
+      const normalized = normalizeError(error);
+      const message = normalized.message;
+      setLastOperation(name, false, { error: message, code: normalized.code, payload });
       setStatus(`${name} failed: ${message}`);
       throw error;
     } finally {
@@ -320,19 +330,62 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     try {
       const path = `notes/gui-smoke-${Date.now().toString(36)}.txt`;
+      const directory = path.slice(0, path.lastIndexOf('/'));
+      await bridge.invoke('fs.create_dir', { path: directory });
       await bridge.invoke('fs.write_text', {
         path,
         contents: `gui-smoke:${new Date().toISOString()}`,
       });
+      const fsExists = await bridge.invoke('fs.exists', { path });
       const fsRead = await bridge.invoke('fs.read_text', { path });
+      const fsList = await bridge.invoke('fs.list_dir', { path: directory });
+      const fsRemove = await bridge.invoke('fs.remove', { path });
+      const fsMissing = await bridge.invoke('fs.exists', { path });
+      await bridge.invoke('fs.remove', { path: directory, recursive: true });
       pushCheck(
-        'fs.roundtrip',
-        'fs roundtrip',
-        typeof fsRead?.contents === 'string' ? 'pass' : 'fail',
+        'fs.lifecycle',
+        'fs create/read/list/remove lifecycle',
+        fsExists?.exists === true &&
+          typeof fsRead?.contents === 'string' &&
+          Array.isArray(fsList?.entries) &&
+          fsList.entries.some((entry) => entry.name === path.slice(path.lastIndexOf('/') + 1)) &&
+          fsRemove?.removed === true &&
+          fsMissing?.exists === false
+          ? 'pass'
+          : 'fail',
         path,
       );
     } catch (error) {
-      pushCheck('fs.roundtrip', 'fs roundtrip', 'fail', error instanceof Error ? error.message : String(error));
+      pushCheck('fs.lifecycle', 'fs create/read/list/remove lifecycle', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      const errorDir = `notes/gui-smoke-errors-${Date.now().toString(36)}`;
+      const errorFile = `${errorDir}/file.txt`;
+      await bridge.invoke('fs.create_dir', { path: errorDir });
+      await bridge.invoke('fs.write_text', { path: errorFile, contents: 'error probes' });
+      const missingError = await bridge.invoke('fs.read_text', { path: `${errorDir}/missing.txt` })
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
+      const listFileError = await bridge.invoke('fs.list_dir', { path: errorFile })
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
+      const removeNonEmptyError = await bridge.invoke('fs.remove', { path: errorDir })
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
+      await bridge.invoke('fs.remove', { path: errorDir, recursive: true });
+      pushCheck(
+        'fs.expected_errors',
+        'fs expected error codes',
+        missingError.code === 'fs.not-found' &&
+          listFileError.code === 'fs.not-directory' &&
+          removeNonEmptyError.code === 'fs.directory-not-empty'
+          ? 'pass'
+          : 'fail',
+        { missingError, listFileError, removeNonEmptyError },
+      );
+    } catch (error) {
+      pushCheck('fs.expected_errors', 'fs expected error codes', 'fail', error instanceof Error ? error.message : String(error));
     }
 
     try {
@@ -353,6 +406,20 @@ window.addEventListener('DOMContentLoaded', async () => {
       );
     } catch (error) {
       pushCheck('dialog.preview', 'dialog preview', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      const dialogPayloadError = await bridge.invoke('dialog.save', { multiple: true })
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
+      pushCheck(
+        'dialog.expected_errors',
+        'dialog expected error codes',
+        dialogPayloadError.code === 'dialog.invalid-payload' ? 'pass' : 'fail',
+        { dialogPayloadError },
+      );
+    } catch (error) {
+      pushCheck('dialog.expected_errors', 'dialog expected error codes', 'fail', error instanceof Error ? error.message : String(error));
     }
 
     const inputSnapshot =
@@ -423,6 +490,17 @@ window.addEventListener('DOMContentLoaded', async () => {
     };
   };
 
+  registerAction('create-dir', async (event) => {
+    const result = await invokeAndTrack(
+      'fs.create_dir',
+      {
+        path: filePath.value.includes('/') ? filePath.value.slice(0, filePath.value.lastIndexOf('/')) : '.',
+      },
+      event.currentTarget,
+    );
+    setFeedback(fileFeedback, `Created ${result.path}.`);
+  });
+
   registerAction('write-text', async (event) => {
     const result = await invokeAndTrack(
       'fs.write_text',
@@ -433,6 +511,17 @@ window.addEventListener('DOMContentLoaded', async () => {
       event.currentTarget,
     );
     setFeedback(fileFeedback, `Wrote ${result.path}.`);
+  });
+
+  registerAction('exists-path', async (event) => {
+    const result = await invokeAndTrack(
+      'fs.exists',
+      {
+        path: filePath.value,
+      },
+      event.currentTarget,
+    );
+    setFeedback(fileFeedback, `${result.path} exists=${result.exists}.`);
   });
 
   registerAction('read-text', async (event) => {
@@ -449,6 +538,31 @@ window.addEventListener('DOMContentLoaded', async () => {
     setFeedback(fileFeedback, `Read ${result.path}.`);
   });
 
+  registerAction('list-dir', async (event) => {
+    const directory = filePath.value.includes('/')
+      ? filePath.value.slice(0, filePath.value.lastIndexOf('/'))
+      : '.';
+    const result = await invokeAndTrack(
+      'fs.list_dir',
+      {
+        path: directory,
+      },
+      event.currentTarget,
+    );
+    setFeedback(fileFeedback, `Listed ${result.entries?.length ?? 0} entries in ${result.path}.`);
+  });
+
+  registerAction('remove-path', async (event) => {
+    const result = await invokeAndTrack(
+      'fs.remove',
+      {
+        path: filePath.value,
+      },
+      event.currentTarget,
+    );
+    setFeedback(fileFeedback, `Removed ${result.path}.`);
+  });
+
   registerAction('probe-invalid-path', async (event) => {
     try {
       await invokeAndTrack(
@@ -461,6 +575,63 @@ window.addEventListener('DOMContentLoaded', async () => {
     } catch (_error) {
       setStatus('Invalid-path probe was rejected as expected.');
       setFeedback(fileFeedback, 'Rejected `../secrets.txt` as expected.');
+    }
+  });
+
+  registerAction('probe-missing-file', async (event) => {
+    try {
+      await invokeAndTrack(
+        'fs.read_text',
+        {
+          path: 'notes/missing.txt',
+        },
+        event.currentTarget,
+      );
+    } catch (error) {
+      const normalized = normalizeError(error);
+      setFeedback(fileFeedback, `Rejected missing file as expected: ${normalized.code} ${normalized.message}`);
+    }
+  });
+
+  registerAction('probe-list-file', async (event) => {
+    try {
+      await invokeAndTrack(
+        'fs.list_dir',
+        {
+          path: filePath.value,
+        },
+        event.currentTarget,
+      );
+    } catch (error) {
+      const normalized = normalizeError(error);
+      setFeedback(fileFeedback, `Rejected list-file as expected: ${normalized.code} ${normalized.message}`);
+    }
+  });
+
+  registerAction('probe-remove-non-empty', async (event) => {
+    const directory = `notes/non-empty-${Date.now().toString(36)}`;
+    try {
+      await bridge.invoke('fs.create_dir', { path: directory });
+      await bridge.invoke('fs.write_text', {
+        path: `${directory}/child.txt`,
+        contents: 'remove probe',
+      });
+      await invokeAndTrack(
+        'fs.remove',
+        {
+          path: directory,
+        },
+        event.currentTarget,
+      );
+    } catch (error) {
+      const normalized = normalizeError(error);
+      setFeedback(fileFeedback, `Rejected non-empty directory as expected: ${normalized.code} ${normalized.message}`);
+    } finally {
+      try {
+        await bridge.invoke('fs.remove', { path: directory, recursive: true });
+      } catch (_error) {
+        // Best-effort cleanup after the expected failure probe.
+      }
     }
   });
 
@@ -522,7 +693,13 @@ window.addEventListener('DOMContentLoaded', async () => {
     const initialRead = await bridge.invoke('fs.read_text', {
       path: filePath.value,
     });
-    setLastOperation('bootstrap.fs', true, { initialWrite, initialRead });
+    const initialExists = await bridge.invoke('fs.exists', {
+      path: filePath.value,
+    });
+    const initialList = await bridge.invoke('fs.list_dir', {
+      path: filePath.value.slice(0, filePath.value.lastIndexOf('/')),
+    });
+    setLastOperation('bootstrap.fs', true, { initialWrite, initialRead, initialExists, initialList });
 
     for (const command of ['window.set_title', 'window.set_size', 'demo.greet']) {
       if (bridge.commands.includes(command)) continue;

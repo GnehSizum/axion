@@ -43,6 +43,19 @@ jobs:
         run: cargo run -p axion-cli -- self-test --manifest-path examples/file-access-demo/axion.toml
       - name: Validate diagnostics report example
         run: cargo run -p axion-cli -- self-test --manifest-path examples/bridge-diagnostics-demo/axion.toml --report-path target/axion/reports/bridge-diagnostics-self-test.json --quiet
+      - name: Run aggregate check report
+        run: |
+          cargo run -p axion-cli -- check \
+            --manifest-path examples/hello-axion/axion.toml \
+            --dev \
+            --bundle \
+            --json \
+            --report-path target/axion/reports/hello-check.json
+      - name: Write check report summary
+        run: |
+          cargo run -p axion-cli -- report \
+            target/axion/reports/hello-check.json \
+            --output target/axion/reports/hello-check-summary.json
       - name: Check diagnostics report artifact
         run: test -s target/axion/reports/bridge-diagnostics-self-test.json
       - name: Check diagnostics report schema
@@ -98,11 +111,19 @@ jobs:
             grep -o '"source":"[^"]*"' "$report" | head -n 1
             grep -o '"app_name":"[^"]*"' "$report" | head -n 1
           done
+      - name: Write GUI smoke report summaries
+        run: |
+          for report in target/axion/reports/*-gui-smoke.json; do
+            summary="${report%.json}-summary.json"
+            cargo run -p axion-cli -- report "$report" --output "$summary"
+          done
       - name: Upload GUI smoke artifacts
         uses: actions/upload-artifact@v4
         with:
           name: axion-gui-smoke
-          path: target/axion/reports/*-gui-smoke.json
+          path: |
+            target/axion/reports/*-gui-smoke.json
+            target/axion/reports/*-gui-smoke-summary.json
           if-no-files-found: error
 
   release-preview:
@@ -114,31 +135,52 @@ jobs:
         uses: actions/checkout@v4
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.86.0
+      - name: Run hello release check
+        run: |
+          cargo run -p axion-cli -- check \
+            --manifest-path examples/hello-axion/axion.toml \
+            --dev \
+            --bundle \
+            --json \
+            --report-path target/axion/reports/hello-check.json
       - name: Run hello release preview
         run: |
           cargo run -p axion-cli -- release \
             --manifest-path examples/hello-axion/axion.toml \
+            --check-report-path target/axion/reports/hello-check.json \
             --json \
             --report-path target/axion/reports/hello-release.json \
             --bundle-report-path target/axion/reports/hello-bundle.json \
             --archive \
             --archive-path target/axion/reports/hello-bundle.tar
+      - name: Write release report summary
+        run: |
+          cargo run -p axion-cli -- report \
+            target/axion/reports/hello-release.json \
+            --output target/axion/reports/hello-release-summary.json
       - name: Check release preview report
         run: |
+          test -s target/axion/reports/hello-check.json
           test -s target/axion/reports/hello-release.json
+          test -s target/axion/reports/hello-release-summary.json
           test -s target/axion/reports/hello-bundle.json
           test -s target/axion/reports/hello-bundle.tar
           grep -q '"schema":"axion.release-report.v1"' target/axion/reports/hello-release.json
           grep -q '"result":"ok"' target/axion/reports/hello-release.json
           grep -q '"failure_phase":null' target/axion/reports/hello-release.json
           grep -q '"artifacts":' target/axion/reports/hello-release.json
+          grep -q '"summary":' target/axion/reports/hello-release.json
+          grep -q '"check_report_reused":true' target/axion/reports/hello-release.json
           grep -q '"verification":{"checked":true,"passed":true' target/axion/reports/hello-release.json
+          grep -q '"schema":"axion.report-summary.v1"' target/axion/reports/hello-release-summary.json
       - name: Upload release preview artifacts
         uses: actions/upload-artifact@v4
         with:
           name: axion-release-preview
           path: |
+            target/axion/reports/hello-check.json
             target/axion/reports/hello-release.json
+            target/axion/reports/hello-release-summary.json
             target/axion/reports/hello-bundle.json
             target/axion/reports/hello-bundle.tar
           if-no-files-found: error

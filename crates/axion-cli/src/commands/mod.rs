@@ -5,6 +5,8 @@ pub mod dev;
 pub mod doctor;
 pub mod gui_smoke;
 pub mod release;
+pub mod report;
+pub mod report_util;
 pub mod self_test;
 
 use std::path::{Path, PathBuf};
@@ -22,24 +24,27 @@ pub fn run_new(args: NewArgs) -> Result<(), AxionCliError> {
     println!("Axion application created");
     println!("name: {}", project.name);
     println!("template: {}", project.template.name());
+    println!("template_focus: {}", project.template_summary());
     println!("path: {}", project.root.display());
     println!("next:");
-    println!("  cd {}", project.root.display());
-    println!("  cargo run -- --plan");
-    println!(
-        "  cargo run -p axion-cli -- check --manifest-path {} --bundle",
-        project.root.join("axion.toml").display()
-    );
-    println!("  cargo run --features servo-runtime");
+    for step in project.next_steps() {
+        println!("  {step}");
+    }
     if run_check {
         println!("running initial check:");
         check::run(CheckArgs {
             manifest_path: project.root.join("axion.toml"),
             max_risk: DoctorRisk::Medium,
             bundle: true,
+            dev: true,
+            report_path: None,
             json: false,
             keep_artifacts: false,
         })?;
+        println!(
+            "note: run gui-smoke from the Axion checkout with --manifest-path {} and --cargo-target-dir target",
+            project.root.join("axion.toml").display()
+        );
     }
     Ok(())
 }
@@ -97,13 +102,92 @@ impl NewProject {
         Ok(())
     }
 
+    fn next_steps(&self) -> Vec<String> {
+        let manifest = self.root.join("axion.toml").display().to_string();
+        vec![
+            format!("cd {}", self.root.display()),
+            "cargo run -- --plan".to_owned(),
+            "cargo run --features servo-runtime".to_owned(),
+            format!(
+                "from Axion checkout: cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle --json --report-path target/axion/reports/check.json"
+            ),
+            format!(
+                "from Axion checkout: cargo run -p axion-cli -- gui-smoke --manifest-path {manifest} --report-path target/axion/reports/gui-smoke.json --timeout-ms 30000 --cargo-target-dir target --serial-build"
+            ),
+            format!(
+                "from Axion checkout: cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest} --launch --fallback-packaged --watch --reload --restart-on-change --event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json"
+            ),
+            format!(
+                "from Axion checkout: cargo run -p axion-cli -- release --manifest-path {manifest} --check-report-path target/axion/reports/check.json --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar"
+            ),
+            "from Axion checkout: cargo run -p axion-cli -- report target/axion/reports/release.json --output target/axion/reports/release-summary.json".to_owned(),
+            "from Axion checkout: cargo run -p axion-cli -- report target/axion/reports/gui-smoke.json --allow-failed --output target/axion/reports/gui-smoke-summary.json".to_owned(),
+        ]
+    }
+
+    fn template_summary(&self) -> &'static str {
+        match self.template {
+            NewTemplate::Vanilla => {
+                "Bridge, lifecycle, native API, custom command, capability-denial, and bundle demos"
+            }
+            NewTemplate::NativeApiDemo => {
+                "Focused clipboard, app-data filesystem, dialog, app/window API, and diagnostics demo"
+            }
+        }
+    }
+
+    fn template_eyebrow(&self) -> &'static str {
+        match self.template {
+            NewTemplate::Vanilla => "Axion Vanilla Template",
+            NewTemplate::NativeApiDemo => "Axion Native API Demo",
+        }
+    }
+
+    fn native_api_heading(&self) -> &'static str {
+        match self.template {
+            NewTemplate::Vanilla => "Native Preview APIs",
+            NewTemplate::NativeApiDemo => "Native API Workbench",
+        }
+    }
+
+    fn gui_smoke_source(&self) -> &'static str {
+        match self.template {
+            NewTemplate::Vanilla => "axion-vanilla-template",
+            NewTemplate::NativeApiDemo => "axion-native-api-demo-template",
+        }
+    }
+
+    fn native_api_focus_section(&self) -> &'static str {
+        match self.template {
+            NewTemplate::Vanilla => "",
+            NewTemplate::NativeApiDemo => {
+                r#"
+## Native API Demo Focus
+
+This template is tuned for validating Axion's preview native API surface. The UI highlights app/window metadata, clipboard round trips, app-data file lifecycle operations, headless dialog responses, capability denial, input compatibility, and the GUI smoke hook used by `axion gui-smoke`. Use the "Run all checks" button in the Native API Workbench card for a manual in-window check pass.
+"#
+            }
+        }
+    }
+
+    fn native_api_controls_html(&self) -> &'static str {
+        match self.template {
+            NewTemplate::Vanilla => "",
+            NewTemplate::NativeApiDemo => {
+                "\n          <p class=\"hint\">Run the same bridge checks used by GUI smoke and inspect the structured result.</p>\n          <button id=\"run-native-api-checks\" type=\"button\">Run all checks</button>"
+            }
+        }
+    }
+
     fn readme(&self) -> String {
         format!(
             r#"# {title}
 
 Generated by Axion using the `{template}` template.
 
-## Run
+{summary}
+
+## Local Run
 
 ```sh
 cargo run -- --plan
@@ -122,31 +206,62 @@ cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest
 If the dev server is unavailable, use `--fallback-packaged` to launch the packaged `frontend/index.html` entry instead. `--watch` polls frontend files with debounce and temporary-file ignore rules, and `--reload` asks live windows to reload when launched with `--launch`. `--open-devtools` reports that the current Servo backend does not open devtools yet.
 
 ```sh
-cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest} --launch --fallback-packaged --watch --reload
+cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest} --launch --fallback-packaged --watch --reload --restart-on-change --event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json
 ```
+
+`--event-log` writes realtime `axion.dev-event.v1` JSONL watch/reload/restart events. `--report-path` writes the final `axion.dev-report.v1` session summary with launch mode, dev-server status, fallback status, launch/restart counters, next step, failure, and result.
 
 ## What The Demo Shows
 
 - Bridge availability, allowed commands, frontend events, and host lifecycle events such as `window.ready`.
 - Built-in app/window commands: `app.info`, `app.version`, `app.echo`, `app.exit`, `window.info`, `window.close`, `window.reload`, `window.set_title`, and `window.set_size`.
-- Native preview APIs: `clipboard.write_text`, `clipboard.read_text`, `fs.write_text`, `fs.read_text`, `dialog.open`, and `dialog.save`.
+- Native preview APIs: `clipboard.write_text`, `clipboard.read_text`, `fs.create_dir`, `fs.exists`, `fs.write_text`, `fs.read_text`, `fs.list_dir`, `fs.remove`, `dialog.open`, and `dialog.save`.
 - A custom Rust command, `demo.greet`, registered in `src/main.rs`.
 - Capability denial behavior through an intentional `demo.missing` call.
 - Bundle icon validation through `[bundle] icon = "icons/app.icns"`.
 - A text-input compatibility panel that demonstrates `window.__AXION__.compat.installTextInputSelectionPatch`.
 - A `window.__AXION_GUI_SMOKE__()` hook for Servo-backed GUI smoke diagnostics.
+{native_api_focus}
 
-## Packaging Preview
+## Capability Profiles
+
+The generated manifest grants the main window these profiles:
+
+- `app-info`: app metadata, version, ping, and echo commands.
+- `app-control`: `app.exit`.
+- `window-control`: current-window metadata, reload, focus, title, size, visibility, and close decisions.
+- `clipboard-access`: text clipboard read/write.
+- `file-access`: app-data filesystem create/exists/list/read/remove/write.
+- `dialog-access`: `dialog.open` and `dialog.save`.
+- `app-events`: frontend `app.log` event emission.
+
+The custom `demo.greet` command is explicit because it is app-specific. Inspect the effective surface with `cargo run -p axion-cli -- check --manifest-path {manifest} --json` or see `docs/capabilities.md` in the Axion checkout for the full profile mapping.
+
+## Release Preview
 
 `axion bundle` creates a platform bundle scaffold, copies `frontend/`, writes app metadata, copies `icons/app.icns`, emits `axion-bundle-manifest.json`, and verifies file references plus fingerprints. It is a staging bundle, not a signed installer.
 
 ```sh
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable --json --report-path target/axion/reports/bundle.json
-cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
+cargo run -p axion-cli -- release --manifest-path {manifest} --check-report-path target/axion/reports/check.json --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
+cargo run -p axion-cli -- report target/axion/reports/release.json --output target/axion/reports/release-summary.json
+cargo run -p axion-cli -- report target/axion/reports/gui-smoke.json --allow-failed --output target/axion/reports/gui-smoke-summary.json
 ```
 
-Expected output includes `target`, `layout`, `bundle_dir`, `bundle_manifest`, `platform_metadata`, `verification: ok`, `checked_files`, `fingerprinted_files`, and `bundle_bytes`. JSON output uses `axion.bundle-report.v1` for scripted release checks and can be written with `--report-path`. Release JSON uses `axion.release-report.v1` and includes `artifacts[]`, `failure_phase`, `failed_reasons`, and archive verification details.
+Expected output includes `target`, `layout`, `bundle_dir`, `bundle_manifest`, `platform_metadata`, `verification: ok`, `checked_files`, `fingerprinted_files`, and `bundle_bytes`. JSON output uses `axion.bundle-report.v1` for scripted release checks and can be written with `--report-path`. Release JSON uses `axion.release-report.v1` and includes `summary`, `artifacts[]`, `failure_phase`, `failed_reasons`, and archive verification details. `axion report --output` writes a normalized `axion.report-summary.v1` file for artifact upload, and `--allow-failed` is intended for CI artifact-summary steps after a failed GUI smoke run.
+
+## CI Validation
+
+Use `target/axion/reports/` as the local and CI report directory. Start with `check --dev --bundle --report-path` to capture `axion.check-report.v1`, then run bundle and release reports when you need distributable preview artifacts.
+
+```sh
+cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle --json --report-path target/axion/reports/check.json
+cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable --json --report-path target/axion/reports/bundle.json
+cargo run -p axion-cli -- release --manifest-path {manifest} --check-report-path target/axion/reports/check.json --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
+cargo run -p axion-cli -- report target/axion/reports/release.json --output target/axion/reports/release-summary.json
+cargo run -p axion-cli -- report target/axion/reports/gui-smoke.json --allow-failed --output target/axion/reports/gui-smoke-summary.json
+```
 
 ## Runtime Artifacts
 
@@ -165,13 +280,14 @@ The generated frontend includes a small text input and textarea wired to `window
 Run these commands from the Axion repository root so `gui-smoke` can reuse the checkout build cache through `--cargo-target-dir target`:
 
 ```sh
-cargo run -p axion-cli -- check --manifest-path {manifest} --bundle
+cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle --json --report-path target/axion/reports/check.json
 cargo run -p axion-cli -- doctor --manifest-path {manifest} --deny-warnings --max-risk medium
 cargo run -p axion-cli -- self-test --manifest-path {manifest}
 cargo run -p axion-cli -- gui-smoke --manifest-path {manifest} --report-path target/axion/reports/gui-smoke.json --timeout-ms 30000 --cargo-target-dir target --serial-build
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable --json --report-path target/axion/reports/bundle.json
-cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
+cargo run -p axion-cli -- release --manifest-path {manifest} --check-report-path target/axion/reports/check.json --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
+cargo run -p axion-cli -- report target/axion/reports/release.json --output target/axion/reports/release-summary.json
 ```
 
 ## Project Layout
@@ -186,6 +302,8 @@ cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-pat
 "#,
             title = title_case(&self.name),
             template = self.template.name(),
+            summary = self.template_summary(),
+            native_api_focus = self.native_api_focus_section(),
             manifest = self.root.join("axion.toml").display(),
         )
     }
@@ -196,7 +314,7 @@ cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-pat
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.1.18\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.1.30\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root
@@ -220,10 +338,15 @@ cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-pat
     }
 
     fn manifest(&self) -> String {
+        let description = match self.template {
+            NewTemplate::Vanilla => "Generated Axion application",
+            NewTemplate::NativeApiDemo => "Generated Axion native API demo application",
+        };
         format!(
-            "[app]\nname = {name:?}\nidentifier = \"dev.axion.{identifier}\"\nversion = \"0.1.0\"\ndescription = \"Generated Axion application\"\nauthors = [\"Axion Developer\"]\nhomepage = \"https://example.dev/{name}\"\n\n[window]\nid = \"main\"\ntitle = {title:?}\nwidth = 960\nheight = 720\nresizable = true\nvisible = true\n\n[build]\nfrontend_dist = \"frontend\"\nentry = \"frontend/index.html\"\n\n# To use `axion dev --launch` with a frontend dev server, uncomment and update:\n# [dev]\n# url = \"http://127.0.0.1:3000\"\n# command = \"python3 -m http.server 3000 --bind 127.0.0.1 --directory frontend\"\n# timeout_ms = 15000\n\n[bundle]\nicon = \"icons/app.icns\"\n\n[native.dialog]\nbackend = \"headless\"\n\n[native.clipboard]\nbackend = \"memory\"\n\n[native.lifecycle]\nclose_timeout_ms = 3000\n\n[capabilities.main]\nprofiles = [\"app-info\", \"app-control\", \"window-control\", \"clipboard-access\", \"file-access\", \"dialog-access\", \"app-events\"]\ncommands = [\"demo.greet\"]\nallowed_navigation_origins = []\nallow_remote_navigation = false\n",
+            "[app]\nname = {name:?}\nidentifier = \"dev.axion.{identifier}\"\nversion = \"0.1.0\"\ndescription = {description:?}\nauthors = [\"Axion Developer\"]\nhomepage = \"https://example.dev/{name}\"\n\n[window]\nid = \"main\"\ntitle = {title:?}\nwidth = 960\nheight = 720\nresizable = true\nvisible = true\n\n[build]\nfrontend_dist = \"frontend\"\nentry = \"frontend/index.html\"\n\n# To use `axion dev --launch` with a frontend dev server, uncomment and update:\n# [dev]\n# url = \"http://127.0.0.1:3000\"\n# command = \"python3 -m http.server 3000 --bind 127.0.0.1 --directory frontend\"\n# timeout_ms = 15000\n\n[bundle]\nicon = \"icons/app.icns\"\n\n[native.dialog]\nbackend = \"headless\"\n\n[native.clipboard]\nbackend = \"memory\"\n\n[native.lifecycle]\nclose_timeout_ms = 3000\n\n[capabilities.main]\nprofiles = [\"app-info\", \"app-control\", \"window-control\", \"clipboard-access\", \"file-access\", \"dialog-access\", \"app-events\"]\ncommands = [\"demo.greet\"]\nallowed_navigation_origins = []\nallow_remote_navigation = false\n",
             name = self.name,
             identifier = self.name.replace('-', "."),
+            description = description,
             title = title_case(&self.name),
         )
     }
@@ -295,8 +418,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     fn index_html(&self) -> String {
         format!(
-            "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n    <title>{title}</title>\n    <link rel=\"stylesheet\" href=\"style.css\">\n  </head>\n  <body>\n    <main class=\"shell\">\n      <section class=\"hero\">\n        <p class=\"eyebrow\">Axion Vanilla Template</p>\n        <h1>{title}</h1>\n        <p id=\"bridge-status\" class=\"status\">Waiting for Axion bridge...</p>\n      </section>\n\n      <section class=\"grid\">\n        <article class=\"card\">\n          <h2>Bridge Surface</h2>\n          <p>Commands exposed to this window:</p>\n          <ul id=\"command-list\"></ul>\n          <p>Frontend events:</p>\n          <ul id=\"event-list\"></ul>\n          <p>Host events:</p>\n          <ul id=\"host-event-list\"></ul>\n        </article>\n\n        <article class=\"card\">\n          <h2>App & Window API</h2>\n          <pre id=\"app-info\">Waiting...</pre>\n        </article>\n\n        <article class=\"card\">\n          <h2>Native Preview APIs</h2>\n          <pre id=\"native-api\">Waiting...</pre>\n        </article>\n\n        <article class=\"card\">\n          <h2>Input Compatibility</h2>\n          <label class=\"field\">\n            <span>Sample Input</span>\n            <input id=\"compat-input\" type=\"text\" value=\"Axion caret placement demo\">\n          </label>\n          <label class=\"field\">\n            <span>Sample Textarea</span>\n            <textarea id=\"compat-textarea\" rows=\"5\">Try clicking, selecting, and pressing Tab here.\nThe template wires this textarea to Axion's text selection compatibility helper.</textarea>\n          </label>\n          <pre id=\"compat-diagnostics\">Waiting for text input interaction...</pre>\n        </article>\n\n        <article class=\"card\">\n          <h2>Custom Rust Command</h2>\n          <pre id=\"custom-command\">Waiting...</pre>\n        </article>\n\n        <article class=\"card\">\n          <h2>Capability Denial</h2>\n          <pre id=\"capability-denial\">Waiting...</pre>\n        </article>\n\n        <article class=\"card\">\n          <h2>Event Log</h2>\n          <pre id=\"event-log\">Waiting...</pre>\n        </article>\n      </section>\n    </main>\n    <script src=\"app.js\"></script>\n  </body>\n</html>\n",
+            "<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n    <title>{title}</title>\n    <link rel=\"stylesheet\" href=\"style.css\">\n  </head>\n  <body>\n    <main class=\"shell\">\n      <section class=\"hero\">\n        <p class=\"eyebrow\">{eyebrow}</p>\n        <h1>{title}</h1>\n        <p id=\"bridge-status\" class=\"status\">Waiting for Axion bridge...</p>\n      </section>\n\n      <section class=\"grid\">\n        <article class=\"card\">\n          <h2>Bridge Surface</h2>\n          <p>Commands exposed to this window:</p>\n          <ul id=\"command-list\"></ul>\n          <p>Frontend events:</p>\n          <ul id=\"event-list\"></ul>\n          <p>Host events:</p>\n          <ul id=\"host-event-list\"></ul>\n        </article>\n\n        <article class=\"card\">\n          <h2>App & Window API</h2>\n          <pre id=\"app-info\">Waiting...</pre>\n        </article>\n\n        <article class=\"card\">\n          <h2>{native_api_heading}</h2>{native_api_controls}\n          <pre id=\"native-api\">Waiting...</pre>\n        </article>\n\n        <article class=\"card\">\n          <h2>Input Compatibility</h2>\n          <label class=\"field\">\n            <span>Sample Input</span>\n            <input id=\"compat-input\" type=\"text\" value=\"Axion caret placement demo\">\n          </label>\n          <label class=\"field\">\n            <span>Sample Textarea</span>\n            <textarea id=\"compat-textarea\" rows=\"5\">Try clicking, selecting, and pressing Tab here.\nThe template wires this textarea to Axion's text selection compatibility helper.</textarea>\n          </label>\n          <pre id=\"compat-diagnostics\">Waiting for text input interaction...</pre>\n        </article>\n\n        <article class=\"card\">\n          <h2>Custom Rust Command</h2>\n          <pre id=\"custom-command\">Waiting...</pre>\n        </article>\n\n        <article class=\"card\">\n          <h2>Capability Denial</h2>\n          <pre id=\"capability-denial\">Waiting...</pre>\n        </article>\n\n        <article class=\"card\">\n          <h2>Event Log</h2>\n          <pre id=\"event-log\">Waiting...</pre>\n        </article>\n      </section>\n    </main>\n    <script src=\"app.js\"></script>\n  </body>\n</html>\n",
             title = title_case(&self.name),
+            eyebrow = self.template_eyebrow(),
+            native_api_heading = self.native_api_heading(),
+            native_api_controls = self.native_api_controls_html(),
         )
     }
 
@@ -408,6 +534,32 @@ pre {
   font-size: 0.92rem;
 }
 
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 0 12px;
+  border: 1px solid rgba(94, 234, 212, 0.45);
+  border-radius: 999px;
+  padding: 9px 14px;
+  background: rgba(20, 184, 166, 0.16);
+  color: #ccfbf1;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.hint {
+  margin-bottom: 12px;
+  color: #cbd5e1;
+  font-size: 0.92rem;
+}
+
 input,
 textarea {
   width: 100%;
@@ -436,6 +588,7 @@ textarea {
   const compatInput = document.getElementById('compat-input');
   const compatTextarea = document.getElementById('compat-textarea');
   const compatDiagnostics = document.getElementById('compat-diagnostics');
+  const runNativeApiChecks = document.getElementById('run-native-api-checks');
 
   function renderList(id, values) {
     const list = document.getElementById(id);
@@ -475,6 +628,14 @@ textarea {
     typeof diagnostics?.toPrettyJson === 'function'
       ? diagnostics.toPrettyJson(value)
       : JSON.stringify(value, null, 2);
+  const normalizeError = (error) =>
+    typeof diagnostics?.normalizeError === 'function'
+      ? diagnostics.normalizeError(error)
+      : {
+          code: null,
+          message: error instanceof Error ? error.message : String(error),
+          cause: error ?? null,
+        };
   const installTextInputSelectionPatch = axion.compat?.installTextInputSelectionPatch;
   const hostEventLog = [];
   renderList('command-list', axion.commands);
@@ -608,6 +769,7 @@ textarea {
     let windowInfo = null;
     let greeting = null;
     let clipboardRead = null;
+    let fsSummary = null;
 
     try {
       ping = await axion.invoke('app.ping', { from: `${appName}-gui-smoke` });
@@ -657,6 +819,91 @@ textarea {
       pushCheck('clipboard.roundtrip', 'clipboard roundtrip', 'fail', error instanceof Error ? error.message : String(error));
     }
 
+    try {
+      const clipboardPayloadError = await axion.invoke('clipboard.write_text', {})
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
+      const dialogPayloadError = await axion.invoke('dialog.save', { multiple: true })
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
+      const windowPayloadError = await axion.invoke('window.set_size', { width: 0, height: 480 })
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
+      pushCheck(
+        'native.expected_errors',
+        'native expected error codes',
+        clipboardPayloadError.code === 'clipboard.invalid-payload' &&
+          dialogPayloadError.code === 'dialog.invalid-payload' &&
+          windowPayloadError.code === 'window.invalid-size'
+          ? 'pass'
+          : 'fail',
+        { clipboardPayloadError, dialogPayloadError, windowPayloadError },
+      );
+    } catch (error) {
+      pushCheck('native.expected_errors', 'native expected error codes', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      const fsDir = `notes/gui-smoke-${Date.now().toString(36)}`;
+      const fsPath = `${fsDir}/hello.txt`;
+      const fsCreateDir = await axion.invoke('fs.create_dir', { path: fsDir });
+      const fsWrite = await axion.invoke('fs.write_text', {
+        path: fsPath,
+        contents: `${appName} filesystem smoke`,
+      });
+      const fsExists = await axion.invoke('fs.exists', { path: fsPath });
+      const fsRead = await axion.invoke('fs.read_text', { path: fsPath });
+      const fsList = await axion.invoke('fs.list_dir', { path: fsDir });
+      const fsRemove = await axion.invoke('fs.remove', { path: fsPath });
+      const fsMissing = await axion.invoke('fs.exists', { path: fsPath });
+      await axion.invoke('fs.remove', { path: fsDir, recursive: true });
+      fsSummary = { fsCreateDir, fsWrite, fsExists, fsRead, fsList, fsRemove, fsMissing };
+      pushCheck(
+        'fs.lifecycle',
+        'fs create/list/remove lifecycle',
+        fsExists?.exists === true &&
+          fsRead?.contents === `${appName} filesystem smoke` &&
+          Array.isArray(fsList?.entries) &&
+          fsList.entries.some((entry) => entry.name === 'hello.txt') &&
+          fsRemove?.removed === true &&
+          fsMissing?.exists === false
+          ? 'pass'
+          : 'fail',
+        fsPath,
+      );
+    } catch (error) {
+      pushCheck('fs.lifecycle', 'fs create/list/remove lifecycle', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      const errorDir = `notes/gui-smoke-errors-${Date.now().toString(36)}`;
+      const errorFile = `${errorDir}/file.txt`;
+      await axion.invoke('fs.create_dir', { path: errorDir });
+      await axion.invoke('fs.write_text', { path: errorFile, contents: 'error probes' });
+      const missingError = await axion.invoke('fs.read_text', { path: `${errorDir}/missing.txt` })
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
+      const listFileError = await axion.invoke('fs.list_dir', { path: errorFile })
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
+      const removeNonEmptyError = await axion.invoke('fs.remove', { path: errorDir })
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
+      await axion.invoke('fs.remove', { path: errorDir, recursive: true });
+      pushCheck(
+        'fs.expected_errors',
+        'fs expected error codes',
+        missingError.code === 'fs.not-found' &&
+          listFileError.code === 'fs.not-directory' &&
+          removeNonEmptyError.code === 'fs.directory-not-empty'
+          ? 'pass'
+          : 'fail',
+        { missingError, listFileError, removeNonEmptyError },
+      );
+    } catch (error) {
+      pushCheck('fs.expected_errors', 'fs expected error codes', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
     const inputSnapshot =
       typeof diagnostics?.snapshotTextControl === 'function'
         ? diagnostics.snapshotTextControl(compatInput, { source: 'gui-smoke' })
@@ -671,7 +918,7 @@ textarea {
     const result = checks.some((check) => check.status === 'fail') ? 'failed' : 'ok';
     return {
       schema: diagnostics?.reportSchema ?? bridgeInfo?.diagnosticsReportSchema ?? 'axion.diagnostics-report.v1',
-      source: 'axion-vanilla-template',
+      source: '@GUI_SMOKE_SOURCE@',
       exported_at: exportedAt.toISOString(),
       exported_at_unix_seconds: Math.floor(exportedAt.getTime() / 1000),
       manifest_path: null,
@@ -721,11 +968,38 @@ textarea {
         app_version: appVersion,
         greeting,
         clipboard: clipboardRead,
+        filesystem: fsSummary,
         smoke_checks: checks,
         compat_input: inputSnapshot,
       },
     };
   };
+
+  if (runNativeApiChecks) {
+    runNativeApiChecks.addEventListener('click', async () => {
+      runNativeApiChecks.disabled = true;
+      status.textContent = 'Running Native API checks...';
+      try {
+        const report = await window.__AXION_GUI_SMOKE__();
+        renderJson('native-api', {
+          result: report.result,
+          source: report.source,
+          checks: report.diagnostics?.smoke_checks ?? [],
+          appVersion: report.diagnostics?.app_version ?? null,
+          clipboard: report.diagnostics?.clipboard ?? null,
+          filesystem: report.diagnostics?.filesystem ?? null,
+          input: report.diagnostics?.compat_input ?? null,
+        });
+        status.textContent = `Native API checks ${report.result}`;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        renderJson('native-api', { result: 'failed', error: message });
+        status.textContent = `Native API checks failed: ${message}`;
+      } finally {
+        runNativeApiChecks.disabled = false;
+      }
+    });
+  }
 
   try {
     const pluginReady = new Promise((resolve) => {
@@ -772,7 +1046,9 @@ textarea {
       path: 'notes/hello.txt',
       contents: `${appName} wrote this through the Axion bridge`,
     });
+    const fsExists = await axion.invoke('fs.exists', { path: 'notes/hello.txt' });
     const fsRead = await axion.invoke('fs.read_text', { path: 'notes/hello.txt' });
+    const fsList = await axion.invoke('fs.list_dir', { path: 'notes' });
     const clipboardWrite = await axion.invoke('clipboard.write_text', {
       text: `${appName} clipboard ${new Date().toISOString()}`,
     });
@@ -789,7 +1065,7 @@ textarea {
       title: 'Choose a save path for the Axion preview',
       defaultPath: 'notes/export.txt',
     });
-    renderJson('native-api', { clipboardWrite, clipboardRead, fsWrite, fsRead, dialogOpen, dialogSave });
+    renderJson('native-api', { clipboardWrite, clipboardRead, fsWrite, fsExists, fsRead, fsList, dialogOpen, dialogSave });
 
     const [greeting, pluginEvent] = await Promise.all([
       axion.invoke('demo.greet', { from: `${appName}-frontend` }),
@@ -821,6 +1097,7 @@ textarea {
 });
 "#
         .replace("@APP_NAME@", &self.name)
+        .replace("@GUI_SMOKE_SOURCE@", self.gui_smoke_source())
     }
 }
 
@@ -828,6 +1105,7 @@ impl NewTemplate {
     fn name(self) -> &'static str {
         match self {
             Self::Vanilla => "vanilla",
+            Self::NativeApiDemo => "native-api-demo",
         }
     }
 }
@@ -1004,6 +1282,61 @@ mod tests {
     }
 
     #[test]
+    fn native_api_demo_template_focuses_generated_surface() {
+        let root = axion_root_for_templates().expect("template root should resolve");
+        let project = NewProject {
+            name: "native-lab".to_owned(),
+            root: std::path::PathBuf::from("/tmp/native-lab"),
+            axion_root: root,
+            template: NewTemplate::NativeApiDemo,
+        };
+
+        assert_eq!(project.template.name(), "native-api-demo");
+        assert!(
+            project
+                .readme()
+                .contains("Generated by Axion using the `native-api-demo` template.")
+        );
+        assert!(project.readme().contains("Native API Demo Focus"));
+        assert!(project.readme().contains("Capability Profiles"));
+        assert!(project.readme().contains("docs/capabilities.md"));
+        assert!(project.readme().contains("Run all checks"));
+        assert!(
+            project
+                .readme()
+                .contains("clipboard round trips, app-data file lifecycle operations")
+        );
+        assert!(project.index_html().contains("Axion Native API Demo"));
+        assert!(project.index_html().contains("Native API Workbench"));
+        assert!(project.index_html().contains("run-native-api-checks"));
+        assert!(project.index_html().contains("Run all checks"));
+        assert!(
+            project
+                .manifest()
+                .contains("Generated Axion native API demo application")
+        );
+        assert!(project.app_js().contains("axion-native-api-demo-template"));
+        assert!(project.app_js().contains("runNativeApiChecks"));
+        assert!(project.app_js().contains("Native API checks"));
+        assert!(project.app_js().contains("clipboard.roundtrip"));
+        assert!(project.app_js().contains("native.expected_errors"));
+        assert!(project.app_js().contains("clipboard.invalid-payload"));
+        assert!(project.app_js().contains("dialog.invalid-payload"));
+        assert!(project.app_js().contains("window.invalid-size"));
+        assert!(project.app_js().contains("fs.create_dir"));
+        assert!(project.app_js().contains("fs.exists"));
+        assert!(project.app_js().contains("fs.list_dir"));
+        assert!(project.app_js().contains("fs.remove"));
+        assert!(project.app_js().contains("fs.expected_errors"));
+        assert!(project.app_js().contains("fs.directory-not-empty"));
+        assert!(project.app_js().contains("normalizeError"));
+        assert!(project.app_js().contains("dialog.open"));
+        assert!(project.app_js().contains("fs.write_text"));
+        assert!(project.style_css().contains("button:disabled"));
+        assert!(project.cargo_toml().contains("version = \"0.1.30\""));
+    }
+
+    #[test]
     fn generated_project_readme_documents_template_and_commands() {
         let root = axion_root_for_templates().expect("template root should resolve");
         let project = NewProject {
@@ -1015,24 +1348,44 @@ mod tests {
 
         let readme = project.readme();
         assert!(readme.contains("Generated by Axion using the `vanilla` template."));
+        assert!(readme.contains("Bridge, lifecycle, native API"));
         assert!(readme.contains("cargo run -- --plan"));
         assert!(readme.contains("cargo run --features servo-runtime"));
         assert!(readme.contains("Frontend Development"));
         assert!(readme.contains("cargo run -p axion-cli -- dev"));
         assert!(readme.contains("--watch --reload"));
+        assert!(readme.contains("--restart-on-change"));
+        assert!(readme.contains("axion.dev-report.v1"));
         assert!(readme.contains("window.ready"));
         assert!(readme.contains("--open-devtools"));
         assert!(readme.contains("cargo run -p axion-cli -- gui-smoke"));
+        assert!(readme.contains("cargo run -p axion-cli -- report"));
+        assert!(readme.contains("--allow-failed"));
+        assert!(readme.contains("--output target/axion/reports/release-summary.json"));
+        assert!(readme.contains("--output target/axion/reports/gui-smoke-summary.json"));
         assert!(readme.contains("cargo run -p axion-cli -- check"));
+        assert!(readme.contains("--dev --bundle"));
+        assert!(readme.contains("--json --report-path target/axion/reports/check.json"));
+        assert!(readme.contains("--report-path target/axion/reports/check.json"));
+        assert!(readme.contains("--event-log target/axion/reports/dev-events.jsonl"));
         assert!(readme.contains("--deny-warnings --max-risk medium"));
         assert!(readme.contains("--cargo-target-dir target"));
         assert!(readme.contains("--serial-build"));
         assert!(readme.contains("cargo run -p axion-cli -- bundle"));
         assert!(readme.contains("--build-executable"));
-        assert!(readme.contains("Packaging Preview"));
+        assert!(readme.contains("Local Run"));
+        assert!(readme.contains("CI Validation"));
+        assert!(readme.contains("Release Preview"));
+        assert!(readme.contains("target/axion/reports/"));
+        assert!(readme.contains("check.json"));
+        assert!(readme.contains("release-summary.json"));
+        assert!(readme.contains("gui-smoke-summary.json"));
         assert!(readme.contains("verification: ok"));
         assert!(readme.contains("fingerprinted_files"));
         assert!(readme.contains("Custom Command Demo"));
+        assert!(readme.contains("Capability Profiles"));
+        assert!(readme.contains("check --manifest-path"));
+        assert!(readme.contains("docs/capabilities.md"));
         assert!(readme.contains("demo.greet"));
         assert!(readme.contains("Capability denial"));
         assert!(readme.contains("Input Compatibility Demo"));
@@ -1044,6 +1397,102 @@ mod tests {
         assert!(readme.contains("target/axion/crash-reports/"));
         assert!(readme.contains(".gitignore"));
         assert!(readme.contains("icons/app.icns"));
+    }
+
+    #[test]
+    fn generated_project_next_steps_use_report_artifacts() {
+        let root = axion_root_for_templates().expect("template root should resolve");
+        let project = NewProject {
+            name: "hello-axion".to_owned(),
+            root: std::path::PathBuf::from("/tmp/hello-axion"),
+            axion_root: root,
+            template: NewTemplate::Vanilla,
+        };
+
+        let next_steps = project.next_steps();
+        assert!(next_steps.iter().any(|step| step
+            == "from Axion checkout: cargo run -p axion-cli -- check --manifest-path /tmp/hello-axion/axion.toml --dev --bundle --json --report-path target/axion/reports/check.json"));
+        assert!(
+            next_steps
+                .iter()
+                .any(|step| step
+                    .contains("from Axion checkout: cargo run -p axion-cli -- gui-smoke"))
+        );
+        assert!(next_steps.iter().any(|step| step.contains(
+            "--event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json"
+        )));
+        assert!(next_steps.iter().any(|step| step.contains(
+            "from Axion checkout: cargo run -p axion-cli -- release"
+        )));
+        assert!(next_steps.iter().any(|step| step.contains(
+            "from Axion checkout: cargo run -p axion-cli -- report target/axion/reports/gui-smoke.json --allow-failed"
+        )));
+        assert!(
+            next_steps
+                .iter()
+                .any(|step| step.contains("--output target/axion/reports/release-summary.json"))
+        );
+        assert!(
+            next_steps
+                .iter()
+                .any(|step| step.contains("--output target/axion/reports/gui-smoke-summary.json"))
+        );
+    }
+
+    #[test]
+    fn generated_project_templates_have_focus_descriptions() {
+        let root = axion_root_for_templates().expect("template root should resolve");
+        let vanilla = NewProject {
+            name: "hello-axion".to_owned(),
+            root: std::path::PathBuf::from("/tmp/hello-axion"),
+            axion_root: root.clone(),
+            template: NewTemplate::Vanilla,
+        };
+        let native_api = NewProject {
+            name: "native-lab".to_owned(),
+            root: std::path::PathBuf::from("/tmp/native-lab"),
+            axion_root: root,
+            template: NewTemplate::NativeApiDemo,
+        };
+
+        assert!(vanilla.template_summary().contains("Bridge, lifecycle"));
+        assert!(native_api.template_summary().contains("Focused clipboard"));
+        assert_ne!(vanilla.template_summary(), native_api.template_summary());
+    }
+
+    #[test]
+    fn checked_in_examples_document_validation_commands() {
+        let root = axion_root_for_templates().expect("template root should resolve");
+        for example in [
+            "hello-axion",
+            "file-access-demo",
+            "multi-window",
+            "bridge-diagnostics-demo",
+        ] {
+            let readme_path = root.join("examples").join(example).join("README.md");
+            let readme = std::fs::read_to_string(&readme_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", readme_path.display()));
+            assert!(
+                readme.contains("--plan"),
+                "{example} README should document --plan"
+            );
+            assert!(
+                readme.contains("check --manifest-path"),
+                "{example} README should document check"
+            );
+            assert!(
+                readme.contains("gui-smoke --manifest-path"),
+                "{example} README should document gui-smoke"
+            );
+            assert!(
+                readme.contains("bundle --manifest-path"),
+                "{example} README should document bundle preview"
+            );
+            assert!(
+                readme.contains("warning") || readme.contains("notice"),
+                "{example} README should explain expected warnings or notices"
+            );
+        }
     }
 
     #[test]

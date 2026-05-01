@@ -106,12 +106,18 @@ mod enabled {
     use crate::WinitRunError;
 
     const WINDOW_CLOSE_REQUESTED_EVENT: &str = "window.close_requested";
+    const WINDOW_CLOSE_PREVENTED_EVENT: &str = "window.close_prevented";
+    const WINDOW_CLOSE_COMPLETED_EVENT: &str = "window.close_completed";
+    const WINDOW_CLOSE_TIMED_OUT_EVENT: &str = "window.close_timed_out";
     const WINDOW_CLOSED_EVENT: &str = "window.closed";
     const WINDOW_RESIZED_EVENT: &str = "window.resized";
     const WINDOW_FOCUSED_EVENT: &str = "window.focused";
     const WINDOW_BLURRED_EVENT: &str = "window.blurred";
     const WINDOW_MOVED_EVENT: &str = "window.moved";
     const WINDOW_REDRAW_FAILED_EVENT: &str = "window.redraw_failed";
+    const APP_EXIT_REQUESTED_EVENT: &str = "app.exit_requested";
+    const APP_EXIT_PREVENTED_EVENT: &str = "app.exit_prevented";
+    const APP_EXIT_COMPLETED_EVENT: &str = "app.exit_completed";
     const DEFAULT_SELF_TEST_TIMEOUT: Duration = Duration::from_secs(10);
     const DEFAULT_CLOSE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -317,6 +323,34 @@ mod enabled {
         webview: WebView,
     }
 
+    struct PendingCloseRequest {
+        window_id: winit::window::WindowId,
+        reason: String,
+    }
+
+    struct DeferredHostEvent {
+        webview: WebView,
+        bridge_token: String,
+        event_name: String,
+        payload_json: String,
+    }
+
+    struct AppExitRequestState {
+        request_id: String,
+        window_count: usize,
+        request_count: usize,
+        closed_count: usize,
+        prevented_count: usize,
+        timed_out_count: usize,
+        close_requests: Vec<(String, String)>,
+        closed_windows: Vec<String>,
+        prevented_windows: Vec<String>,
+        timed_out_windows: Vec<String>,
+        closed_requests: Vec<(String, String)>,
+        prevented_requests: Vec<(String, String)>,
+        timed_out_requests: Vec<(String, String)>,
+    }
+
     struct AppState {
         event_loop_proxy: EventLoopProxy<WakerEvent>,
         servo: Servo,
@@ -331,7 +365,11 @@ mod enabled {
         modifiers_state: std::cell::Cell<ModifiersState>,
         window_registry: Arc<Mutex<BTreeMap<String, winit::window::WindowId>>>,
         close_request_counter: std::cell::Cell<u64>,
-        pending_close_requests: RefCell<BTreeMap<String, winit::window::WindowId>>,
+        app_exit_request_counter: std::cell::Cell<u64>,
+        pending_close_requests: RefCell<BTreeMap<String, PendingCloseRequest>>,
+        pending_app_exit_requests: RefCell<BTreeMap<String, AppExitRequestState>>,
+        close_request_app_exits: RefCell<BTreeMap<String, String>>,
+        deferred_host_events: RefCell<Vec<DeferredHostEvent>>,
         windows: RefCell<Vec<RuntimeWindow>>,
     }
 
@@ -349,8 +387,12 @@ mod enabled {
                 return;
             }
 
-            if (self.self_test_bridge || self.gui_smoke) && !self.self_test_started.replace(true) {
-                self.start_self_test(webview);
+            if self.self_test_bridge || self.gui_smoke {
+                if self.is_first_webview(webview.id()) && !self.self_test_started.replace(true) {
+                    self.start_self_test(webview);
+                } else {
+                    self.queue_startup_events(&webview);
+                }
             } else {
                 self.queue_startup_events(&webview);
             }
@@ -386,6 +428,13 @@ mod enabled {
                 .borrow()
                 .first()
                 .map(|runtime_window| runtime_window.webview.clone())
+        }
+
+        fn is_first_webview(&self, webview_id: servo::WebViewId) -> bool {
+            self.windows
+                .borrow()
+                .first()
+                .is_some_and(|runtime_window| runtime_window.webview.id() == webview_id)
         }
 
         fn binding_for_webview(
@@ -450,7 +499,7 @@ mod enabled {
                 .pending_close_requests
                 .borrow()
                 .iter()
-                .find(|(_, pending_window_id)| **pending_window_id == window_id)
+                .find(|(_, pending)| pending.window_id == window_id)
             {
                 let state = self
                     .window_state_for_id(window_id)
@@ -467,9 +516,13 @@ mod enabled {
             let counter = self.close_request_counter.get().saturating_add(1);
             self.close_request_counter.set(counter);
             let request_id = format!("axion-close-{counter}");
-            self.pending_close_requests
-                .borrow_mut()
-                .insert(request_id.clone(), window_id);
+            self.pending_close_requests.borrow_mut().insert(
+                request_id.clone(),
+                PendingCloseRequest {
+                    window_id,
+                    reason: reason.to_owned(),
+                },
+            );
             self.dispatch_window_event(
                 window_id,
                 WINDOW_CLOSE_REQUESTED_EVENT,
@@ -493,27 +546,48 @@ mod enabled {
         }
 
         fn confirm_close_request(&self, request_id: &str) -> Result<WindowControlResponse, String> {
-            let window_id = self
+            let pending = self
                 .pending_close_requests
                 .borrow_mut()
                 .remove(request_id)
                 .ok_or_else(|| format!("close request '{request_id}' is unavailable"))?;
             let state = self
-                .window_state_for_id(window_id)
+                .window_state_for_id(pending.window_id)
                 .ok_or_else(|| "window control target is unavailable".to_owned())?;
-            let _ = self.close_window(window_id);
+            self.queue_window_event_except(
+                pending.window_id,
+                WINDOW_CLOSE_COMPLETED_EVENT,
+                self.close_outcome_payload(
+                    pending.window_id,
+                    request_id,
+                    &pending.reason,
+                    "completed",
+                ),
+            );
+            let _ = self.close_window(pending.window_id, Some(request_id), false);
             Ok(WindowControlResponse::State(state))
         }
 
         fn prevent_close_request(&self, request_id: &str) -> Result<WindowControlResponse, String> {
-            let window_id = self
+            let pending = self
                 .pending_close_requests
                 .borrow_mut()
                 .remove(request_id)
                 .ok_or_else(|| format!("close request '{request_id}' is unavailable"))?;
             let window_id = self
-                .window_id_for_winit(window_id)
+                .window_id_for_winit(pending.window_id)
                 .ok_or_else(|| "window control target is unavailable".to_owned())?;
+            self.dispatch_window_event(
+                pending.window_id,
+                WINDOW_CLOSE_PREVENTED_EVENT,
+                self.close_outcome_payload(
+                    pending.window_id,
+                    request_id,
+                    &pending.reason,
+                    "prevented",
+                ),
+            );
+            self.record_app_exit_prevented(request_id, &window_id);
             Ok(WindowControlResponse::ClosePrevented {
                 request_id: request_id.to_owned(),
                 window_id,
@@ -521,19 +595,40 @@ mod enabled {
         }
 
         fn close_timeout(&self, request_id: &str) -> bool {
-            let Some(window_id) = self.pending_close_requests.borrow_mut().remove(request_id)
-            else {
+            let Some(pending) = self.pending_close_requests.borrow_mut().remove(request_id) else {
                 return self.windows.borrow().is_empty();
             };
-            self.close_window(window_id)
+            self.queue_window_event_except(
+                pending.window_id,
+                WINDOW_CLOSE_TIMED_OUT_EVENT,
+                self.close_outcome_payload(
+                    pending.window_id,
+                    request_id,
+                    &pending.reason,
+                    "timed_out",
+                ),
+            );
+            let is_empty = self.close_window(pending.window_id, Some(request_id), true);
+            is_empty
         }
 
-        fn close_window(&self, window_id: winit::window::WindowId) -> bool {
-            self.dispatch_window_event(
+        fn close_window(
+            &self,
+            window_id: winit::window::WindowId,
+            close_request_id: Option<&str>,
+            timed_out: bool,
+        ) -> bool {
+            let logical_window_id = self.window_id_for_winit(window_id);
+            self.queue_window_event_except(
                 window_id,
                 WINDOW_CLOSED_EVENT,
                 self.window_payload(window_id),
             );
+            if let (Some(close_request_id), Some(logical_window_id)) =
+                (close_request_id, logical_window_id)
+            {
+                self.record_app_exit_closed(close_request_id, &logical_window_id, timed_out);
+            }
             self.remove_window(window_id)
         }
 
@@ -606,6 +701,177 @@ mod enabled {
                 .unwrap_or_else(|| "{\"windowId\":null}".to_owned())
         }
 
+        fn dispatch_app_event(&self, event_name: &str, payload_json: String) {
+            for runtime_window in self.windows.borrow().iter() {
+                dispatch_to_webview(
+                    &runtime_window.webview,
+                    &runtime_window.bridge_token,
+                    event_name,
+                    &payload_json,
+                );
+            }
+        }
+
+        fn queue_app_event(&self, event_name: &str, payload_json: String) {
+            for runtime_window in self.windows.borrow().iter() {
+                self.deferred_host_events
+                    .borrow_mut()
+                    .push(DeferredHostEvent {
+                        webview: runtime_window.webview.clone(),
+                        bridge_token: runtime_window.bridge_token.clone(),
+                        event_name: event_name.to_owned(),
+                        payload_json: payload_json.clone(),
+                    });
+            }
+        }
+
+        fn flush_deferred_host_events(&self) {
+            let events = self
+                .deferred_host_events
+                .borrow_mut()
+                .drain(..)
+                .collect::<Vec<_>>();
+            for event in events {
+                dispatch_to_webview(
+                    &event.webview,
+                    &event.bridge_token,
+                    &event.event_name,
+                    &event.payload_json,
+                );
+            }
+        }
+
+        fn queue_window_event_except(
+            &self,
+            window_id: winit::window::WindowId,
+            event_name: &str,
+            payload_json: String,
+        ) {
+            if self
+                .windows
+                .borrow()
+                .iter()
+                .any(|runtime_window| runtime_window.window.id() == window_id)
+            {
+                self.deferred_host_events.borrow_mut().extend(
+                    self.windows
+                        .borrow()
+                        .iter()
+                        .filter(|runtime_window| runtime_window.window.id() != window_id)
+                        .map(|runtime_window| DeferredHostEvent {
+                            webview: runtime_window.webview.clone(),
+                            bridge_token: runtime_window.bridge_token.clone(),
+                            event_name: event_name.to_owned(),
+                            payload_json: payload_json.clone(),
+                        }),
+                );
+            }
+        }
+
+        fn record_app_exit_closed(&self, close_request_id: &str, window_id: &str, timed_out: bool) {
+            let Some(app_exit_request_id) = self
+                .close_request_app_exits
+                .borrow_mut()
+                .remove(close_request_id)
+            else {
+                return;
+            };
+
+            let final_payload = {
+                let mut requests = self.pending_app_exit_requests.borrow_mut();
+                let Some(state) = requests.get_mut(&app_exit_request_id) else {
+                    return;
+                };
+                state.closed_count += 1;
+                state.closed_windows.push(window_id.to_owned());
+                state
+                    .closed_requests
+                    .push((close_request_id.to_owned(), window_id.to_owned()));
+                if timed_out {
+                    state.timed_out_count += 1;
+                    state.timed_out_windows.push(window_id.to_owned());
+                    state
+                        .timed_out_requests
+                        .push((close_request_id.to_owned(), window_id.to_owned()));
+                }
+                if state.closed_count + state.prevented_count >= state.request_count {
+                    let payload = app_exit_result_payload(state, "completed");
+                    requests.remove(&app_exit_request_id);
+                    Some(payload)
+                } else {
+                    None
+                }
+            };
+
+            if let Some(payload) = final_payload {
+                self.queue_app_event(APP_EXIT_COMPLETED_EVENT, payload);
+            }
+        }
+
+        fn record_app_exit_prevented(&self, close_request_id: &str, window_id: &str) {
+            let Some(app_exit_request_id) = self
+                .close_request_app_exits
+                .borrow()
+                .get(close_request_id)
+                .cloned()
+            else {
+                return;
+            };
+
+            let Some(mut state) = self
+                .pending_app_exit_requests
+                .borrow_mut()
+                .remove(&app_exit_request_id)
+            else {
+                return;
+            };
+            state.prevented_count += 1;
+            state.prevented_windows.push(window_id.to_owned());
+            state
+                .prevented_requests
+                .push((close_request_id.to_owned(), window_id.to_owned()));
+
+            let close_request_ids = self
+                .close_request_app_exits
+                .borrow()
+                .iter()
+                .filter_map(|(close_id, app_exit_id)| {
+                    (app_exit_id == &app_exit_request_id).then_some(close_id.clone())
+                })
+                .collect::<Vec<_>>();
+            {
+                let mut pending_close_requests = self.pending_close_requests.borrow_mut();
+                for close_id in &close_request_ids {
+                    pending_close_requests.remove(close_id);
+                }
+            }
+            {
+                let mut close_request_app_exits = self.close_request_app_exits.borrow_mut();
+                for close_id in &close_request_ids {
+                    close_request_app_exits.remove(close_id);
+                }
+            }
+
+            self.dispatch_app_event(
+                APP_EXIT_PREVENTED_EVENT,
+                app_exit_result_payload(&state, "prevented"),
+            );
+        }
+
+        fn app_exit_requested_payload(
+            &self,
+            request_id: &str,
+            window_count: usize,
+            reason: &str,
+        ) -> String {
+            format!(
+                "{{\"requestId\":{},\"reason\":{},\"windowCount\":{window_count},\"defaultAction\":\"request-window-close\",\"timeoutMs\":{}}}",
+                json_string_literal(request_id),
+                json_string_literal(reason),
+                self.close_timeout.as_millis(),
+            )
+        }
+
         fn close_requested_payload(
             &self,
             window_id: winit::window::WindowId,
@@ -618,6 +884,24 @@ mod enabled {
                 "{trimmed},\"requestId\":{},\"reason\":{},\"defaultAction\":\"allow\",\"timeoutMs\":{}}}",
                 json_string_literal(request_id),
                 json_string_literal(reason),
+                self.close_timeout.as_millis(),
+            )
+        }
+
+        fn close_outcome_payload(
+            &self,
+            window_id: winit::window::WindowId,
+            request_id: &str,
+            reason: &str,
+            status: &str,
+        ) -> String {
+            let base_payload = self.window_payload(window_id);
+            let trimmed = base_payload.trim_end_matches('}');
+            format!(
+                "{trimmed},\"requestId\":{},\"reason\":{},\"status\":{},\"defaultAction\":\"allow\",\"timeoutMs\":{}}}",
+                json_string_literal(request_id),
+                json_string_literal(reason),
+                json_string_literal(status),
                 self.close_timeout.as_millis(),
             )
         }
@@ -852,13 +1136,53 @@ mod enabled {
                     .map(|runtime_window| runtime_window.window.id())
                     .collect::<Vec<_>>();
                 let window_count = window_ids.len();
+                let exit_counter = self.app_exit_request_counter.get().saturating_add(1);
+                self.app_exit_request_counter.set(exit_counter);
+                let request_id = format!("axion-exit-{exit_counter}");
+                self.dispatch_app_event(
+                    APP_EXIT_REQUESTED_EVENT,
+                    self.app_exit_requested_payload(&request_id, window_count, "command"),
+                );
                 let mut request_count = 0;
+                let mut close_requests = Vec::new();
                 for window_id in window_ids {
-                    if self.request_close_window(window_id, "app-exit").is_ok() {
-                        request_count += 1;
+                    if let Ok(WindowControlResponse::CloseRequested {
+                        request_id: close_request_id,
+                        ..
+                    }) = self.request_close_window(window_id, "app-exit")
+                    {
+                        if let Some(logical_window_id) = self.window_id_for_winit(window_id) {
+                            request_count += 1;
+                            close_requests.push((close_request_id, logical_window_id));
+                        }
+                    }
+                }
+                self.pending_app_exit_requests.borrow_mut().insert(
+                    request_id.clone(),
+                    AppExitRequestState {
+                        request_id: request_id.clone(),
+                        window_count,
+                        request_count,
+                        closed_count: 0,
+                        prevented_count: 0,
+                        timed_out_count: 0,
+                        close_requests: close_requests.clone(),
+                        closed_windows: Vec::new(),
+                        prevented_windows: Vec::new(),
+                        timed_out_windows: Vec::new(),
+                        closed_requests: Vec::new(),
+                        prevented_requests: Vec::new(),
+                        timed_out_requests: Vec::new(),
+                    },
+                );
+                {
+                    let mut close_request_app_exits = self.close_request_app_exits.borrow_mut();
+                    for (close_request_id, _) in close_requests {
+                        close_request_app_exits.insert(close_request_id, request_id.clone());
                     }
                 }
                 return Ok(WindowControlResponse::AppExit {
+                    request_id,
                     window_count,
                     request_count,
                 });
@@ -893,6 +1217,7 @@ mod enabled {
                 match request {
                     WindowControlRequest::ListStates => WindowControlResponse::List(Vec::new()),
                     WindowControlRequest::ExitApp => WindowControlResponse::AppExit {
+                        request_id: String::new(),
                         window_count: 0,
                         request_count: 0,
                     },
@@ -1138,12 +1463,15 @@ mod enabled {
                             state.apply_window_control(control.window_id, control.request.clone());
                         let windows_empty = state.windows.borrow().is_empty();
                         let _ = control.response.send(result);
+                        state.flush_deferred_host_events();
                         if windows_empty {
                             event_loop.exit();
                         }
                     }
                     WakerEvent::CloseTimeout { request_id } => {
-                        if state.close_timeout(&request_id) {
+                        let windows_empty = state.close_timeout(&request_id);
+                        state.flush_deferred_host_events();
+                        if windows_empty {
                             event_loop.exit();
                         }
                     }
@@ -1189,6 +1517,7 @@ mod enabled {
             match event {
                 WindowEvent::CloseRequested => {
                     let _ = state.request_close_window(window_id, "system");
+                    state.flush_deferred_host_events();
                 }
                 WindowEvent::RedrawRequested => {
                     if let Err(error) = state.redraw_window(window_id) {
@@ -1276,7 +1605,11 @@ mod enabled {
             modifiers_state: std::cell::Cell::new(ModifiersState::empty()),
             window_registry: Arc::new(Mutex::new(BTreeMap::new())),
             close_request_counter: std::cell::Cell::new(0),
+            app_exit_request_counter: std::cell::Cell::new(0),
             pending_close_requests: RefCell::new(BTreeMap::new()),
+            pending_app_exit_requests: RefCell::new(BTreeMap::new()),
+            close_request_app_exits: RefCell::new(BTreeMap::new()),
+            deferred_host_events: RefCell::new(Vec::new()),
             windows: RefCell::new(Vec::new()),
         });
 
@@ -1383,12 +1716,18 @@ mod enabled {
         }
         for event in [
             WINDOW_CLOSE_REQUESTED_EVENT,
+            WINDOW_CLOSE_PREVENTED_EVENT,
+            WINDOW_CLOSE_COMPLETED_EVENT,
+            WINDOW_CLOSE_TIMED_OUT_EVENT,
             WINDOW_CLOSED_EVENT,
             WINDOW_RESIZED_EVENT,
             WINDOW_FOCUSED_EVENT,
             WINDOW_BLURRED_EVENT,
             WINDOW_MOVED_EVENT,
             WINDOW_REDRAW_FAILED_EVENT,
+            APP_EXIT_REQUESTED_EVENT,
+            APP_EXIT_PREVENTED_EVENT,
+            APP_EXIT_COMPLETED_EVENT,
         ] {
             if !events.iter().any(|existing| existing == event) {
                 events.push(event.to_owned());
@@ -1425,6 +1764,41 @@ mod enabled {
             size.height,
             runtime_window.window.scale_factor(),
         )
+    }
+
+    fn app_exit_result_payload(state: &AppExitRequestState, status: &str) -> String {
+        format!(
+            "{{\"requestId\":{},\"status\":{},\"windowCount\":{},\"requestCount\":{},\"closedCount\":{},\"preventedCount\":{},\"timedOutCount\":{},\"closeRequests\":{},\"closedWindows\":{},\"preventedWindows\":{},\"timedOutWindows\":{},\"closedRequests\":{},\"preventedRequests\":{},\"timedOutRequests\":{}}}",
+            json_string_literal(&state.request_id),
+            json_string_literal(status),
+            state.window_count,
+            state.request_count,
+            state.closed_count,
+            state.prevented_count,
+            state.timed_out_count,
+            json_request_window_pairs_literal(&state.close_requests),
+            json_string_array_literal(&state.closed_windows),
+            json_string_array_literal(&state.prevented_windows),
+            json_string_array_literal(&state.timed_out_windows),
+            json_request_window_pairs_literal(&state.closed_requests),
+            json_request_window_pairs_literal(&state.prevented_requests),
+            json_request_window_pairs_literal(&state.timed_out_requests),
+        )
+    }
+
+    fn json_request_window_pairs_literal(values: &[(String, String)]) -> String {
+        let values = values
+            .iter()
+            .map(|(request_id, window_id)| {
+                format!(
+                    "{{\"requestId\":{},\"windowId\":{}}}",
+                    json_string_literal(request_id),
+                    json_string_literal(window_id),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{values}]")
     }
 
     #[derive(Clone)]
@@ -2083,9 +2457,55 @@ mod enabled {
             format!(
                 "{{\"ok\":false,\"id\":{},\"payload\":null,\"error\":{}}}",
                 optional_json_string_literal(request_id),
-                json_string_literal(message),
+                json_error_object(status, message),
             ),
         )
+    }
+
+    fn json_error_object(status: StatusCode, message: &str) -> String {
+        format!(
+            "{{\"code\":{},\"message\":{}}}",
+            json_string_literal(&error_code(status, message)),
+            json_string_literal(message),
+        )
+    }
+
+    fn error_code(status: StatusCode, message: &str) -> String {
+        if let Some(code) = prefixed_error_code(message) {
+            return code.to_owned();
+        }
+
+        match status {
+            StatusCode::FORBIDDEN => "bridge.forbidden",
+            StatusCode::NOT_FOUND => "bridge.not-found",
+            StatusCode::PAYLOAD_TOO_LARGE => "bridge.payload-too-large",
+            StatusCode::INTERNAL_SERVER_ERROR => "bridge.internal-error",
+            StatusCode::BAD_REQUEST => "bridge.bad-request",
+            _ => "bridge.error",
+        }
+        .to_owned()
+    }
+
+    fn prefixed_error_code(message: &str) -> Option<&str> {
+        let (code, _message) = message.split_once(": ")?;
+        let mut segments = code.split('.');
+        let first = segments.next()?;
+        if segments.next().is_none() || !valid_error_code_segment(first) {
+            return None;
+        }
+        if code.split('.').all(valid_error_code_segment) {
+            Some(code)
+        } else {
+            None
+        }
+    }
+
+    fn valid_error_code_segment(segment: &str) -> bool {
+        let mut chars = segment.chars();
+        matches!(chars.next(), Some(first) if first.is_ascii_lowercase())
+            && chars.all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            })
     }
 
     fn json_response(request: &Request, status: StatusCode, body: String) -> Response {
@@ -2110,6 +2530,15 @@ mod enabled {
             .replace('\r', "\\r")
             .replace('\t', "\\t");
         format!("\"{escaped}\"")
+    }
+
+    fn json_string_array_literal(values: &[String]) -> String {
+        let values = values
+            .iter()
+            .map(|value| json_string_literal(value))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{values}]")
     }
 
     fn optional_json_string_literal(value: Option<&str>) -> String {
@@ -2204,7 +2633,9 @@ mod enabled {
     mod tests {
         use std::time::Duration;
 
-        use super::parse_timeout_ms;
+        use http::StatusCode;
+
+        use super::{error_code, json_error_object, parse_timeout_ms};
 
         #[test]
         fn parse_timeout_ms_accepts_positive_values() {
@@ -2220,6 +2651,33 @@ mod enabled {
             assert_eq!(parse_timeout_ms("0"), None);
             assert_eq!(parse_timeout_ms("-1"), None);
             assert_eq!(parse_timeout_ms("abc"), None);
+        }
+
+        #[test]
+        fn bridge_error_object_preserves_prefixed_codes() {
+            assert_eq!(
+                error_code(StatusCode::BAD_REQUEST, "fs.not-found: missing"),
+                "fs.not-found"
+            );
+            assert_eq!(
+                json_error_object(StatusCode::BAD_REQUEST, "fs.not-found: missing"),
+                "{\"code\":\"fs.not-found\",\"message\":\"fs.not-found: missing\"}"
+            );
+        }
+
+        #[test]
+        fn bridge_error_object_falls_back_to_status_codes() {
+            assert_eq!(
+                error_code(StatusCode::FORBIDDEN, "Axion protocol is not allowed"),
+                "bridge.forbidden"
+            );
+            assert_eq!(
+                error_code(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Axion command returned invalid JSON payload"
+                ),
+                "bridge.internal-error"
+            );
         }
     }
 }

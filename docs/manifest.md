@@ -171,7 +171,7 @@ Built-in profiles:
 - `window-control`: enables current-window control commands such as `window.info`, `window.close`, `window.confirm_close`, `window.prevent_close`, `window.reload`, `window.focus`, `window.set_title`, and `window.set_size`.
 - `multi-window`: enables multi-window coordination commands including `window.list`, `window.info`, `window.close`, `window.confirm_close`, `window.prevent_close`, `window.reload`, `window.focus`, and `window.set_title`.
 - `clipboard-access`: enables `clipboard.read_text` and `clipboard.write_text` using the configured preview text clipboard backend.
-- `file-access`: enables `fs.read_text` and `fs.write_text`.
+- `file-access`: enables app-data filesystem lifecycle commands: `fs.create_dir`, `fs.exists`, `fs.list_dir`, `fs.read_text`, `fs.remove`, and `fs.write_text`.
 - `dialog-access`: enables `dialog.open` and `dialog.save`.
 
 Custom Rust commands use the same capability list as built-in commands. For example, a plugin command registered as `demo.greet` must appear in `commands` before frontend code can call `window.__AXION__.invoke("demo.greet", payload)`.

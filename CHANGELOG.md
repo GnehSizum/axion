@@ -1,13 +1,275 @@
 # Changelog
 
-## v0.1.18.0 - Preview
+## v0.1.30.0 - Preview
 
-Axion v0.1.18.0 adds explicit application exit and window close lifecycle controls on the current Servo `0.1` baseline.
+Axion v0.1.30.0 hardens report consumption and CI guidance on the current Servo `0.1` baseline.
 
 ### Baseline
 
-- Cargo workspace version is `0.1.18`.
-- Axion public release metadata is `v0.1.18.0`.
+- Cargo workspace version is `0.1.30`.
+- Axion public release metadata is `v0.1.30.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added stricter `axion report` validation for unsupported schemas, incomplete JSON objects, and missing top-level `result` fields.
+- Added `axion report --output <path>` and `axion.dev-report.v1` summary support for CI artifact normalization.
+- Added compact release artifact summary fields for release reports and human output.
+- Added CI-focused documentation for `check -> gui-smoke -> release -> report` artifact flows.
+- Added GitHub Actions report summary generation and artifact upload paths for check, GUI smoke, and release preview jobs.
+
+### Changed
+
+- Generated app Cargo versions now use `0.1.30`.
+- Generated app README sections now separate local run, CI validation, and release preview commands.
+- Updated public docs and release metadata for v0.1.30.0.
+
+## v0.1.29.0 - Preview
+
+Axion v0.1.29.0 stabilizes report consumption and release report reuse on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.29`.
+- Axion public release metadata is `v0.1.29.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added shared CLI report parsing helpers for lightweight Axion-owned JSON report fields.
+- Added `axion report --allow-failed` so CI can summarize failed reports without failing the summary step.
+- Added stricter `release --check-report-path` reuse validation for matching manifest, successful result, passed doctor, passed self-test, passed bundle preflight, and release-ready readiness.
+- Added release carry-forward of readiness warnings from reused check reports.
+
+### Changed
+
+- Generated app Cargo versions now use `0.1.29`.
+- Updated public docs and release metadata for v0.1.29.0.
+
+## v0.1.28.0 - Preview
+
+Axion v0.1.28.0 improves the development validation loop on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.28`.
+- Axion public release metadata is `v0.1.28.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added ordered `next_steps` to `axion check --json` while preserving the existing `next_step` field.
+- Added `failure_phase` and typed required/optional `next_actions` to `axion check --json` for CI routing.
+- Added `axion report` to summarize existing check, release, bundle, and GUI diagnostics reports.
+- Added `release --check-report-path` to reuse a matching successful check report for doctor, readiness, and self-test state.
+- Added more specific `check` remediation guidance for doctor failures, readiness blockers, bundle preflight errors, dev preflight blockers, GUI smoke setup, and release artifacts.
+- Added GUI smoke failure diagnostics with `next_step`, `failed_check_ids`, and `error_codes` fields in CLI-generated failure reports.
+- Added GUI smoke summaries that include failed check ids and extracted error codes.
+
+### Changed
+
+- Generated app Cargo versions now use `0.1.28`.
+- Generated app README and next steps now separate app-local commands from Axion-checkout validation commands and include GUI smoke plus release report commands.
+- Updated public docs and release metadata for v0.1.28.0.
+
+## v0.1.27.0 - Preview
+
+Axion v0.1.27.0 formalizes bridge error envelopes and Native API error diagnostics on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.27`.
+- Axion public release metadata is `v0.1.27.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added structured bridge error envelopes with `{ code, message }` while keeping thrown `Error(message)` compatibility.
+- Added `window.__AXION__.diagnostics.normalizeError(error)` for frontend examples and generated apps.
+- Added structured error-code coverage to `file-access-demo` and generated `native-api-demo` GUI smoke reports.
+- Added stable preview error-code prefixes for clipboard, dialog, window, and app lifecycle command failures.
+- Added `check --json` capability summaries with profile expansion, explicit permissions, effective permissions, navigation settings, and per-window risk.
+- Added public capability profile documentation and generated-app README guidance for least-privilege inspection.
+
+### Changed
+
+- Generated app Cargo versions now use `0.1.27`.
+- Updated public docs and release metadata for v0.1.27.0.
+
+## v0.1.26.0 - Preview
+
+Axion v0.1.26.0 expands app-data filesystem coverage and tightens generated-app and checked-in example guidance on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.26`.
+- Axion public release metadata is `v0.1.26.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `template_focus` output to `axion new` so generated project logs show the selected template's intended coverage.
+- Added GUI smoke follow-up guidance after generated project `--run-check` so developers run Servo-backed checks from the Axion checkout with a shared `target` directory.
+- Added capability-gated app-data filesystem lifecycle commands: `fs.create_dir`, `fs.exists`, `fs.list_dir`, and `fs.remove`.
+- Added file lifecycle and expected-error coverage to the generated native API demo and `file-access-demo` GUI smoke paths.
+- Added stable preview file error code prefixes such as `fs.invalid-path`, `fs.not-found`, `fs.not-directory`, and `fs.directory-not-empty`.
+- Added `axion doctor` warning `remote_origin_native_capability` for remote-navigable windows that expose file, clipboard, or dialog APIs.
+- Added bundle preview commands to checked-in example READMEs.
+- Added unit coverage that keeps generated template focus text and example README validation commands from drifting.
+
+### Changed
+
+- Expanded the `file-access` profile to cover controlled create, exists, list, read, remove, and write operations.
+- Generated app Cargo versions now use `0.1.26`.
+- Updated public docs and release metadata for v0.1.26.0.
+
+## v0.1.25.0 - Preview
+
+Axion v0.1.25.0 adds a focused generated native API demo template on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.25`.
+- Axion public release metadata is `v0.1.25.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion new --template native-api-demo` for a generated no-dependency app focused on app/window metadata, clipboard, app-data filesystem, dialogs, input compatibility, and GUI smoke diagnostics.
+- Added template-specific generated README guidance, manifest description, UI copy, and GUI smoke source identifiers for the native API demo.
+- Added a Native API Workbench "Run all checks" button that runs the generated app's GUI smoke checks inside the window and renders a structured result.
+- Added example README files for `hello-axion`, `file-access-demo`, `multi-window`, and `bridge-diagnostics-demo` with run, check, GUI smoke, and expected-warning notes.
+- Added unit coverage for native API demo template generation and generated next-step artifact commands.
+
+### Changed
+
+- Generated app Cargo versions now use `0.1.25`.
+- Updated public docs and release metadata for v0.1.25.0.
+
+## v0.1.24.0 - Preview
+
+Axion v0.1.24.0 strengthens CI artifact output and dev preflight guidance on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.24`.
+- Axion public release metadata is `v0.1.24.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion check --report-path <path>` to write stable `axion.check-report.v1` JSON reports while keeping the existing stdout mode.
+- Added `artifacts[]` to `axion.check-report.v1` so CI can discover recommended check, dev, bundle, and release report paths.
+- Added `dev_preflight.warnings` and `dev_preflight.recommended_commands` to separate advisory dev-loop issues from blockers.
+- Added generated-app README guidance for `check --dev --bundle --report-path target/axion/reports/check.json`.
+- Added unit coverage for check artifact inventory, grouped human output, check report writing, dev preflight warning/blocker classification, and recommended command output.
+
+### Changed
+
+- `check` human output now starts with `result` and `next_step`, then groups details under stable sections while preserving grep-friendly line prefixes.
+- `check --dev` now treats unreachable or missing dev servers as warnings when packaged fallback and frontend assets remain valid.
+- `check --dev` now validates `[dev] cwd` and warns when a configured frontend command relies on the default timeout.
+- Generated-app next steps now include CI-style `check --json --report-path` and archived dev-session event/report paths.
+- Updated public docs and release metadata for v0.1.24.0.
+
+## v0.1.23.0 - Preview
+
+Axion v0.1.23.0 adds archived development-session reporting on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.23`.
+- Axion public release metadata is `v0.1.23.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion dev --report-path <path>` for stable `axion.dev-report.v1` JSON reports.
+- Added dev report fields for launch mode, dev-server status, packaged fallback status, frontend command wait result, enabled dev options, launch count, restart count, next step, failure, and final result.
+- Added `axion check --dev` for lightweight development-loop preflight covering dev-server status, watch-root validation, packaged fallback availability, frontend command settings, and recommended event/report artifact paths.
+- Added unit coverage for dev report serialization, blocked launch diagnostics, report parent directory creation, dev preflight JSON, and the new CLI option lines.
+
+### Changed
+
+- Updated generated app README guidance to recommend `--restart-on-change`, `--event-log`, and `--report-path` for local development sessions.
+- Updated public docs and release metadata for v0.1.23.0.
+
+## v0.1.22.0 - Preview
+
+Axion v0.1.22.0 strengthens the frontend development loop on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.22`.
+- Axion public release metadata is `v0.1.22.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion dev --restart-on-change` for watched frontend changes that should relaunch the app.
+- Added restart fallback behavior when `--watch --reload --restart-on-change` cannot apply live reload to all windows.
+- Added restart diagnostics: `restart_requested`, `restart_exit_requested`, `restart_deferred`, and `restart_applied`.
+- Added `axion dev --json-events` and `--event-log <path>` for stable `axion.dev-event.v1` JSONL watch/reload/restart events.
+- Added unit coverage for restart-on-change option reporting, restart fallback selection, event-log writing, and restart diagnostic output.
+
+### Changed
+
+- `axion dev --launch` can now relaunch the app in the same CLI session after a restart request closes the current windows.
+- Updated development-loop docs and release metadata for v0.1.22.0.
+
+## v0.1.21.0 - Preview
+
+Axion v0.1.21.0 stabilizes lifecycle GUI smoke coverage on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.21`.
+- Axion public release metadata is `v0.1.21.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added a third `preview` window to the `multi-window` example so GUI smoke can close secondary windows without losing the reporting window.
+- Added GUI smoke coverage for `window.close_completed`, `window.close_timed_out`, and `window.closed` lifecycle events.
+- Added targeted close-decision helpers in the `multi-window` frontend for deterministic confirm and timeout paths.
+
+### Changed
+
+- Updated the `multi-window` manual close buttons to explicitly confirm targeted close requests instead of relying on implicit command-close decisions.
+- Updated release metadata and public documentation for v0.1.21.0.
+
+## v0.1.20.0 - Preview
+
+Axion v0.1.20.0 adds an application-level exit lifecycle event on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.20`.
+- Axion public release metadata is `v0.1.20.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added the listen-only `app.exit_requested` host lifecycle event, emitted when `app.exit` asks the runtime to close all windows.
+- Added `app.exit_prevented` and `app.exit_completed` host lifecycle events for app-wide shutdown outcomes.
+- Added a stable `requestId` to `app.exit` responses so frontend code can correlate command results with `app.exit_requested`.
+- Added app exit request tracking in the winit backend, including closed, prevented, and timed-out window summaries.
+- Added `window.close_prevented`, `window.close_completed`, and `window.close_timed_out` host lifecycle events for per-window close outcomes.
+- Added close request/window correlation arrays to app exit outcome payloads.
+- Added multi-window GUI smoke coverage for `window.close_prevented`, `app.exit` pending responses, `app.exit_requested`, and `app.exit_prevented` payloads.
+
+### Changed
+
+- Updated host event diagnostics and native API documentation to include application-level and window-level lifecycle outcome events.
+
+## v0.1.19.0 - Preview
+
+Axion v0.1.19.0 strengthens lifecycle validation and GUI smoke coverage on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.19`.
+- Axion public release metadata is `v0.1.19.0`.
 - Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
 
 ### Added
@@ -17,6 +279,12 @@ Axion v0.1.18.0 adds explicit application exit and window close lifecycle contro
 - Expanded `window-control` and `multi-window` profiles to include `window.close`.
 - Added `window.confirm_close` and `window.prevent_close` for preview close confirmation, with timeout defaulting to allow close.
 - Added `[native.lifecycle] close_timeout_ms` to configure preview close-confirmation timeout behavior.
+- Added GUI smoke coverage for `window.close_requested`, `window.prevent_close`, duplicate close-decision errors, and close timeout payloads in the multi-window example.
+- Added `axion gui-smoke` human-output summaries for returned `diagnostics.smoke_checks`, including total count and failed check ids.
+- Added doctor warnings for incomplete close lifecycle command sets and suspicious close timeout values.
+- Added a doctor warning for `app.exit` configurations that have no trusted close-decision command path.
+- Improved `axion gui-smoke` failure classification so runtime hook failures are not reported as build failures just because Cargo printed compile progress.
+- Added `close_timeout_ms` to diagnostics reports so CI can read lifecycle timeout configuration.
 - Added close/exit controls and an unsaved-change prevention demo to `multi-window`, plus lifecycle capability checks to `hello-axion` and generated vanilla apps.
 - Added doctor risk handling for `app.exit`, `window.close`, and remote-navigation windows with runtime-control capabilities.
 

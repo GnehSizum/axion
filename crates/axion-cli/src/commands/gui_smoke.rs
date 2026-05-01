@@ -5,6 +5,9 @@ use axion_core::{Builder, RunMode};
 use axion_runtime::{DiagnosticsReport, json_string_literal};
 
 use crate::cli::GuiSmokeArgs;
+use crate::commands::report_util::{
+    json_array_section, json_string_field, json_string_fields, next_json_object,
+};
 use crate::error::AxionCliError;
 
 const PASSED_PREFIX: &str = "Axion GUI smoke passed: ";
@@ -27,6 +30,7 @@ pub fn run(args: GuiSmokeArgs) -> Result<(), AxionCliError> {
 
     match (output.status.success(), report) {
         (true, Some(report)) if report_result_ok(report) => {
+            let summary = smoke_check_summary(report);
             if let Some(path) = &args.report_path {
                 write_report_json(path, report)?;
             }
@@ -37,18 +41,26 @@ pub fn run(args: GuiSmokeArgs) -> Result<(), AxionCliError> {
                 if let Some(path) = &args.report_path {
                     println!("diagnostics_report: {}", path.display());
                 }
+                println!("{}", summary.to_line());
                 println!("result: ok");
             }
             Ok(())
         }
         (true, Some(report)) => {
+            let summary = smoke_check_summary(report);
             if let Some(path) = &args.report_path {
                 write_report_json(path, report)?;
             }
-            Err(std::io::Error::other("GUI smoke report result was not ok").into())
+            Err(std::io::Error::other(format!(
+                "GUI smoke report result was not ok; {}; next_step: {}",
+                summary.to_line(),
+                summary.next_step()
+            ))
+            .into())
         }
         _ => {
             let failure = gui_smoke_failure(output.status, report.is_some(), &stderr);
+            let report_summary = report.map(smoke_check_summary);
             if let Some(path) = &args.report_path {
                 if let Some(report) = report {
                     write_report_json(path, report)?;
@@ -60,6 +72,7 @@ pub fn run(args: GuiSmokeArgs) -> Result<(), AxionCliError> {
                         message: &failure.message,
                         failure_phase: failure.phase.as_str(),
                         help: failure.help,
+                        next_step: failure.phase.next_step(),
                         stdout: &stdout,
                         stderr: &stderr,
                         status: output.status,
@@ -75,7 +88,8 @@ pub fn run(args: GuiSmokeArgs) -> Result<(), AxionCliError> {
                     write_report_json(path, &report)?;
                 }
             }
-            Err(std::io::Error::other(failure.message).into())
+            let message = gui_smoke_failure_message(&failure, report_summary.as_ref());
+            Err(std::io::Error::other(message).into())
         }
     }
 }
@@ -149,6 +163,78 @@ fn report_result_ok(report: &str) -> bool {
     report.contains("\"result\":\"ok\"")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SmokeCheckSummary {
+    total: usize,
+    failed_ids: Vec<String>,
+    failed_error_codes: Vec<String>,
+}
+
+impl SmokeCheckSummary {
+    fn to_line(&self) -> String {
+        let failed = if self.failed_ids.is_empty() {
+            "none".to_owned()
+        } else {
+            self.failed_ids.join(",")
+        };
+        let error_codes = if self.failed_error_codes.is_empty() {
+            "none".to_owned()
+        } else {
+            self.failed_error_codes.join(",")
+        };
+        format!(
+            "smoke_checks: total={}, failed={failed}, error_codes={error_codes}",
+            self.total
+        )
+    }
+
+    fn next_step(&self) -> String {
+        if self.failed_ids.is_empty() {
+            "inspect the returned diagnostics report and frontend console output".to_owned()
+        } else {
+            format!(
+                "fix failing smoke checks: {}; inspect diagnostics.smoke_checks[].detail for command payloads and error codes",
+                self.failed_ids.join(",")
+            )
+        }
+    }
+}
+
+fn smoke_check_summary(report: &str) -> SmokeCheckSummary {
+    let Some(checks) = json_array_section(report, "\"smoke_checks\"") else {
+        return SmokeCheckSummary {
+            total: 0,
+            failed_ids: Vec::new(),
+            failed_error_codes: Vec::new(),
+        };
+    };
+
+    let mut total = 0;
+    let mut failed_ids = Vec::new();
+    let mut failed_error_codes = Vec::new();
+    let mut cursor = 0;
+    while let Some((object, next_cursor)) = next_json_object(checks, cursor) {
+        total += 1;
+        if json_string_field(object, "status").as_deref() == Some("fail") {
+            failed_ids.push(
+                json_string_field(object, "id").unwrap_or_else(|| format!("smoke-check-{total}")),
+            );
+            for code in json_string_fields(object, "code") {
+                if !failed_error_codes.contains(&code) {
+                    failed_error_codes.push(code);
+                }
+            }
+        }
+        cursor = next_cursor;
+    }
+
+    SmokeCheckSummary {
+        total,
+        failed_ids,
+        failed_error_codes,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FailurePhase {
     Build,
@@ -164,12 +250,42 @@ impl FailurePhase {
             Self::Report => "report",
         }
     }
+
+    fn next_step(self) -> &'static str {
+        match self {
+            Self::Build => {
+                "fix Cargo/Servo build prerequisites, then rerun gui-smoke with --serial-build if the machine is resource constrained"
+            }
+            Self::Runtime => {
+                "inspect frontend exceptions, bridge capability allowlists, and window.__AXION_GUI_SMOKE__ checks"
+            }
+            Self::Report => {
+                "ensure window.__AXION_GUI_SMOKE__ prints a valid axion.diagnostics-report.v1 report"
+            }
+        }
+    }
 }
 
 struct GuiSmokeFailure {
     message: String,
     phase: FailurePhase,
     help: &'static str,
+}
+
+fn gui_smoke_failure_message(
+    failure: &GuiSmokeFailure,
+    summary: Option<&SmokeCheckSummary>,
+) -> String {
+    if let Some(summary) = summary {
+        format!(
+            "{}; {}; next_step: {}",
+            failure.message,
+            summary.to_line(),
+            summary.next_step()
+        )
+    } else {
+        failure.message.clone()
+    }
 }
 
 fn gui_smoke_failure(
@@ -213,6 +329,7 @@ struct FailedReportInput<'a> {
     message: &'a str,
     failure_phase: &'a str,
     help: &'a str,
+    next_step: &'a str,
     stdout: &'a str,
     stderr: &'a str,
     status: std::process::ExitStatus,
@@ -243,16 +360,18 @@ fn failed_report(input: FailedReportInput<'_>) -> String {
         dialog_backend: None,
         configured_clipboard_backend: None,
         clipboard_backend: None,
+        close_timeout_ms: Some(input.launch_config.native.lifecycle.close_timeout_ms),
         icon: None,
         host_events: Vec::new(),
         staged_app_dir: None,
         asset_manifest_path: None,
         artifacts_removed: None,
         diagnostics: Some(format!(
-            "{{\"error\":{},\"failure_phase\":{},\"help\":{},\"status_code\":{},\"success\":{},\"report_found\":{},\"timeout_ms\":{},\"cargo_manifest_path\":{},\"cargo_target_dir\":{},\"serial_build\":{},\"build_env_keys\":{},\"stdout\":{},\"stderr\":{}}}",
+            "{{\"error\":{},\"failure_phase\":{},\"help\":{},\"next_step\":{},\"failed_check_ids\":[],\"error_codes\":[],\"status_code\":{},\"success\":{},\"report_found\":{},\"timeout_ms\":{},\"cargo_manifest_path\":{},\"cargo_target_dir\":{},\"serial_build\":{},\"build_env_keys\":{},\"stdout\":{},\"stderr\":{}}}",
             json_string_literal(input.message),
             json_string_literal(input.failure_phase),
             json_string_literal(input.help),
+            json_string_literal(input.next_step),
             optional_status_code(input.status),
             input.status.success(),
             input.report_found,
@@ -302,6 +421,16 @@ fn classify_failure_phase(status: std::process::ExitStatus, stderr: &str) -> Fai
     }
 
     let stderr = stderr.to_ascii_lowercase();
+    let runtime_markers = [
+        "gui smoke failed",
+        "winit(registerprotocol",
+        "window.__axion_gui_smoke__",
+        "axion_selftest",
+    ];
+    if runtime_markers.iter().any(|marker| stderr.contains(marker)) {
+        return FailurePhase::Runtime;
+    }
+
     let build_markers = [
         "compiling ",
         "could not compile",
@@ -366,8 +495,8 @@ fn current_unix_timestamp_secs() -> u64 {
 mod tests {
     use super::{
         FailedReportInput, FailurePhase, PASSED_PREFIX, classify_failure_phase,
-        extract_gui_smoke_report, failed_report, gui_smoke_failure, parse_build_env,
-        report_result_ok,
+        extract_gui_smoke_report, failed_report, gui_smoke_failure, gui_smoke_failure_message,
+        parse_build_env, report_result_ok, smoke_check_summary,
     };
 
     #[cfg(unix)]
@@ -410,11 +539,69 @@ mod tests {
     }
 
     #[test]
+    fn summarizes_gui_smoke_checks() {
+        let report = concat!(
+            "{\"schema\":\"axion.diagnostics-report.v1\",\"result\":\"failed\",",
+            "\"diagnostics\":{\"smoke_checks\":[",
+            "{\"id\":\"app.ping\",\"status\":\"pass\",\"detail\":\"ok\"},",
+            "{\"id\":\"window.close\",\"status\":\"fail\",\"detail\":{\"error\":{\"code\":\"window.unavailable\"}}},",
+            "{\"id\":\"window.prevent_close\",\"status\":\"fail\",\"detail\":{\"error\":{\"code\":\"window.duplicate\"}}}",
+            "]}}"
+        );
+        let summary = smoke_check_summary(report);
+
+        assert_eq!(summary.total, 3);
+        assert_eq!(
+            summary.failed_ids,
+            vec!["window.close".to_owned(), "window.prevent_close".to_owned()]
+        );
+        assert_eq!(
+            summary.failed_error_codes,
+            vec![
+                "window.unavailable".to_owned(),
+                "window.duplicate".to_owned()
+            ]
+        );
+        assert_eq!(
+            summary.to_line(),
+            "smoke_checks: total=3, failed=window.close,window.prevent_close, error_codes=window.unavailable,window.duplicate"
+        );
+    }
+
+    #[test]
+    fn summarizes_missing_gui_smoke_checks() {
+        let summary =
+            smoke_check_summary("{\"schema\":\"axion.diagnostics-report.v1\",\"result\":\"ok\"}");
+
+        assert_eq!(
+            summary.to_line(),
+            "smoke_checks: total=0, failed=none, error_codes=none"
+        );
+    }
+
+    #[test]
     fn failure_message_uses_last_stderr_line() {
         let failure = gui_smoke_failure(failing_status(), false, "warning\nerror detail\n");
 
         assert!(failure.message.contains("error detail"));
         assert_eq!(failure.phase, FailurePhase::Runtime);
+    }
+
+    #[test]
+    fn failure_message_includes_report_summary_when_available() {
+        let failure = gui_smoke_failure(failing_status(), true, "runtime failed");
+        let report = concat!(
+            "{\"schema\":\"axion.diagnostics-report.v1\",\"result\":\"failed\",",
+            "\"diagnostics\":{\"smoke_checks\":[",
+            "{\"id\":\"fs.roundtrip\",\"status\":\"fail\",\"detail\":{\"error\":{\"code\":\"fs.not-found\"}}}",
+            "]}}"
+        );
+        let summary = smoke_check_summary(report);
+        let message = gui_smoke_failure_message(&failure, Some(&summary));
+
+        assert!(message.contains("smoke_checks: total=1, failed=fs.roundtrip"));
+        assert!(message.contains("error_codes=fs.not-found"));
+        assert!(message.contains("next_step: fix failing smoke checks: fs.roundtrip"));
     }
 
     #[test]
@@ -428,6 +615,13 @@ mod tests {
         );
         assert_eq!(
             classify_failure_phase(failing_status(), "frontend crashed"),
+            FailurePhase::Runtime,
+        );
+        assert_eq!(
+            classify_failure_phase(
+                failing_status(),
+                "Compiling multi-window\nError: Winit(RegisterProtocol(\"GUI smoke failed: timed out after 30000ms\"))",
+            ),
             FailurePhase::Runtime,
         );
         assert_eq!(
@@ -490,6 +684,7 @@ mod tests {
             message: "failed",
             failure_phase: "build",
             help: "help text",
+            next_step: "next action",
             stdout: "out",
             stderr: "err",
             status: failing_status(),
@@ -508,6 +703,9 @@ mod tests {
         assert!(report.contains("\"cargo_manifest_path\":\"Cargo.toml\""));
         assert!(report.contains("\"failure_phase\":\"build\""));
         assert!(report.contains("\"help\":\"help text\""));
+        assert!(report.contains("\"next_step\":\"next action\""));
+        assert!(report.contains("\"failed_check_ids\":[]"));
+        assert!(report.contains("\"error_codes\":[]"));
         assert!(report.contains("\"cargo_target_dir\":\"target\""));
         assert!(report.contains("\"serial_build\":true"));
         assert!(report.contains("\"build_env_keys\":[\"CARGO_BUILD_JOBS\"]"));

@@ -18,6 +18,7 @@ pub enum Command {
     Doctor(DoctorArgs),
     GuiSmoke(GuiSmokeArgs),
     New(NewArgs),
+    Report(ReportArgs),
     Release(ReleaseArgs),
     SelfTest(SelfTestArgs),
 }
@@ -38,6 +39,18 @@ pub struct DevArgs {
 
     #[arg(long, default_value_t = false)]
     pub reload: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub restart_on_change: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub json_events: bool,
+
+    #[arg(long)]
+    pub event_log: Option<PathBuf>,
+
+    #[arg(long)]
+    pub report_path: Option<PathBuf>,
 
     #[arg(long, default_value_t = false)]
     pub open_devtools: bool,
@@ -92,6 +105,12 @@ pub struct CheckArgs {
 
     #[arg(long, default_value_t = false)]
     pub bundle: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub dev: bool,
+
+    #[arg(long)]
+    pub report_path: Option<PathBuf>,
 
     #[arg(long, default_value_t = false)]
     pub json: bool,
@@ -194,6 +213,9 @@ pub struct ReleaseArgs {
     #[arg(long)]
     pub bundle_report_path: Option<PathBuf>,
 
+    #[arg(long)]
+    pub check_report_path: Option<PathBuf>,
+
     #[arg(long, value_enum, default_value_t = DoctorRisk::Medium)]
     pub max_risk: DoctorRisk,
 
@@ -214,6 +236,20 @@ pub struct ReleaseArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct ReportArgs {
+    pub path: PathBuf,
+
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+
+    #[arg(long, default_value_t = false)]
+    pub allow_failed: bool,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct NewArgs {
     #[arg(default_value = "axion-app")]
     pub name: String,
@@ -231,4 +267,5 @@ pub struct NewArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum NewTemplate {
     Vanilla,
+    NativeApiDemo,
 }

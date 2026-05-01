@@ -457,11 +457,11 @@ dependencies = [
 
 [[package]]
 name = "axion-bridge"
-version = "0.1.18"
+version = "0.1.30"
 
 [[package]]
 name = "axion-cli"
-version = "0.1.18"
+version = "0.1.30"
 dependencies = [
  "axion-core",
  "axion-manifest",
@@ -474,7 +474,7 @@ dependencies = [
 
 [[package]]
 name = "axion-core"
-version = "0.1.18"
+version = "0.1.30"
 dependencies = [
  "thiserror 2.0.18",
  "url",
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "axion-manifest"
-version = "0.1.18"
+version = "0.1.30"
 dependencies = [
  "axion-core",
  "serde",
@@ -493,14 +493,14 @@ dependencies = [
 
 [[package]]
 name = "axion-packager"
-version = "0.1.18"
+version = "0.1.30"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "axion-protocol"
-version = "0.1.18"
+version = "0.1.30"
 dependencies = [
  "thiserror 2.0.18",
  "url",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "axion-runtime"
-version = "0.1.18"
+version = "0.1.30"
 dependencies = [
  "axion-bridge",
  "axion-core",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "axion-security"
-version = "0.1.18"
+version = "0.1.30"
 dependencies = [
  "axion-core",
  "url",
@@ -530,7 +530,7 @@ dependencies = [
 
 [[package]]
 name = "axion-window-winit"
-version = "0.1.18"
+version = "0.1.30"
 dependencies = [
  "axion-bridge",
  "axion-core",
@@ -717,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-diagnostics-demo"
-version = "0.1.18"
+version = "0.1.30"
 dependencies = [
  "axion-core",
  "axion-manifest",
@@ -1857,7 +1857,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "file-access-demo"
-version = "0.1.18"
+version = "0.1.30"
 dependencies = [
  "axion-core",
  "axion-manifest",
@@ -2509,7 +2509,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hello-axion"
-version = "0.1.18"
+version = "0.1.30"
 dependencies = [
  "axion-core",
  "axion-manifest",
@@ -4039,7 +4039,7 @@ dependencies = [
 
 [[package]]
 name = "multi-window"
-version = "0.1.18"
+version = "0.1.30"
 dependencies = [
  "axion-core",
  "axion-manifest",

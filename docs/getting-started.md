@@ -45,8 +45,8 @@ To inspect per-window capability behavior:
 cargo run -p multi-window --features servo-runtime
 ```
 
-The `main` window can call app-level commands, while the `settings` window is restricted to window-local controls such as `window.info`, `window.focus`, and `window.set_title`.
-The updated example also lets the `main` window use `window.list` plus `{ target: "settings" }` to inspect and rename the `settings` window.
+The `main` window can call app-level commands, while the `settings` and `preview` windows are restricted to window-local controls such as `window.info`, `window.focus`, and `window.set_title`.
+The updated example also lets the `main` window use `window.list` plus `{ target: "settings" }` or `{ target: "preview" }` to inspect, rename, and close secondary windows.
 
 To inspect controlled filesystem and dialog capabilities:
 
@@ -82,9 +82,9 @@ cargo run -p axion-cli --features servo-runtime -- dev \
   --fallback-packaged
 ```
 
-The preview flags `--watch` and `--reload` are available for frontend development. `--watch` polls `[build].frontend_dist`, ignores common temporary files and cache directories, debounces editor save bursts, and reports created, modified, and deleted files. `--reload` reports `reload_requested`; with `--launch`, Axion asks each live window to reload and prints `reload_applied`, `reload_deferred`, or `restart_required`. Without `--launch`, reload remains diagnostic-only because there is no live window target. `--open-devtools` is accepted for diagnostics, but the current Servo backend does not open devtools yet.
+The preview flags `--watch`, `--reload`, and `--restart-on-change` are available for frontend development. `--watch` polls `[build].frontend_dist`, ignores common temporary files and cache directories, debounces editor save bursts, and reports created, modified, and deleted files. `--reload` reports `reload_requested`; with `--launch`, Axion asks each live window to reload and prints `reload_applied`, `reload_deferred`, or `restart_required`. `--restart-on-change` relaunches after watched changes when live reload is not requested or cannot cover every window. `--json-events` prints stable `axion.dev-event.v1` JSONL events, `--event-log <path>` writes those events for automation, and `--report-path <path>` writes a stable `axion.dev-report.v1` session summary. Without `--launch`, reload and restart remain diagnostic-only because there is no live window target. `--open-devtools` is accepted for diagnostics, but the current Servo backend does not open devtools yet.
 
-To test live reload, launch with `--features servo-runtime --launch --fallback-packaged --watch --reload`, then edit a file in the app's `frontend/` directory. `hello-axion` should report `reload_applied: window=main`; `multi-window` reports one reload result for each live window.
+To test live reload and restart fallback, launch with `--features servo-runtime --launch --fallback-packaged --watch --reload --restart-on-change --event-log target/axion/reports/hello-dev-events.jsonl --report-path target/axion/reports/hello-dev-report.json`, then edit a file in the app's `frontend/` directory. `hello-axion` should report `reload_applied: window=main`; if reload is unavailable, Axion reports restart diagnostics and relaunches after the current windows close.
 
 To let Axion start a simple local frontend server, run:
 
@@ -107,7 +107,9 @@ cargo run -- --plan
 cargo run --features servo-runtime
 ```
 
-`--run-check` immediately runs `axion check --bundle` against the generated manifest. Omit it if you only want to create files.
+`--run-check` immediately runs `axion check --dev --bundle` against the generated manifest. Omit it if you only want to create files.
+
+Use `--template native-api-demo` when you want generated UI and README guidance focused on the preview native API surface: app/window metadata, clipboard text, app-data file lifecycle operations, dialogs, input compatibility, and GUI smoke diagnostics. The generated Native API Workbench includes a "Run all checks" button for manual validation inside the app window.
 
 Generated projects contain:
 
@@ -123,7 +125,7 @@ Generated projects contain:
 
 The generated `demo.greet` command is registered in Rust, allowed in `[capabilities.main]`, and invoked from frontend JavaScript. See `custom-commands.md` for the pattern.
 
-Generated manifests also include optional app metadata (`version`, `description`, `authors`, and `homepage`), `[bundle] icon = "icons/app.icns"`, `[native.dialog] backend = "headless"`, and `[native.clipboard] backend = "memory"`. These values appear in `app.info`, `axion doctor`, self-test output, and bundle metadata scaffolds. The generated frontend also demonstrates lifecycle capability reporting, clipboard read/write, `dialog.open` with multi-select and filter metadata, and `dialog.save` with `defaultPath`.
+Generated manifests also include optional app metadata (`version`, `description`, `authors`, and `homepage`), `[bundle] icon = "icons/app.icns"`, `[native.dialog] backend = "headless"`, and `[native.clipboard] backend = "memory"`. These values appear in `app.info`, `axion doctor`, self-test output, and bundle metadata scaffolds. The generated frontend also demonstrates lifecycle capability reporting, clipboard read/write, app-data create/exists/list/read/remove/write, `dialog.open` with multi-select and filter metadata, and `dialog.save` with `defaultPath`.
 
 Generated manifests include commented `[dev]` lines. Uncomment them when you attach a frontend toolchain such as Vite, Trunk, or another static server. You can start that server separately before running `axion dev --launch`, or set `[dev] command` / pass `--frontend-command` so Axion starts it for you.
 
@@ -136,7 +138,7 @@ Generated apps install Axion panic reporting by default. Crash reports are writt
 From the Axion repository root:
 
 ```sh
-cargo run -p axion-cli -- check --manifest-path /tmp/demo-app/axion.toml --bundle
+cargo run -p axion-cli -- check --manifest-path /tmp/demo-app/axion.toml --dev --bundle --report-path target/axion/reports/check.json
 cargo run -p axion-cli -- doctor --manifest-path /tmp/demo-app/axion.toml --deny-warnings --max-risk medium
 cargo run -p axion-cli -- self-test --manifest-path /tmp/demo-app/axion.toml
 cargo run -p axion-cli -- gui-smoke \
@@ -148,10 +150,11 @@ cargo run -p axion-cli -- gui-smoke \
 cargo run -p axion-cli -- build --manifest-path /tmp/demo-app/axion.toml
 cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml --build-executable
 cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml --build-executable --json --report-path target/axion/reports/demo-app-bundle.json
-cargo run -p axion-cli -- release --manifest-path /tmp/demo-app/axion.toml --json --report-path target/axion/reports/demo-app-release.json --bundle-report-path target/axion/reports/demo-app-bundle.json --archive
+cargo run -p axion-cli -- release --manifest-path /tmp/demo-app/axion.toml --check-report-path target/axion/reports/check.json --json --report-path target/axion/reports/demo-app-release.json --bundle-report-path target/axion/reports/demo-app-bundle.json --archive
+cargo run -p axion-cli -- report target/axion/reports/demo-app-release.json --output target/axion/reports/demo-app-release-summary.json
 ```
 
-`check` is the fastest default validation loop: it runs the doctor gate, readiness, quiet self-test staging, and optional bundle preflight. Use `check --json` for CI and `doctor` when you need the full diagnostics detail. Continue when development, bundle, and GUI smoke readiness are all `true`; otherwise resolve the printed `readiness.blocker` lines first.
+`check` is the fastest default validation loop: it runs the doctor gate, readiness, quiet self-test staging, and optional dev/bundle preflight. Use `check --dev --bundle --json --report-path target/axion/reports/check.json` for CI and `doctor` when you need the full diagnostics detail. Continue when development, bundle, and GUI smoke readiness are all `true`; otherwise resolve the printed `readiness.blocker` or `dev.blocker` lines first. `dev.warning` entries are advisory and commonly report a missing or unreachable dev server when packaged fallback is available. The check report includes `artifacts[]` with recommended report paths under `target/axion/reports/`.
 
 `self-test` prints app metadata, native dialog backend, each window's configured commands/events/protocols, runtime command/event counts, host events, navigation origins, and staged asset paths. Add `--json` to print an `axion.diagnostics-report.v1` report, or `--report-path <path>` to write that report while keeping the default text output. Add `--quiet` with `--report-path` in CI when only the exit code and report file are needed.
 

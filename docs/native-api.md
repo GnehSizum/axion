@@ -4,6 +4,63 @@ Axion exposes built-in native APIs as bridge commands. Every command must be lis
 
 For application-defined Rust commands, see `custom-commands.md`.
 
+To generate a runnable project that exercises the current preview native API surface, use:
+
+```sh
+cargo run -p axion-cli -- new native-demo --template native-api-demo --path /tmp/native-demo --run-check
+```
+
+The generated app includes UI and GUI smoke coverage for app/window metadata, clipboard text, app-data file lifecycle operations, headless dialog responses, input compatibility, and capability denial. Its Native API Workbench card includes a "Run all checks" button that executes the same checks exposed through `window.__AXION_GUI_SMOKE__()`.
+
+## Command Reference Format
+
+Built-in commands are capability-gated. A command is callable only when the active window's `[capabilities.<window>]` entry includes either the command directly or a profile that expands to it.
+
+Each command below follows this shape:
+
+- `profile`: the manifest profile that usually enables the command
+- `payload`: the JSON value passed to `window.__AXION__.invoke`
+- `response`: the JSON value returned on success
+- `errors`: common failure conditions
+
+Bridge failures are returned in an error envelope:
+
+```json
+{
+  "ok": false,
+  "id": "axion_request_id",
+  "payload": null,
+  "error": {
+    "code": "fs.not-found",
+    "message": "fs.not-found: failed to access app data path: No such file or directory"
+  }
+}
+```
+
+Frontend code still receives a thrown `Error(message)` for compatibility. The thrown error also carries `error.code` and `error.details`. Use `window.__AXION__.diagnostics.normalizeError(error)` when code needs to handle both old string errors and structured envelopes.
+
+Stable preview error-code prefixes:
+
+- `bridge.*`: bridge transport, capability, request id, payload, or handler envelope failures
+- `app.*`: app lifecycle command failures, currently `app.exit-failed` and `app.unexpected-response`
+- `window.*`: window command payload/control failures, including `window.invalid-payload`, `window.invalid-size`, `window.control-failed`, and `window.unexpected-response`
+- `clipboard.*`: clipboard command failures, including `clipboard.invalid-payload` and `clipboard.state-unavailable`
+- `dialog.*`: dialog command payload validation failures, currently `dialog.invalid-payload`
+- `fs.*`: app-data filesystem validation and host I/O failures
+
+Common profiles:
+
+- `app-info`: `app.ping`, `app.info`, `app.version`, `app.echo`
+- `app-control`: `app.exit`
+- `window-control`: current-window control commands
+- `multi-window`: targeted window control including `window.list`
+- `clipboard-access`: `clipboard.write_text`, `clipboard.read_text`
+- `file-access`: `fs.create_dir`, `fs.exists`, `fs.write_text`, `fs.read_text`, `fs.list_dir`, `fs.remove`
+- `dialog-access`: `dialog.open`, `dialog.save`
+- `app-events`: frontend event emission such as `app.log`
+
+See `capabilities.md` for the full profile mapping, risk guidance, and least-privilege examples.
+
 ## Bridge Compatibility Helpers
 
 The injected `window.__AXION__` bootstrap also exposes small frontend compatibility helpers under `window.__AXION__.compat`.
@@ -64,6 +121,21 @@ Formats a value using the same pretty JSON layout used by the examples.
 pre.textContent = window.__AXION__.diagnostics.toPrettyJson(snapshot);
 ```
 
+### `normalizeError`
+
+Normalizes thrown bridge errors and legacy string errors to `{ code, message, cause }`.
+
+```js
+try {
+  await window.__AXION__.invoke("fs.read_text", { path: "missing.txt" });
+} catch (error) {
+  const normalized = window.__AXION__.diagnostics.normalizeError(error);
+  if (normalized.code === "fs.not-found") {
+    console.log("expected missing file", normalized.message);
+  }
+}
+```
+
 ## App Commands
 
 ### `app.ping`
@@ -97,7 +169,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.18", release: "v0.1.18.0", framework: "axion" }
+// { version: "0.1.30", release: "v0.1.30.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -111,6 +183,8 @@ await window.__AXION__.invoke("app.echo", { value: 1 });
 ## Window Commands
 
 Most window commands operate on the current window by default. Pass `{ target: "settings" }` to address another window by id.
+
+Common errors: `window.invalid-payload`, `window.invalid-size`, `window.control-failed`, `window.unexpected-response`.
 
 ### `window.list`
 
@@ -227,16 +301,27 @@ Requests application shutdown by asking all runtime windows to close. If windows
 
 ```js
 await window.__AXION__.invoke("app.exit", null);
-// { pending: true, windowCount: 2, requestCount: 2 }
+// { pending: true, requestId: "axion-exit-1", windowCount: 3, requestCount: 3 }
 ```
+
+Errors: `app.exit-failed`, `app.unexpected-response`.
 
 ### Host Lifecycle Events
 
-Axion host events are listen-only and come from the native runtime. Window lifecycle events currently include:
+Axion host events are listen-only and come from the native runtime. Application lifecycle events currently include:
+
+- `app.exit_requested`
+- `app.exit_prevented`
+- `app.exit_completed`
+
+Window lifecycle events currently include:
 
 - `window.created`
 - `window.ready`
 - `window.close_requested`
+- `window.close_prevented`
+- `window.close_completed`
+- `window.close_timed_out`
 - `window.closed`
 - `window.resized`
 - `window.focused`
@@ -244,7 +329,13 @@ Axion host events are listen-only and come from the native runtime. Window lifec
 - `window.moved`
 - `window.redraw_failed`
 
-`window.close_requested` is emitted before a window is removed and includes `requestId`, `reason`, `defaultAction`, and `timeoutMs`. Frontend code can call `window.confirm_close` or `window.prevent_close` with that `requestId`. If no decision arrives before `timeoutMs`, the preview backend applies `defaultAction = "allow"`. The timeout defaults to `3000` and can be configured with `[native.lifecycle] close_timeout_ms`. `window.closed` is emitted after the close has been accepted.
+`app.exit_requested` is emitted to all runtime windows before `app.exit` starts per-window close requests. Its payload includes `requestId`, `reason`, `windowCount`, `defaultAction`, and `timeoutMs`.
+
+`app.exit_prevented` is emitted when any window rejects a close request that belongs to the app exit request. The backend cancels the remaining pending close requests for that app exit attempt. `app.exit_completed` is emitted when all close requests associated with an app exit request complete. Both outcome events include `requestId`, `status`, `windowCount`, `requestCount`, `closedCount`, `preventedCount`, `timedOutCount`, `closeRequests`, `closedWindows`, `preventedWindows`, `timedOutWindows`, `closedRequests`, `preventedRequests`, and `timedOutRequests`. Request arrays contain `{ requestId, windowId }` entries so frontends can correlate app-level and window-level lifecycle results.
+
+`window.close_requested` is emitted before a window is removed and includes `requestId`, `reason`, `defaultAction`, and `timeoutMs`. Frontend code can call `window.confirm_close` or `window.prevent_close` with that `requestId`. `window.close_prevented` is emitted after a prevent decision. `window.close_completed` is emitted after an explicit confirm decision. If no decision arrives before `timeoutMs`, the preview backend emits `window.close_timed_out` and applies `defaultAction = "allow"`. The timeout defaults to `3000` and can be configured with `[native.lifecycle] close_timeout_ms`. `window.closed` is emitted after the close has been accepted.
+
+Close decision commands reject unknown, duplicate, or already timed-out `requestId` values. Treat these failures as terminal for that close request and wait for the next `window.close_requested` event before retrying.
 
 ```js
 window.__AXION__.listen("window.focused", (payload) => {
@@ -274,6 +365,8 @@ await window.__AXION__.invoke("clipboard.write_text", {
 // { bytes: 16, backend: "memory" }
 ```
 
+Errors: `clipboard.invalid-payload`, `clipboard.state-unavailable`.
+
 ### `clipboard.read_text`
 
 Reads the current clipboard text from the configured backend.
@@ -283,6 +376,8 @@ await window.__AXION__.invoke("clipboard.read_text", null);
 // { text: "Hello from Axion", backend: "memory" }
 ```
 
+Errors: `clipboard.state-unavailable`.
+
 ## File Commands
 
 File commands operate only inside Axion's app-data directory:
@@ -291,7 +386,44 @@ File commands operate only inside Axion's app-data directory:
 <app root>/target/axion-data/<app name>/
 ```
 
-They reject absolute paths, parent-directory traversal, root components, and symlinks.
+They reject absolute paths, parent-directory traversal, root components, and symlinks. Directory removal requires `recursive: true` for non-empty directories.
+
+File command failures use stable preview error code prefixes in the thrown error message:
+
+- `fs.invalid-payload`: required JSON fields are missing or have the wrong type
+- `fs.invalid-path`: the path is empty, absolute, or contains parent/root components
+- `fs.not-found`: the target path does not exist
+- `fs.not-directory`: `fs.list_dir` was called on a file
+- `fs.is-directory`: text read/write was called on a directory
+- `fs.directory-not-empty`: `fs.remove` was called on a non-empty directory without `recursive: true`
+- `fs.symlink-rejected`: the resolved app-data path is a symlink
+- `fs.permission-denied` or `fs.io-error`: the host filesystem rejected the operation
+
+### `fs.create_dir`
+
+Creates a directory and any missing parents under app data.
+
+```js
+await window.__AXION__.invoke("fs.create_dir", {
+  path: "notes/archive",
+});
+// { path: "notes/archive", created: true }
+```
+
+Errors: `fs.invalid-path`, `fs.symlink-rejected`, `fs.permission-denied`, `fs.io-error`.
+
+### `fs.exists`
+
+Checks whether an app-data path exists without reading its contents.
+
+```js
+await window.__AXION__.invoke("fs.exists", {
+  path: "notes/hello.txt",
+});
+// { path: "notes/hello.txt", exists: true }
+```
+
+Errors: `fs.invalid-path`, `fs.symlink-rejected`, `fs.permission-denied`, `fs.io-error`.
 
 ### `fs.write_text`
 
@@ -302,7 +434,10 @@ await window.__AXION__.invoke("fs.write_text", {
   path: "notes/hello.txt",
   contents: "Hello from Axion",
 });
+// { path: "notes/hello.txt", bytes: 16 }
 ```
+
+Errors: `fs.invalid-payload`, `fs.invalid-path`, `fs.is-directory`, `fs.symlink-rejected`, `fs.permission-denied`, `fs.io-error`.
 
 ### `fs.read_text`
 
@@ -312,7 +447,36 @@ Reads UTF-8 text.
 await window.__AXION__.invoke("fs.read_text", {
   path: "notes/hello.txt",
 });
+// { path: "notes/hello.txt", contents: "Hello from Axion" }
 ```
+
+Errors: `fs.invalid-payload`, `fs.invalid-path`, `fs.not-found`, `fs.is-directory`, `fs.symlink-rejected`, `fs.permission-denied`, `fs.io-error`.
+
+### `fs.list_dir`
+
+Lists direct children of an app-data directory. Entries are sorted by name and include file size only for regular files.
+
+```js
+await window.__AXION__.invoke("fs.list_dir", {
+  path: "notes",
+});
+// { path: "notes", entries: [{ name: "hello.txt", path: "notes/hello.txt", kind: "file", bytes: 16 }] }
+```
+
+Errors: `fs.invalid-payload`, `fs.invalid-path`, `fs.not-found`, `fs.not-directory`, `fs.symlink-rejected`, `fs.permission-denied`, `fs.io-error`.
+
+### `fs.remove`
+
+Removes a file or directory under app data. Non-empty directories require `recursive: true`.
+
+```js
+await window.__AXION__.invoke("fs.remove", {
+  path: "notes/hello.txt",
+});
+// { path: "notes/hello.txt", removed: true, kind: "file" }
+```
+
+Errors: `fs.invalid-payload`, `fs.invalid-path`, `fs.not-found`, `fs.directory-not-empty`, `fs.symlink-rejected`, `fs.permission-denied`, `fs.io-error`.
 
 ## Dialog Commands
 
@@ -335,6 +499,8 @@ Supported request fields:
 - `filters: [{ name: string, extensions: string[] }]`
 
 `dialog.save` rejects `directory=true` and `multiple=true`. `filters` are validated for shape today and reserved for richer native backends.
+
+Errors: `dialog.invalid-payload`.
 
 ```js
 await window.__AXION__.invoke("dialog.open", {

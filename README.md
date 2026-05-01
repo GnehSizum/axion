@@ -2,13 +2,13 @@
 
 Axion is a Rust desktop application framework built on a vendored Servo engine. It provides an explicit manifest, capability-gated JavaScript bridge, packaged app assets, runtime diagnostics, and a `winit` desktop backend.
 
-Axion is currently at the **v0.1.18.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
+Axion is currently at the **v0.1.30.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
 
 ## What Works Today
 
-- Generate a guided Axion application with `axion-cli new --template vanilla`, optionally using `--run-check` for immediate validation.
-- Run the lightweight application validation loop with `axion-cli check`, including `--json` output for CI.
-- Inspect development-server readiness, run external frontend commands, watch frontend files with debounce/ignore rules, reload live windows when launched, and use packaged fallback through `axion-cli dev`.
+- Generate a guided Axion application with `axion-cli new --template vanilla` or `--template native-api-demo`, optionally using `--run-check` for immediate validation.
+- Run the lightweight application validation loop with `axion-cli check`, including dev preflight, bundle preflight, `--json` output, and `--report-path` artifacts for CI.
+- Inspect development-server readiness, run external frontend commands, watch frontend files with debounce/ignore rules, reload live windows when launched, restart on changes when reload is unavailable, export JSONL dev events, and archive dev-session reports through `axion-cli dev`.
 - Reuse bridge-provided text-input compatibility helpers in generated apps and custom frontends.
 - Load and validate `axion.toml` manifests.
 - Install crash reporting in generated and example applications.
@@ -16,9 +16,10 @@ Axion is currently at the **v0.1.18.0 developer preview**. It is suitable for fr
 - Compile and launch a Servo-backed desktop window behind `servo-runtime`.
 - Invoke built-in bridge commands from frontend JavaScript.
 - Use capability-gated native commands for app metadata, configurable clipboard text, app-data text files, and preview file dialogs with explicit backend diagnostics.
-- Use capability-gated lifecycle and window control commands such as `app.exit`, `window.close`, `window.list`, `window.reload`, `window.set_title`, and `window.set_size`, including targeted multi-window control.
+- Use capability-gated lifecycle and window control commands such as `app.exit`, `window.close`, `window.list`, `window.reload`, `window.set_title`, and `window.set_size`, including targeted multi-window control and close outcome events.
 - Stage and verify bundle scaffolds with app icon, executable, metadata, platform layout summaries, fingerprinted manifests, and JSON bundle reports.
 - Run a preview release workflow that validates readiness, stages a bundle, writes reports, inventories artifacts, and can create a verified tar artifact.
+- Summarize existing check, release, bundle, and GUI diagnostics reports with `axion-cli report`.
 - Inspect per-window capabilities and targeted window control with the `multi-window` example.
 - Reduce manifest boilerplate with capability profiles such as `app-info`, `app-control`, `window-control`, `clipboard-access`, `file-access`, and `dialog-access`.
 - Inspect per-window security risk, remote navigation, profile expansion, capability consistency, release readiness, and CI gates through `axion-cli doctor` and `doctor --json`.
@@ -37,18 +38,19 @@ cargo run -p multi-window -- --plan
 cargo run -p file-access-demo -- --plan
 cargo run -p bridge-diagnostics-demo -- --plan
 cargo run -p axion-cli -- dev --manifest-path examples/hello-axion/axion.toml
-cargo run -p axion-cli --features servo-runtime -- dev --manifest-path examples/hello-axion/axion.toml --launch --fallback-packaged --watch --reload
+cargo run -p axion-cli --features servo-runtime -- dev --manifest-path examples/hello-axion/axion.toml --launch --fallback-packaged --watch --reload --restart-on-change --event-log target/axion/reports/hello-dev-events.jsonl --report-path target/axion/reports/hello-dev-report.json
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/file-access-demo/axion.toml
 AXION_SELFTEST_BRIDGE=1 cargo run -p hello-axion --features servo-runtime
 ```
 
-While the `axion-cli dev --launch --watch --reload` command is running, edit `examples/hello-axion/frontend/app.js` or `style.css`. The CLI should print `reload_requested` followed by `reload_applied: window=main`.
+While the `axion-cli dev --launch --watch --reload --restart-on-change` command is running, edit `examples/hello-axion/frontend/app.js` or `style.css`. The CLI should print `reload_requested` followed by `reload_applied: window=main`; if a backend cannot reload a live window, it prints restart diagnostics and relaunches after the current windows close. Add `--json-events` or `--event-log <path>` when automation needs stable `axion.dev-event.v1` JSONL events, and `--report-path <path>` when you need an archived `axion.dev-report.v1` session summary.
 
 Generate a new application:
 
 ```sh
 cargo run -p axion-cli -- new demo-app --template vanilla --path /tmp/demo-app
+cargo run -p axion-cli -- new native-demo --template native-api-demo --path /tmp/native-demo --run-check
 cd /tmp/demo-app
 cargo run -- --plan
 cargo run --features servo-runtime
@@ -66,16 +68,19 @@ cargo run --features servo-runtime
 - `crates/axion-security`: capabilities, origins, navigation, CSP
 - `crates/axion-protocol`: `axion://app` asset resolver and response policy
 - `crates/axion-packager`: build and bundle staging
-- `crates/axion-cli`: `new`, `dev`, `build`, `bundle`, `release`, `doctor`, `self-test`, `gui-smoke`
+- `crates/axion-cli`: `new`, `dev`, `build`, `bundle`, `release`, `report`, `doctor`, `self-test`, `gui-smoke`
 - `examples/`: smoke applications
 - `docs/`: public user-facing documentation
 - `servo/`: vendored engine source; do not modify for Axion framework features
+
+Each checked-in example includes a local `README.md` with its purpose, run commands, `check` command, GUI smoke command, and expected warnings.
 
 ## Documentation
 
 - Public docs: `docs/README.md`
 - Getting started: `docs/getting-started.md`
 - CLI reference: `docs/cli.md`
+- CI validation guide: `docs/ci.md`
 - Packaging guide: `docs/packaging.md`
 - Diagnostics report schema: `docs/diagnostics-report.md`
 - Manifest guide: `docs/manifest.md`
@@ -89,6 +94,12 @@ cargo run --features servo-runtime
 
 ## Development Checks
 
+Use this quick matrix to choose the right validation level:
+
+- `check`: manifest, security, self-test, bundle preflight, dev preflight, and machine-readable report output.
+- `self-test`: non-GUI runtime planning, bridge capability registration, and deterministic native backend behavior.
+- `gui-smoke`: real Servo-backed window startup plus frontend `window.__AXION_GUI_SMOKE__()` checks.
+
 ```sh
 cargo fmt --all --check
 cargo test --workspace
@@ -98,12 +109,15 @@ cargo check -p multi-window --features servo-runtime
 cargo check -p file-access-demo --features servo-runtime
 cargo check -p bridge-diagnostics-demo --features servo-runtime
 cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml
+cargo run -p axion-cli -- check --manifest-path examples/hello-axion/axion.toml --dev --bundle --json --report-path target/axion/reports/hello-check.json
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- gui-smoke --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-gui-smoke.json --timeout-ms 30000
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --json
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-bundle.json
-cargo run -p axion-cli -- release --manifest-path examples/hello-axion/axion.toml --json --report-path target/axion/reports/hello-release.json --bundle-report-path target/axion/reports/hello-bundle.json --archive --archive-path target/axion/reports/hello-bundle.tar
+cargo run -p axion-cli -- release --manifest-path examples/hello-axion/axion.toml --check-report-path target/axion/reports/hello-check.json --json --report-path target/axion/reports/hello-release.json --bundle-report-path target/axion/reports/hello-bundle.json --archive --archive-path target/axion/reports/hello-bundle.tar
+cargo run -p axion-cli -- report target/axion/reports/hello-release.json --output target/axion/reports/hello-release-summary.json
+cargo run -p axion-cli -- report target/axion/reports/hello-gui-smoke.json --allow-failed --output target/axion/reports/hello-gui-smoke-summary.json
 cargo run -p axion-cli -- doctor --manifest-path examples/file-access-demo/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/file-access-demo/axion.toml
 cargo run -p axion-cli -- gui-smoke --manifest-path examples/file-access-demo/axion.toml --report-path target/axion/reports/file-access-gui-smoke.json --timeout-ms 30000
@@ -120,4 +134,4 @@ Servo warnings from the vendored `servo/` subtree are not Axion release blockers
 
 ## Versioning
 
-Axion public releases use four-part tags such as `v0.1.18.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.18`. See `docs/versioning.md`.
+Axion public releases use four-part tags such as `v0.1.30.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.30`. See `docs/versioning.md`.

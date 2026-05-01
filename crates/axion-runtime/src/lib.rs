@@ -16,7 +16,7 @@ pub use axion_bridge::{
     WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-pub const AXION_RELEASE_VERSION: &str = "v0.1.18.0";
+pub const AXION_RELEASE_VERSION: &str = "v0.1.30.0";
 pub const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 pub trait RuntimePlugin: Send + Sync {
@@ -98,6 +98,7 @@ pub struct DiagnosticsReport {
     pub dialog_backend: Option<String>,
     pub configured_clipboard_backend: Option<String>,
     pub clipboard_backend: Option<String>,
+    pub close_timeout_ms: Option<u64>,
     pub icon: Option<std::path::PathBuf>,
     pub host_events: Vec<String>,
     pub staged_app_dir: Option<std::path::PathBuf>,
@@ -140,7 +141,7 @@ impl DiagnosticsReport {
             .unwrap_or_default();
 
         format!(
-            "{{\"schema\":{},\"source\":{},\"exported_at_unix_seconds\":{},\"manifest_path\":{},\"app_name\":{},\"identifier\":{},\"version\":{},\"description\":{},\"authors\":{},\"homepage\":{},\"mode\":{},\"window_count\":{},\"windows\":[{}],\"frontend_dist\":{},\"entry\":{},\"configured_dialog_backend\":{},\"dialog_backend\":{},\"configured_clipboard_backend\":{},\"clipboard_backend\":{},\"icon\":{},\"host_events\":{},\"staged_app_dir\":{},\"asset_manifest_path\":{},\"artifacts_removed\":{}{},\"result\":{}}}",
+            "{{\"schema\":{},\"source\":{},\"exported_at_unix_seconds\":{},\"manifest_path\":{},\"app_name\":{},\"identifier\":{},\"version\":{},\"description\":{},\"authors\":{},\"homepage\":{},\"mode\":{},\"window_count\":{},\"windows\":[{}],\"frontend_dist\":{},\"entry\":{},\"configured_dialog_backend\":{},\"dialog_backend\":{},\"configured_clipboard_backend\":{},\"clipboard_backend\":{},\"close_timeout_ms\":{},\"icon\":{},\"host_events\":{},\"staged_app_dir\":{},\"asset_manifest_path\":{},\"artifacts_removed\":{}{},\"result\":{}}}",
             json_string_literal(AXION_DIAGNOSTICS_REPORT_SCHEMA),
             json_string_literal(&self.source),
             optional_json_u64(self.exported_at_unix_seconds),
@@ -160,6 +161,7 @@ impl DiagnosticsReport {
             optional_json_string_literal(self.dialog_backend.as_deref()),
             optional_json_string_literal(self.configured_clipboard_backend.as_deref()),
             optional_json_string_literal(self.clipboard_backend.as_deref()),
+            optional_json_u64(self.close_timeout_ms),
             optional_json_path(self.icon.as_deref()),
             json_string_array_literal(&self.host_events),
             optional_json_path(self.staged_app_dir.as_deref()),
@@ -197,6 +199,9 @@ pub enum WindowLifecycleEventKind {
     Created,
     Ready,
     CloseRequested,
+    ClosePrevented,
+    CloseCompleted,
+    CloseTimedOut,
     Closed,
     Resized,
     Focused,
@@ -211,6 +216,9 @@ impl WindowLifecycleEventKind {
             Self::Created => "window.created",
             Self::Ready => "window.ready",
             Self::CloseRequested => "window.close_requested",
+            Self::ClosePrevented => "window.close_prevented",
+            Self::CloseCompleted => "window.close_completed",
+            Self::CloseTimedOut => "window.close_timed_out",
             Self::Closed => "window.closed",
             Self::Resized => "window.resized",
             Self::Focused => "window.focused",
@@ -235,6 +243,9 @@ pub fn window_lifecycle_event_names() -> Vec<String> {
         WindowLifecycleEventKind::Created,
         WindowLifecycleEventKind::Ready,
         WindowLifecycleEventKind::CloseRequested,
+        WindowLifecycleEventKind::ClosePrevented,
+        WindowLifecycleEventKind::CloseCompleted,
+        WindowLifecycleEventKind::CloseTimedOut,
         WindowLifecycleEventKind::Closed,
         WindowLifecycleEventKind::Resized,
         WindowLifecycleEventKind::Focused,
@@ -247,6 +258,14 @@ pub fn window_lifecycle_event_names() -> Vec<String> {
     .collect()
 }
 
+pub fn app_lifecycle_event_names() -> Vec<String> {
+    vec![
+        "app.exit_requested".to_owned(),
+        "app.exit_prevented".to_owned(),
+        "app.exit_completed".to_owned(),
+    ]
+}
+
 fn host_event_names(startup_events: &[BridgeEvent]) -> Vec<String> {
     let mut events = Vec::new();
     for event in startup_events {
@@ -255,6 +274,11 @@ fn host_event_names(startup_events: &[BridgeEvent]) -> Vec<String> {
         }
     }
     for event in window_lifecycle_event_names() {
+        if !events.contains(&event) {
+            events.push(event);
+        }
+    }
+    for event in app_lifecycle_event_names() {
         if !events.contains(&event) {
             events.push(event);
         }
@@ -493,7 +517,7 @@ impl ClipboardStore {
         self.text
             .lock()
             .map(|text| text.clone())
-            .map_err(|_| "clipboard state lock was poisoned".to_owned())
+            .map_err(|_| clipboard_error("state-unavailable", "clipboard state lock was poisoned"))
     }
 
     fn write_memory_text(&self, text: String) -> Result<(), String> {
@@ -502,7 +526,7 @@ impl ClipboardStore {
             .map(|mut stored| {
                 *stored = text;
             })
-            .map_err(|_| "clipboard state lock was poisoned".to_owned())
+            .map_err(|_| clipboard_error("state-unavailable", "clipboard state lock was poisoned"))
     }
 }
 
@@ -576,7 +600,9 @@ pub enum DialogRequestError {
 impl std::fmt::Display for DialogRequestError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidPayload { message } => formatter.write_str(message),
+            Self::InvalidPayload { message } => {
+                write!(formatter, "{}", dialog_error("invalid-payload", message))
+            }
         }
     }
 }
@@ -1160,7 +1186,10 @@ fn register_builtin_commands(
         let clipboard = clipboard.clone();
         builder.register_command("clipboard.write_text", move |_context, request| {
             let text = json_string_field(&request.payload, "text").ok_or_else(|| {
-                "clipboard.write_text requires a JSON string field named 'text'".to_owned()
+                clipboard_error(
+                    "invalid-payload",
+                    "clipboard.write_text requires a JSON string field named 'text'",
+                )
             })?;
             let response = clipboard.write_text(text)?;
             Ok(format!(
@@ -1264,8 +1293,10 @@ fn register_builtin_commands(
             async move {
                 let request_id =
                     json_string_field(&request.payload, "requestId").ok_or_else(|| {
-                        "window.confirm_close requires a JSON string field named 'requestId'"
-                            .to_owned()
+                        window_error(
+                            "invalid-payload",
+                            "window.confirm_close requires a JSON string field named 'requestId'",
+                        )
                     })?;
                 execute_window_control_json(
                     &window_control,
@@ -1286,8 +1317,10 @@ fn register_builtin_commands(
             async move {
                 let request_id =
                     json_string_field(&request.payload, "requestId").ok_or_else(|| {
-                        "window.prevent_close requires a JSON string field named 'requestId'"
-                            .to_owned()
+                        window_error(
+                            "invalid-payload",
+                            "window.prevent_close requires a JSON string field named 'requestId'",
+                        )
                     })?;
                 execute_window_control_json(
                     &window_control,
@@ -1344,7 +1377,10 @@ fn register_builtin_commands(
             async move {
                 let target_window_id = json_string_field(&request.payload, "target");
                 let title = json_string_field(&request.payload, "title").ok_or_else(|| {
-                    "window.set_title requires a JSON string field named 'title'".to_owned()
+                    window_error(
+                        "invalid-payload",
+                        "window.set_title requires a JSON string field named 'title'",
+                    )
                 })?;
                 execute_window_control_json(
                     &window_control,
@@ -1365,13 +1401,22 @@ fn register_builtin_commands(
             async move {
                 let target_window_id = json_string_field(&request.payload, "target");
                 let width = json_u32_field(&request.payload, "width").ok_or_else(|| {
-                    "window.set_size requires a JSON number field named 'width'".to_owned()
+                    window_error(
+                        "invalid-payload",
+                        "window.set_size requires a JSON number field named 'width'",
+                    )
                 })?;
                 let height = json_u32_field(&request.payload, "height").ok_or_else(|| {
-                    "window.set_size requires a JSON number field named 'height'".to_owned()
+                    window_error(
+                        "invalid-payload",
+                        "window.set_size requires a JSON number field named 'height'",
+                    )
                 })?;
                 if width == 0 || height == 0 {
-                    return Err("window.set_size requires non-zero width and height".to_owned());
+                    return Err(window_error(
+                        "invalid-size",
+                        "window.set_size requires non-zero width and height",
+                    ));
                 }
                 execute_window_control_json(
                     &window_control,
@@ -1389,11 +1434,20 @@ fn register_builtin_commands(
         let app_data_dir = app_data_dir.clone();
         builder.register_command("fs.read_text", move |_context, request| {
             let relative_path = json_string_field(&request.payload, "path").ok_or_else(|| {
-                "fs.read_text requires a JSON string field named 'path'".to_owned()
+                fs_error(
+                    "invalid-payload",
+                    "fs.read_text requires a JSON string field named 'path'",
+                )
             })?;
             let path = resolve_app_data_path(&app_data_dir, &relative_path, false)?;
+            let metadata = path
+                .metadata()
+                .map_err(|error| fs_io_error("read app data file", &error))?;
+            if metadata.is_dir() {
+                return Err(fs_error("is-directory", "fs.read_text path must be a file"));
+            }
             let contents = std::fs::read_to_string(&path)
-                .map_err(|error| format!("failed to read app data file: {error}"))?;
+                .map_err(|error| fs_io_error("read app data file", &error))?;
             Ok(format!(
                 "{{\"path\":{},\"contents\":{}}}",
                 json_string_literal(&relative_path),
@@ -1409,18 +1463,164 @@ fn register_builtin_commands(
         let app_data_dir = app_data_dir.clone();
         builder.register_command("fs.write_text", move |_context, request| {
             let relative_path = json_string_field(&request.payload, "path").ok_or_else(|| {
-                "fs.write_text requires a JSON string field named 'path'".to_owned()
+                fs_error(
+                    "invalid-payload",
+                    "fs.write_text requires a JSON string field named 'path'",
+                )
             })?;
             let contents = json_string_field(&request.payload, "contents").ok_or_else(|| {
-                "fs.write_text requires a JSON string field named 'contents'".to_owned()
+                fs_error(
+                    "invalid-payload",
+                    "fs.write_text requires a JSON string field named 'contents'",
+                )
             })?;
             let path = resolve_app_data_path(&app_data_dir, &relative_path, true)?;
+            if path
+                .metadata()
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false)
+            {
+                return Err(fs_error(
+                    "is-directory",
+                    "fs.write_text path must be a file",
+                ));
+            }
             std::fs::write(&path, &contents)
-                .map_err(|error| format!("failed to write app data file: {error}"))?;
+                .map_err(|error| fs_io_error("write app data file", &error))?;
             Ok(format!(
                 "{{\"path\":{},\"bytes\":{}}}",
                 json_string_literal(&relative_path),
                 contents.len(),
+            ))
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "fs.exists")
+    {
+        let app_data_dir = app_data_dir.clone();
+        builder.register_command("fs.exists", move |_context, request| {
+            let relative_path = json_string_field(&request.payload, "path").ok_or_else(|| {
+                fs_error(
+                    "invalid-payload",
+                    "fs.exists requires a JSON string field named 'path'",
+                )
+            })?;
+            let exists = app_data_path_exists(&app_data_dir, &relative_path)?;
+            Ok(format!(
+                "{{\"path\":{},\"exists\":{exists}}}",
+                json_string_literal(&relative_path),
+            ))
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "fs.create_dir")
+    {
+        let app_data_dir = app_data_dir.clone();
+        builder.register_command("fs.create_dir", move |_context, request| {
+            let relative_path = json_string_field(&request.payload, "path").ok_or_else(|| {
+                fs_error(
+                    "invalid-payload",
+                    "fs.create_dir requires a JSON string field named 'path'",
+                )
+            })?;
+            let path = resolve_app_data_path(&app_data_dir, &relative_path, true)?;
+            if path
+                .symlink_metadata()
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                return Err(fs_error(
+                    "symlink-rejected",
+                    "app data path must not be a symlink",
+                ));
+            }
+            std::fs::create_dir_all(&path)
+                .map_err(|error| fs_io_error("create app data directory", &error))?;
+            Ok(format!(
+                "{{\"path\":{},\"created\":true}}",
+                json_string_literal(&relative_path),
+            ))
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "fs.list_dir")
+    {
+        let app_data_dir = app_data_dir.clone();
+        builder.register_command("fs.list_dir", move |_context, request| {
+            let relative_path = json_string_field(&request.payload, "path").ok_or_else(|| {
+                fs_error(
+                    "invalid-payload",
+                    "fs.list_dir requires a JSON string field named 'path'",
+                )
+            })?;
+            let path = resolve_app_data_path(&app_data_dir, &relative_path, false)?;
+            let metadata = path
+                .metadata()
+                .map_err(|error| fs_io_error("inspect app data directory", &error))?;
+            if !metadata.is_dir() {
+                return Err(fs_error(
+                    "not-directory",
+                    "fs.list_dir path must be a directory",
+                ));
+            }
+            let mut entries = std::fs::read_dir(&path)
+                .map_err(|error| fs_io_error("list app data directory", &error))?
+                .map(|entry| {
+                    entry
+                        .map_err(|error| fs_io_error("read app data directory entry", &error))
+                        .and_then(|entry| app_data_dir_entry_json(&relative_path, entry))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            entries.sort();
+            Ok(format!(
+                "{{\"path\":{},\"entries\":[{}]}}",
+                json_string_literal(&relative_path),
+                entries.join(","),
+            ))
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "fs.remove")
+    {
+        let app_data_dir = app_data_dir.clone();
+        builder.register_command("fs.remove", move |_context, request| {
+            let relative_path = json_string_field(&request.payload, "path").ok_or_else(|| {
+                fs_error(
+                    "invalid-payload",
+                    "fs.remove requires a JSON string field named 'path'",
+                )
+            })?;
+            let recursive = json_bool_field(&request.payload, "recursive").unwrap_or(false);
+            let path = resolve_app_data_path(&app_data_dir, &relative_path, false)?;
+            let metadata = path
+                .metadata()
+                .map_err(|error| fs_io_error("inspect app data path", &error))?;
+            let kind = if metadata.is_dir() {
+                if recursive {
+                    std::fs::remove_dir_all(&path)
+                        .map_err(|error| fs_io_error("remove app data directory", &error))?;
+                } else {
+                    std::fs::remove_dir(&path)
+                        .map_err(|error| fs_io_error("remove app data directory", &error))?;
+                }
+                "directory"
+            } else {
+                std::fs::remove_file(&path)
+                    .map_err(|error| fs_io_error("remove app data file", &error))?;
+                "file"
+            };
+            Ok(format!(
+                "{{\"path\":{},\"removed\":true,\"kind\":{}}}",
+                json_string_literal(&relative_path),
+                json_string_literal(kind),
             ))
         });
     }
@@ -1698,10 +1898,14 @@ fn execute_window_control_json(
     target_window_id: Option<&str>,
     request: WindowControlRequest,
 ) -> Result<String, String> {
-    match window_control.execute(target_window_id, request)? {
-        WindowControlResponse::AppExit { .. } => {
-            Err("window control backend returned an unexpected app exit response".to_owned())
-        }
+    match window_control
+        .execute(target_window_id, request)
+        .map_err(|error| window_error("control-failed", &error))?
+    {
+        WindowControlResponse::AppExit { .. } => Err(window_error(
+            "unexpected-response",
+            "window control backend returned an unexpected app exit response",
+        )),
         WindowControlResponse::CloseRequested { request_id, window } => Ok(format!(
             "{{\"pending\":true,\"requestId\":{},\"window\":{}}}",
             json_string_literal(&request_id),
@@ -1721,19 +1925,25 @@ fn execute_window_control_json(
 }
 
 fn execute_app_exit_json(window_control: &WindowControlHandle) -> Result<String, String> {
-    match window_control.execute(None, WindowControlRequest::ExitApp)? {
+    match window_control
+        .execute(None, WindowControlRequest::ExitApp)
+        .map_err(|error| app_error("exit-failed", &error))?
+    {
         WindowControlResponse::AppExit {
+            request_id,
             window_count,
             request_count,
         } => Ok(format!(
-            "{{\"pending\":true,\"windowCount\":{window_count},\"requestCount\":{request_count}}}"
+            "{{\"pending\":true,\"requestId\":{},\"windowCount\":{window_count},\"requestCount\":{request_count}}}",
+            json_string_literal(&request_id)
         )),
         WindowControlResponse::CloseRequested { .. }
         | WindowControlResponse::ClosePrevented { .. }
         | WindowControlResponse::State(_)
-        | WindowControlResponse::List(_) => {
-            Err("window control backend returned an unexpected non-exit response".to_owned())
-        }
+        | WindowControlResponse::List(_) => Err(app_error(
+            "unexpected-response",
+            "window control backend returned an unexpected non-exit response",
+        )),
     }
 }
 
@@ -1744,14 +1954,18 @@ fn current_window_state(
 ) -> Result<WindowStateSnapshot, String> {
     match window_control.execute(target_window_id, WindowControlRequest::GetState) {
         Ok(WindowControlResponse::State(state)) => Ok(state),
-        Ok(WindowControlResponse::List(_)) => {
-            Err("window control backend returned an unexpected list response".to_owned())
-        }
+        Ok(WindowControlResponse::List(_)) => Err(window_error(
+            "unexpected-response",
+            "window control backend returned an unexpected list response",
+        )),
         Ok(
             WindowControlResponse::AppExit { .. }
             | WindowControlResponse::CloseRequested { .. }
             | WindowControlResponse::ClosePrevented { .. },
-        ) => Err("window control backend returned an unexpected app exit response".to_owned()),
+        ) => Err(window_error(
+            "unexpected-response",
+            "window control backend returned an unexpected app exit response",
+        )),
         Err(_) if target_window_id.is_none_or(|target| target == context.window.id) => {
             Ok(WindowStateSnapshot {
                 id: context.window.id.clone(),
@@ -1763,7 +1977,7 @@ fn current_window_state(
                 focused: false,
             })
         }
-        Err(error) => Err(error),
+        Err(error) => Err(window_error("control-failed", &error)),
     }
 }
 
@@ -2086,7 +2300,11 @@ mod tests {
                         "app.version".to_owned(),
                         "clipboard.read_text".to_owned(),
                         "clipboard.write_text".to_owned(),
+                        "fs.create_dir".to_owned(),
+                        "fs.exists".to_owned(),
+                        "fs.list_dir".to_owned(),
                         "fs.read_text".to_owned(),
+                        "fs.remove".to_owned(),
                         "fs.write_text".to_owned(),
                         "dialog.open".to_owned(),
                         "dialog.save".to_owned(),
@@ -2177,6 +2395,7 @@ mod tests {
             }
             if matches!(request, WindowControlRequest::ExitApp) {
                 return Ok(WindowControlResponse::AppExit {
+                    request_id: "test-exit".to_owned(),
                     window_count: 2,
                     request_count: 2,
                 });
@@ -2541,7 +2760,11 @@ mod tests {
                 "clipboard.write_text".to_owned(),
                 "dialog.open".to_owned(),
                 "dialog.save".to_owned(),
+                "fs.create_dir".to_owned(),
+                "fs.exists".to_owned(),
+                "fs.list_dir".to_owned(),
                 "fs.read_text".to_owned(),
+                "fs.remove".to_owned(),
                 "fs.write_text".to_owned(),
             ]
         );
@@ -2552,7 +2775,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.18.0\""));
+        assert!(version.contains("\"release\":\"v0.1.30.0\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
@@ -2595,7 +2818,32 @@ mod tests {
         ))
         .expect_err("dialog.save should reject multiple=true");
 
+        assert!(format!("{error:?}").contains("dialog.invalid-payload"));
         assert!(format!("{error:?}").contains("does not support 'multiple=true'"));
+    }
+
+    #[test]
+    fn builtin_native_commands_report_stable_non_fs_error_codes() {
+        let request = launch_request(&app_with_native_commands(), axion_core::RunMode::Production)
+            .expect("launch request should build");
+        let binding = request
+            .window_bindings
+            .first()
+            .expect("main window binding should exist");
+
+        let clipboard_error = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("clipboard.write_text", "{}"),
+        ))
+        .expect_err("clipboard.write_text should reject missing text");
+        assert!(format!("{clipboard_error:?}").contains("clipboard.invalid-payload"));
+
+        let dialog_error = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("dialog.open", "{\"filters\":\"bad\"}"),
+        ))
+        .expect_err("dialog.open should reject invalid filters");
+        assert!(format!("{dialog_error:?}").contains("dialog.invalid-payload"));
     }
 
     #[test]
@@ -2642,6 +2890,7 @@ mod tests {
             dialog_backend: Some("headless".to_owned()),
             configured_clipboard_backend: Some("memory".to_owned()),
             clipboard_backend: Some("memory".to_owned()),
+            close_timeout_ms: Some(3000),
             icon: None,
             host_events: vec!["app.ready".to_owned()],
             staged_app_dir: Some(std::path::PathBuf::from("target/axion/app")),
@@ -2655,6 +2904,7 @@ mod tests {
         assert!(json.contains("\"schema\":\"axion.diagnostics-report.v1\""));
         assert!(json.contains("\"source\":\"unit-test\""));
         assert!(json.contains("\"manifest_path\":\"axion.toml\""));
+        assert!(json.contains("\"close_timeout_ms\":3000"));
         assert!(json.contains("\"configured_profiles\":[\"app-info\"]"));
         assert!(json.contains("\"configured_commands\":[\"app.ping\"]"));
         assert!(json.contains("\"artifacts_removed\":true"));
@@ -2669,23 +2919,101 @@ mod tests {
             .window_bindings
             .first()
             .expect("main window binding should exist");
+        let suite_dir = format!(
+            "notes/fs-suite-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        );
+        let suite_file = format!("{suite_dir}/hello.txt");
+
+        let create_dir = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.create_dir",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_dir)),
+            ),
+        ))
+        .expect("fs.create_dir should dispatch");
+        assert!(create_dir.contains("\"created\":true"));
 
         let write = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
             &BridgeRequest::new(
                 "fs.write_text",
-                "{\"path\":\"notes/hello.txt\",\"contents\":\"hello from axion\"}",
+                format!(
+                    "{{\"path\":{},\"contents\":\"hello from axion\"}}",
+                    super::json_string_literal(&suite_file)
+                ),
             ),
         ))
         .expect("fs.write_text should dispatch");
         assert!(write.contains("\"bytes\":16"));
 
+        let exists = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.exists",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_file)),
+            ),
+        ))
+        .expect("fs.exists should dispatch");
+        assert!(exists.contains("\"exists\":true"));
+
         let read = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
-            &BridgeRequest::new("fs.read_text", "{\"path\":\"notes/hello.txt\"}"),
+            &BridgeRequest::new(
+                "fs.read_text",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_file)),
+            ),
         ))
         .expect("fs.read_text should dispatch");
         assert!(read.contains("\"contents\":\"hello from axion\""));
+
+        let list = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.list_dir",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_dir)),
+            ),
+        ))
+        .expect("fs.list_dir should dispatch");
+        assert!(list.contains("\"name\":\"hello.txt\""));
+        assert!(list.contains("\"kind\":\"file\""));
+
+        let remove = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.remove",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_file)),
+            ),
+        ))
+        .expect("fs.remove should dispatch");
+        assert!(remove.contains("\"removed\":true"));
+        assert!(remove.contains("\"kind\":\"file\""));
+
+        let missing = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.exists",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_file)),
+            ),
+        ))
+        .expect("fs.exists should dispatch");
+        assert!(missing.contains("\"exists\":false"));
+
+        let _ = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.remove",
+                format!(
+                    "{{\"path\":{},\"recursive\":true}}",
+                    super::json_string_literal(&suite_dir)
+                ),
+            ),
+        ));
     }
 
     #[test]
@@ -2706,7 +3034,162 @@ mod tests {
         ))
         .expect_err("path escape should be rejected");
 
+        assert!(format!("{error:?}").contains("fs.invalid-path"));
         assert!(format!("{error:?}").contains("parent or root components"));
+    }
+
+    #[test]
+    fn builtin_fs_commands_report_stable_error_codes() {
+        let request = launch_request(&app_with_native_commands(), axion_core::RunMode::Production)
+            .expect("launch request should build");
+        let binding = request
+            .window_bindings
+            .first()
+            .expect("main window binding should exist");
+        let suite_dir = format!(
+            "notes/fs-errors-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        );
+        let suite_file = format!("{suite_dir}/hello.txt");
+
+        let missing = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.read_text",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_file)),
+            ),
+        ))
+        .expect_err("missing file should be rejected");
+        assert!(format!("{missing:?}").contains("fs.not-found"));
+
+        block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.create_dir",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_dir)),
+            ),
+        ))
+        .expect("test directory should be created");
+
+        let read_dir = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.read_text",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_dir)),
+            ),
+        ))
+        .expect_err("read_text should reject directories");
+        assert!(format!("{read_dir:?}").contains("fs.is-directory"));
+
+        block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.write_text",
+                format!(
+                    "{{\"path\":{},\"contents\":\"hello\"}}",
+                    super::json_string_literal(&suite_file)
+                ),
+            ),
+        ))
+        .expect("test file should be written");
+
+        let list_file = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.list_dir",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_file)),
+            ),
+        ))
+        .expect_err("list_dir should reject files");
+        assert!(format!("{list_file:?}").contains("fs.not-directory"));
+
+        let remove_non_empty = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.remove",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_dir)),
+            ),
+        ))
+        .expect_err("non-empty directory removal should require recursive=true");
+        assert!(format!("{remove_non_empty:?}").contains("fs.directory-not-empty"));
+
+        let _ = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.remove",
+                format!(
+                    "{{\"path\":{},\"recursive\":true}}",
+                    super::json_string_literal(&suite_dir)
+                ),
+            ),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builtin_fs_commands_reject_symlinks() {
+        let request = launch_request(&app_with_native_commands(), axion_core::RunMode::Production)
+            .expect("launch request should build");
+        let binding = request
+            .window_bindings
+            .first()
+            .expect("main window binding should exist");
+        let suite_dir = format!(
+            "notes/fs-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        );
+
+        block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.create_dir",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_dir)),
+            ),
+        ))
+        .expect("test directory should be created");
+
+        let app_data = request
+            .frontend_dist
+            .parent()
+            .unwrap_or(&request.frontend_dist)
+            .join("target")
+            .join("axion-data")
+            .join("axion-runtime-test");
+        let symlink_path = app_data.join(&suite_dir).join("link.txt");
+        std::os::unix::fs::symlink("/tmp", &symlink_path).expect("test symlink should be created");
+        let relative_symlink = format!("{suite_dir}/link.txt");
+        let error = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.exists",
+                format!(
+                    "{{\"path\":{}}}",
+                    super::json_string_literal(&relative_symlink)
+                ),
+            ),
+        ))
+        .expect_err("symlinks should be rejected");
+
+        assert!(format!("{error:?}").contains("fs.symlink-rejected"));
+
+        let _ = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.remove",
+                format!(
+                    "{{\"path\":{},\"recursive\":true}}",
+                    super::json_string_literal(&suite_dir)
+                ),
+            ),
+        ));
     }
 
     #[test]
@@ -2738,12 +3221,18 @@ mod tests {
                 "window.created".to_owned(),
                 "window.ready".to_owned(),
                 "window.close_requested".to_owned(),
+                "window.close_prevented".to_owned(),
+                "window.close_completed".to_owned(),
+                "window.close_timed_out".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
                 "window.focused".to_owned(),
                 "window.blurred".to_owned(),
                 "window.moved".to_owned(),
                 "window.redraw_failed".to_owned(),
+                "app.exit_requested".to_owned(),
+                "app.exit_prevented".to_owned(),
+                "app.exit_completed".to_owned(),
             ]
         );
         assert_eq!(settings.startup_event_count, 3);
@@ -2753,6 +3242,9 @@ mod tests {
                 "window.created".to_owned(),
                 "window.ready".to_owned(),
                 "window.close_requested".to_owned(),
+                "window.close_prevented".to_owned(),
+                "window.close_completed".to_owned(),
+                "window.close_timed_out".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
                 "window.focused".to_owned(),
@@ -2817,12 +3309,18 @@ mod tests {
                 "plugin.ready".to_owned(),
                 "window.ready".to_owned(),
                 "window.close_requested".to_owned(),
+                "window.close_prevented".to_owned(),
+                "window.close_completed".to_owned(),
+                "window.close_timed_out".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
                 "window.focused".to_owned(),
                 "window.blurred".to_owned(),
                 "window.moved".to_owned(),
                 "window.redraw_failed".to_owned(),
+                "app.exit_requested".to_owned(),
+                "app.exit_prevented".to_owned(),
+                "app.exit_completed".to_owned(),
             ]
         );
     }
@@ -2992,7 +3490,7 @@ mod tests {
         .expect("app.exit should dispatch");
         assert_eq!(
             exit,
-            "{\"pending\":true,\"windowCount\":2,\"requestCount\":2}"
+            "{\"pending\":true,\"requestId\":\"test-exit\",\"windowCount\":2,\"requestCount\":2}"
         );
 
         let prevented = block_on(binding.bridge_bindings.command_registry.dispatch(
@@ -3017,8 +3515,22 @@ mod tests {
         assert!(matches!(
             missing,
             axion_bridge::CommandDispatchError::Handler(message)
-                if message.contains("unavailable")
+                if message.contains("window.control-failed") && message.contains("unavailable")
         ));
+
+        let invalid_title = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("window.set_title", "{}"),
+        ))
+        .expect_err("window.set_title should require title");
+        assert!(format!("{invalid_title:?}").contains("window.invalid-payload"));
+
+        let invalid_size = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("window.set_size", "{\"width\":0,\"height\":480}"),
+        ))
+        .expect_err("window.set_size should reject zero width");
+        assert!(format!("{invalid_size:?}").contains("window.invalid-size"));
     }
 
     #[test]
@@ -3077,12 +3589,27 @@ mod tests {
                 "window.created".to_owned(),
                 "window.ready".to_owned(),
                 "window.close_requested".to_owned(),
+                "window.close_prevented".to_owned(),
+                "window.close_completed".to_owned(),
+                "window.close_timed_out".to_owned(),
                 "window.closed".to_owned(),
                 "window.resized".to_owned(),
                 "window.focused".to_owned(),
                 "window.blurred".to_owned(),
                 "window.moved".to_owned(),
                 "window.redraw_failed".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn app_lifecycle_event_names_are_stable() {
+        assert_eq!(
+            super::app_lifecycle_event_names(),
+            vec![
+                "app.exit_requested".to_owned(),
+                "app.exit_prevented".to_owned(),
+                "app.exit_completed".to_owned(),
             ]
         );
     }
@@ -3430,35 +3957,28 @@ fn resolve_app_data_path(
     relative_path: &str,
     create_parent: bool,
 ) -> Result<std::path::PathBuf, String> {
-    let relative = std::path::Path::new(relative_path);
-    if relative_path.trim().is_empty() || relative.is_absolute() {
-        return Err("app data path must be a non-empty relative path".to_owned());
-    }
-
-    for component in relative.components() {
-        if !matches!(component, std::path::Component::Normal(_)) {
-            return Err("app data path must not contain parent or root components".to_owned());
-        }
-    }
-
+    let relative = validate_app_data_relative_path(relative_path)?;
     if create_parent {
         std::fs::create_dir_all(app_data_dir)
-            .map_err(|error| format!("failed to create app data directory: {error}"))?;
+            .map_err(|error| fs_io_error("create app data directory", &error))?;
     }
     let canonical_base = app_data_dir
         .canonicalize()
-        .map_err(|error| format!("failed to access app data directory: {error}"))?;
+        .map_err(|error| fs_io_error("access app data directory", &error))?;
     let path = app_data_dir.join(relative);
 
     if create_parent {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create app data parent directory: {error}"))?;
+                .map_err(|error| fs_io_error("create app data parent directory", &error))?;
             let canonical_parent = parent
                 .canonicalize()
-                .map_err(|error| format!("failed to access app data parent directory: {error}"))?;
+                .map_err(|error| fs_io_error("access app data parent directory", &error))?;
             if !canonical_parent.starts_with(&canonical_base) {
-                return Err("app data path escapes the app data directory".to_owned());
+                return Err(fs_error(
+                    "path-escape",
+                    "app data path escapes the app data directory",
+                ));
             }
         }
     }
@@ -3468,17 +3988,145 @@ fn resolve_app_data_path(
         .map(|metadata| metadata.file_type().is_symlink())
         .unwrap_or(false)
     {
-        return Err("app data path must not be a symlink".to_owned());
+        return Err(fs_error(
+            "symlink-rejected",
+            "app data path must not be a symlink",
+        ));
     }
 
     if !create_parent {
         let canonical_path = path
             .canonicalize()
-            .map_err(|error| format!("failed to access app data file: {error}"))?;
+            .map_err(|error| fs_io_error("access app data path", &error))?;
         if !canonical_path.starts_with(&canonical_base) {
-            return Err("app data path escapes the app data directory".to_owned());
+            return Err(fs_error(
+                "path-escape",
+                "app data path escapes the app data directory",
+            ));
         }
     }
 
     Ok(path)
+}
+
+fn validate_app_data_relative_path(relative_path: &str) -> Result<&std::path::Path, String> {
+    let relative = std::path::Path::new(relative_path);
+    if relative_path.trim().is_empty() || relative.is_absolute() {
+        return Err(fs_error(
+            "invalid-path",
+            "app data path must be a non-empty relative path",
+        ));
+    }
+
+    for component in relative.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err(fs_error(
+                "invalid-path",
+                "app data path must not contain parent or root components",
+            ));
+        }
+    }
+
+    Ok(relative)
+}
+
+fn app_data_path_exists(
+    app_data_dir: &std::path::Path,
+    relative_path: &str,
+) -> Result<bool, String> {
+    let relative = validate_app_data_relative_path(relative_path)?;
+    if !app_data_dir.exists() {
+        return Ok(false);
+    }
+
+    let canonical_base = app_data_dir
+        .canonicalize()
+        .map_err(|error| fs_io_error("access app data directory", &error))?;
+    let path = app_data_dir.join(relative);
+    if path
+        .symlink_metadata()
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(fs_error(
+            "symlink-rejected",
+            "app data path must not be a symlink",
+        ));
+    }
+
+    let Some(canonical_path) = path.canonicalize().ok() else {
+        return Ok(false);
+    };
+    if !canonical_path.starts_with(&canonical_base) {
+        return Err(fs_error(
+            "path-escape",
+            "app data path escapes the app data directory",
+        ));
+    }
+
+    Ok(true)
+}
+
+fn app_data_dir_entry_json(relative_dir: &str, entry: std::fs::DirEntry) -> Result<String, String> {
+    let name = entry.file_name().to_string_lossy().into_owned();
+    let metadata = std::fs::symlink_metadata(entry.path())
+        .map_err(|error| fs_io_error("inspect app data directory entry", &error))?;
+    let file_type = metadata.file_type();
+    let kind = if file_type.is_symlink() {
+        "symlink"
+    } else if metadata.is_dir() {
+        "directory"
+    } else if metadata.is_file() {
+        "file"
+    } else {
+        "other"
+    };
+    let entry_path = if relative_dir == "." {
+        name.clone()
+    } else {
+        format!("{}/{}", relative_dir.trim_end_matches('/'), name)
+    };
+
+    Ok(format!(
+        "{{\"name\":{},\"path\":{},\"kind\":{},\"bytes\":{}}}",
+        json_string_literal(&name),
+        json_string_literal(&entry_path),
+        json_string_literal(kind),
+        if metadata.is_file() {
+            metadata.len().to_string()
+        } else {
+            "null".to_owned()
+        },
+    ))
+}
+
+fn app_error(code: &str, message: &str) -> String {
+    format!("app.{code}: {message}")
+}
+
+fn clipboard_error(code: &str, message: &str) -> String {
+    format!("clipboard.{code}: {message}")
+}
+
+fn dialog_error(code: &str, message: &str) -> String {
+    format!("dialog.{code}: {message}")
+}
+
+fn fs_error(code: &str, message: &str) -> String {
+    format!("fs.{code}: {message}")
+}
+
+fn fs_io_error(operation: &str, error: &std::io::Error) -> String {
+    let code = match error.kind() {
+        std::io::ErrorKind::NotFound => "not-found",
+        std::io::ErrorKind::PermissionDenied => "permission-denied",
+        std::io::ErrorKind::AlreadyExists => "already-exists",
+        std::io::ErrorKind::DirectoryNotEmpty => "directory-not-empty",
+        _ => "io-error",
+    };
+    fs_error(code, &format!("failed to {operation}: {error}"))
+}
+
+fn window_error(code: &str, message: &str) -> String {
+    format!("window.{code}: {message}")
 }

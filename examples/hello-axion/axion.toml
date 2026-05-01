@@ -36,5 +36,5 @@ close_timeout_ms = 3000
 [capabilities.main]
 profiles = ["app-info", "app-control", "window-control", "clipboard-access", "file-access", "dialog-access", "app-events"]
 commands = ["demo.greet"]
-allowed_navigation_origins = ["https://docs.example"]
+allowed_navigation_origins = []
 allow_remote_navigation = false
