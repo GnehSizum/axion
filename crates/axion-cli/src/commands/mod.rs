@@ -5,6 +5,7 @@ pub mod dev;
 pub mod doctor;
 pub mod gui_smoke;
 pub mod release;
+pub mod report;
 pub mod self_test;
 
 use std::path::{Path, PathBuf};
@@ -105,13 +106,20 @@ impl NewProject {
         vec![
             format!("cd {}", self.root.display()),
             "cargo run -- --plan".to_owned(),
-            format!(
-                "cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle --json --report-path target/axion/reports/check.json"
-            ),
-            format!(
-                "cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest} --launch --fallback-packaged --watch --reload --restart-on-change --event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json"
-            ),
             "cargo run --features servo-runtime".to_owned(),
+            format!(
+                "from Axion checkout: cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle --json --report-path target/axion/reports/check.json"
+            ),
+            format!(
+                "from Axion checkout: cargo run -p axion-cli -- gui-smoke --manifest-path {manifest} --report-path target/axion/reports/gui-smoke.json --timeout-ms 30000 --cargo-target-dir target --serial-build"
+            ),
+            format!(
+                "from Axion checkout: cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest} --launch --fallback-packaged --watch --reload --restart-on-change --event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json"
+            ),
+            format!(
+                "from Axion checkout: cargo run -p axion-cli -- release --manifest-path {manifest} --check-report-path target/axion/reports/check.json --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar"
+            ),
+            "from Axion checkout: cargo run -p axion-cli -- report target/axion/reports/release.json".to_owned(),
         ]
     }
 
@@ -234,7 +242,8 @@ The custom `demo.greet` command is explicit because it is app-specific. Inspect 
 ```sh
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable --json --report-path target/axion/reports/bundle.json
-cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
+cargo run -p axion-cli -- release --manifest-path {manifest} --check-report-path target/axion/reports/check.json --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
+cargo run -p axion-cli -- report target/axion/reports/release.json
 ```
 
 Expected output includes `target`, `layout`, `bundle_dir`, `bundle_manifest`, `platform_metadata`, `verification: ok`, `checked_files`, `fingerprinted_files`, and `bundle_bytes`. JSON output uses `axion.bundle-report.v1` for scripted release checks and can be written with `--report-path`. Release JSON uses `axion.release-report.v1` and includes `artifacts[]`, `failure_phase`, `failed_reasons`, and archive verification details.
@@ -246,7 +255,8 @@ Use `target/axion/reports/` as the local and CI report directory. Start with `ch
 ```sh
 cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle --json --report-path target/axion/reports/check.json
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable --json --report-path target/axion/reports/bundle.json
-cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
+cargo run -p axion-cli -- release --manifest-path {manifest} --check-report-path target/axion/reports/check.json --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
+cargo run -p axion-cli -- report target/axion/reports/release.json
 ```
 
 ## Runtime Artifacts
@@ -266,13 +276,14 @@ The generated frontend includes a small text input and textarea wired to `window
 Run these commands from the Axion repository root so `gui-smoke` can reuse the checkout build cache through `--cargo-target-dir target`:
 
 ```sh
-cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle --report-path target/axion/reports/check.json
+cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle --json --report-path target/axion/reports/check.json
 cargo run -p axion-cli -- doctor --manifest-path {manifest} --deny-warnings --max-risk medium
 cargo run -p axion-cli -- self-test --manifest-path {manifest}
 cargo run -p axion-cli -- gui-smoke --manifest-path {manifest} --report-path target/axion/reports/gui-smoke.json --timeout-ms 30000 --cargo-target-dir target --serial-build
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable --json --report-path target/axion/reports/bundle.json
-cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
+cargo run -p axion-cli -- release --manifest-path {manifest} --check-report-path target/axion/reports/check.json --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
+cargo run -p axion-cli -- report target/axion/reports/release.json
 ```
 
 ## Project Layout
@@ -299,7 +310,7 @@ cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-pat
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.1.27\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.1.28\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root
@@ -1318,7 +1329,7 @@ mod tests {
         assert!(project.app_js().contains("dialog.open"));
         assert!(project.app_js().contains("fs.write_text"));
         assert!(project.style_css().contains("button:disabled"));
-        assert!(project.cargo_toml().contains("version = \"0.1.27\""));
+        assert!(project.cargo_toml().contains("version = \"0.1.28\""));
     }
 
     #[test]
@@ -1388,9 +1399,18 @@ mod tests {
 
         let next_steps = project.next_steps();
         assert!(next_steps.iter().any(|step| step
-            == "cargo run -p axion-cli -- check --manifest-path /tmp/hello-axion/axion.toml --dev --bundle --json --report-path target/axion/reports/check.json"));
+            == "from Axion checkout: cargo run -p axion-cli -- check --manifest-path /tmp/hello-axion/axion.toml --dev --bundle --json --report-path target/axion/reports/check.json"));
+        assert!(
+            next_steps
+                .iter()
+                .any(|step| step
+                    .contains("from Axion checkout: cargo run -p axion-cli -- gui-smoke"))
+        );
         assert!(next_steps.iter().any(|step| step.contains(
             "--event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json"
+        )));
+        assert!(next_steps.iter().any(|step| step.contains(
+            "from Axion checkout: cargo run -p axion-cli -- release"
         )));
     }
 

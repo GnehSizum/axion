@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.1.28.0 - Preview
+
+Axion v0.1.28.0 improves the development validation loop on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.28`.
+- Axion public release metadata is `v0.1.28.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added ordered `next_steps` to `axion check --json` while preserving the existing `next_step` field.
+- Added `failure_phase` and typed required/optional `next_actions` to `axion check --json` for CI routing.
+- Added `axion report` to summarize existing check, release, bundle, and GUI diagnostics reports.
+- Added `release --check-report-path` to reuse a matching successful check report for doctor, readiness, and self-test state.
+- Added more specific `check` remediation guidance for doctor failures, readiness blockers, bundle preflight errors, dev preflight blockers, GUI smoke setup, and release artifacts.
+- Added GUI smoke failure diagnostics with `next_step`, `failed_check_ids`, and `error_codes` fields in CLI-generated failure reports.
+- Added GUI smoke summaries that include failed check ids and extracted error codes.
+
+### Changed
+
+- Generated app Cargo versions now use `0.1.28`.
+- Generated app README and next steps now separate app-local commands from Axion-checkout validation commands and include GUI smoke plus release report commands.
+- Updated public docs and release metadata for v0.1.28.0.
+
 ## v0.1.27.0 - Preview
 
 Axion v0.1.27.0 formalizes bridge error envelopes and Native API error diagnostics on the current Servo `0.1` baseline.

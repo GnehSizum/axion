@@ -18,6 +18,7 @@ pub enum Command {
     Doctor(DoctorArgs),
     GuiSmoke(GuiSmokeArgs),
     New(NewArgs),
+    Report(ReportArgs),
     Release(ReleaseArgs),
     SelfTest(SelfTestArgs),
 }
@@ -212,6 +213,9 @@ pub struct ReleaseArgs {
     #[arg(long)]
     pub bundle_report_path: Option<PathBuf>,
 
+    #[arg(long)]
+    pub check_report_path: Option<PathBuf>,
+
     #[arg(long, value_enum, default_value_t = DoctorRisk::Medium)]
     pub max_risk: DoctorRisk,
 
@@ -226,6 +230,14 @@ pub struct ReleaseArgs {
 
     #[arg(long, default_value_t = false)]
     pub keep_artifacts: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ReportArgs {
+    pub path: PathBuf,
 
     #[arg(long, default_value_t = false)]
     pub json: bool,

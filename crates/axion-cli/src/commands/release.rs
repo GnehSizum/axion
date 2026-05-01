@@ -31,51 +31,69 @@ pub fn run(args: ReleaseArgs) -> Result<(), AxionCliError> {
 fn release_report(args: &ReleaseArgs) -> ReleaseReport {
     let mut report = ReleaseReport::new(args);
 
-    let doctor_args = DoctorArgs {
-        manifest_path: args.manifest_path.clone(),
-        json: false,
-        deny_warnings: true,
-        max_risk: Some(args.max_risk),
-    };
-
-    match doctor_gate_for_manifest(&doctor_args) {
-        Ok(gate) => {
-            report.doctor_passed = gate.passed_status();
-            report.doctor_failures = gate.failed_reasons().to_vec();
+    if let Some(check_report_path) = &args.check_report_path {
+        match load_check_report_reuse(check_report_path, &args.manifest_path) {
+            Ok(check) => {
+                report.check_report_reused = true;
+                report.doctor_passed = true;
+                report.ready_for_dev = check.ready_for_dev;
+                report.ready_for_bundle = check.ready_for_bundle;
+                report.ready_for_gui_smoke = check.ready_for_gui_smoke;
+                report.self_test_passed = true;
+            }
+            Err(error) => {
+                report.check_report_error = Some(error.to_string());
+                report.doctor_passed = false;
+                report.doctor_failures.push(error.to_string());
+            }
         }
-        Err(error) => {
-            report.doctor_passed = false;
-            report.doctor_failures.push(error.to_string());
-        }
-    }
-
-    match doctor_readiness_for_manifest(&args.manifest_path) {
-        Ok(readiness) => {
-            report.ready_for_dev = readiness.ready_for_dev();
-            report.ready_for_bundle = readiness.ready_for_bundle();
-            report.ready_for_gui_smoke = readiness.ready_for_gui_smoke();
-            report.readiness_blockers = readiness.blockers().to_vec();
-            report.readiness_warnings = readiness.warnings().to_vec();
-        }
-        Err(error) => {
-            report.ready_for_dev = false;
-            report.ready_for_bundle = false;
-            report.ready_for_gui_smoke = false;
-            report.readiness_blockers.push(error.to_string());
-        }
-    }
-
-    if report.doctor_passed && report.ready_for_dev {
-        match crate::commands::self_test::run(SelfTestArgs {
+    } else {
+        let doctor_args = DoctorArgs {
             manifest_path: args.manifest_path.clone(),
-            output_dir: None,
-            report_path: None,
             json: false,
-            quiet: true,
-            keep_artifacts: args.keep_artifacts,
-        }) {
-            Ok(()) => report.self_test_passed = true,
-            Err(error) => report.self_test_error = Some(error.to_string()),
+            deny_warnings: true,
+            max_risk: Some(args.max_risk),
+        };
+
+        match doctor_gate_for_manifest(&doctor_args) {
+            Ok(gate) => {
+                report.doctor_passed = gate.passed_status();
+                report.doctor_failures = gate.failed_reasons().to_vec();
+            }
+            Err(error) => {
+                report.doctor_passed = false;
+                report.doctor_failures.push(error.to_string());
+            }
+        }
+
+        match doctor_readiness_for_manifest(&args.manifest_path) {
+            Ok(readiness) => {
+                report.ready_for_dev = readiness.ready_for_dev();
+                report.ready_for_bundle = readiness.ready_for_bundle();
+                report.ready_for_gui_smoke = readiness.ready_for_gui_smoke();
+                report.readiness_blockers = readiness.blockers().to_vec();
+                report.readiness_warnings = readiness.warnings().to_vec();
+            }
+            Err(error) => {
+                report.ready_for_dev = false;
+                report.ready_for_bundle = false;
+                report.ready_for_gui_smoke = false;
+                report.readiness_blockers.push(error.to_string());
+            }
+        }
+
+        if report.doctor_passed && report.ready_for_dev {
+            match crate::commands::self_test::run(SelfTestArgs {
+                manifest_path: args.manifest_path.clone(),
+                output_dir: None,
+                report_path: None,
+                json: false,
+                quiet: true,
+                keep_artifacts: args.keep_artifacts,
+            }) {
+                Ok(()) => report.self_test_passed = true,
+                Err(error) => report.self_test_error = Some(error.to_string()),
+            }
         }
     }
 
@@ -146,6 +164,9 @@ struct ReleaseReport {
     max_risk: String,
     report_path: Option<String>,
     bundle_report_path: Option<String>,
+    check_report_path: Option<String>,
+    check_report_reused: bool,
+    check_report_error: Option<String>,
     doctor_passed: bool,
     doctor_failures: Vec<String>,
     ready_for_dev: bool,
@@ -211,6 +232,12 @@ impl ReleaseReport {
                 .bundle_report_path
                 .as_ref()
                 .map(|path| path.display().to_string()),
+            check_report_path: args
+                .check_report_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            check_report_reused: false,
+            check_report_error: None,
             doctor_passed: false,
             doctor_failures: Vec::new(),
             ready_for_dev: false,
@@ -422,6 +449,20 @@ impl ReleaseReport {
         if let Some(bundle_report_path) = &self.bundle_report_path {
             println!("bundle_report: {bundle_report_path}");
         }
+        if let Some(check_report_path) = &self.check_report_path {
+            println!("check_report: {check_report_path}");
+            println!(
+                "check_report.reused: {}",
+                if self.check_report_reused {
+                    "true"
+                } else {
+                    "false"
+                }
+            );
+            if let Some(error) = &self.check_report_error {
+                println!("check_report.error: {error}");
+            }
+        }
         for artifact in &self.artifacts {
             println!(
                 "artifact: kind={}, exists={}, path={}",
@@ -452,11 +493,14 @@ impl ReleaseReport {
 
     fn to_json(&self) -> String {
         format!(
-            "{{\"schema\":\"axion.release-report.v1\",\"manifest_path\":{},\"max_risk\":{},\"report_path\":{},\"bundle_report_path\":{},\"doctor\":{{\"passed\":{},\"failed_reasons\":{}}},\"readiness\":{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}},\"self_test\":{{\"passed\":{},\"error\":{}}},\"bundle\":{{\"passed\":{},\"error\":{},\"build_executable\":{},\"bundle_dir\":{},\"bundle_manifest\":{},\"bundle_bytes\":{},\"report\":{}}},\"archive\":{},\"artifacts\":{},\"failure_phase\":{},\"failed_reasons\":{},\"next_step\":{},\"result\":{}}}",
+            "{{\"schema\":\"axion.release-report.v1\",\"manifest_path\":{},\"max_risk\":{},\"report_path\":{},\"bundle_report_path\":{},\"check_report\":{{\"path\":{},\"reused\":{},\"error\":{}}},\"doctor\":{{\"passed\":{},\"failed_reasons\":{}}},\"readiness\":{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}},\"self_test\":{{\"passed\":{},\"error\":{}}},\"bundle\":{{\"passed\":{},\"error\":{},\"build_executable\":{},\"bundle_dir\":{},\"bundle_manifest\":{},\"bundle_bytes\":{},\"report\":{}}},\"archive\":{},\"artifacts\":{},\"failure_phase\":{},\"failed_reasons\":{},\"next_step\":{},\"result\":{}}}",
             json_string_literal(&self.manifest_path),
             json_string_literal(&self.max_risk),
             optional_json_string_literal(self.report_path.as_deref()),
             optional_json_string_literal(self.bundle_report_path.as_deref()),
+            optional_json_string_literal(self.check_report_path.as_deref()),
+            self.check_report_reused,
+            optional_json_string_literal(self.check_report_error.as_deref()),
             self.doctor_passed,
             json_string_array_literal(&self.doctor_failures),
             self.ready_for_dev,
@@ -521,6 +565,88 @@ impl ArtifactReport {
             optional_json_string_literal(self.error.as_deref()),
         )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CheckReportReuse {
+    ready_for_dev: bool,
+    ready_for_bundle: bool,
+    ready_for_gui_smoke: bool,
+}
+
+fn load_check_report_reuse(
+    check_report_path: &Path,
+    manifest_path: &Path,
+) -> Result<CheckReportReuse, std::io::Error> {
+    let body = fs::read_to_string(check_report_path)?;
+    if json_string_field(&body, "schema").as_deref() != Some("axion.check-report.v1") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "check report schema must be axion.check-report.v1",
+        ));
+    }
+    if json_string_field(&body, "manifest_path").as_deref()
+        != Some(&manifest_path.display().to_string())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "check report manifest_path does not match release manifest",
+        ));
+    }
+    if json_string_field(&body, "result").as_deref() != Some("ok") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "check report result must be ok",
+        ));
+    }
+
+    let doctor = json_object_section(&body, "\"doctor\"").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "check report missing doctor",
+        )
+    })?;
+    let readiness = json_object_section(&body, "\"readiness\"").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "check report missing readiness",
+        )
+    })?;
+    let self_test = json_object_section(&body, "\"self_test\"").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "check report missing self_test",
+        )
+    })?;
+
+    if json_bool_field(doctor, "passed") != Some(true) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "check report doctor gate must pass",
+        ));
+    }
+    if json_bool_field(self_test, "passed") != Some(true) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "check report self_test must pass",
+        ));
+    }
+
+    let ready_for_dev = json_bool_field(readiness, "ready_for_dev").unwrap_or(false);
+    let ready_for_bundle = json_bool_field(readiness, "ready_for_bundle").unwrap_or(false);
+    let ready_for_gui_smoke = json_bool_field(readiness, "ready_for_gui_smoke").unwrap_or(false);
+    if !ready_for_dev || !ready_for_bundle {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "check report readiness must be ready for dev and bundle",
+        ));
+    }
+
+    Ok(CheckReportReuse {
+        ready_for_dev,
+        ready_for_bundle,
+        ready_for_gui_smoke,
+    })
 }
 
 fn create_archive(
@@ -781,6 +907,90 @@ fn json_string_array_literal(values: &[String]) -> String {
     format!("[{values}]")
 }
 
+fn json_object_section<'a>(source: &'a str, key: &str) -> Option<&'a str> {
+    let key_index = source.find(key)?;
+    let object_start = source[key_index..].find('{')? + key_index;
+    let object_end = matching_json_delimiter(source, object_start, '{', '}')?;
+    source.get(object_start..=object_end)
+}
+
+fn matching_json_delimiter(source: &str, start: usize, open: char, close: char) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, character) in source
+        .char_indices()
+        .skip_while(|(index, _)| *index < start)
+    {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if character == '"' {
+            in_string = true;
+        } else if character == open {
+            depth += 1;
+        } else if character == close {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+
+    None
+}
+
+fn json_string_field(source: &str, field: &str) -> Option<String> {
+    let key = format!("\"{field}\":\"");
+    let start = source.find(&key)? + key.len();
+    let mut value = String::new();
+    let mut escaped = false;
+    for character in source[start..].chars() {
+        if escaped {
+            value.push(match character {
+                '"' => '"',
+                '\\' => '\\',
+                '/' => '/',
+                'b' => '\u{0008}',
+                'f' => '\u{000c}',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            });
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            return Some(value);
+        } else {
+            value.push(character);
+        }
+    }
+    None
+}
+
+fn json_bool_field(source: &str, field: &str) -> Option<bool> {
+    let key = format!("\"{field}\":");
+    let start = source.find(&key)? + key.len();
+    if source[start..].starts_with("true") {
+        Some(true)
+    } else if source[start..].starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn artifact_array_json(values: &[ArtifactReport]) -> String {
     let values = values
         .iter()
@@ -799,7 +1009,7 @@ mod tests {
 
     use crate::cli::{DoctorRisk, ReleaseArgs};
 
-    use super::{create_archive, release_report};
+    use super::{create_archive, load_check_report_reuse, release_report};
 
     fn temp_dir(prefix: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -818,6 +1028,7 @@ mod tests {
             executable: None,
             report_path: Some(PathBuf::from("target/axion/reports/release.json")),
             bundle_report_path: Some(PathBuf::from("target/axion/reports/bundle.json")),
+            check_report_path: None,
             max_risk: DoctorRisk::Medium,
             skip_build_executable: true,
             archive: true,
@@ -855,5 +1066,28 @@ mod tests {
         assert!(report.verification.checked);
         assert!(report.verification.passed);
         assert!(report.verification.error.is_none());
+    }
+
+    #[test]
+    fn check_report_reuse_validates_manifest_and_gates() {
+        let root = temp_dir("axion-release-check-report");
+        fs::create_dir_all(&root).unwrap();
+        let manifest = root.join("axion.toml");
+        let check_report = root.join("check.json");
+        fs::write(
+            &check_report,
+            format!(
+                "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"doctor\":{{\"passed\":true}},\"readiness\":{{\"ready_for_dev\":true,\"ready_for_bundle\":true,\"ready_for_gui_smoke\":false}},\"self_test\":{{\"passed\":true}},\"result\":\"ok\"}}",
+                axion_runtime::json_string_literal(&manifest.display().to_string())
+            ),
+        )
+        .unwrap();
+
+        let reuse = load_check_report_reuse(&check_report, &manifest)
+            .expect("valid check report should be reusable");
+
+        assert!(reuse.ready_for_dev);
+        assert!(reuse.ready_for_bundle);
+        assert!(!reuse.ready_for_gui_smoke);
     }
 }

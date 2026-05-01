@@ -199,7 +199,9 @@ struct CheckReport {
     bundle_preflight_passed: Option<bool>,
     bundle_preflight_error: Option<String>,
     dev_preflight: Option<DevPreflightReport>,
+    failure_phase: Option<String>,
     next_step: String,
+    next_steps: Vec<String>,
     result: String,
 }
 
@@ -236,7 +238,9 @@ impl CheckReport {
             bundle_preflight_passed: None,
             bundle_preflight_error: None,
             dev_preflight: None,
+            failure_phase: None,
             next_step: String::new(),
+            next_steps: Vec::new(),
             result: "failed".to_owned(),
         }
     }
@@ -254,23 +258,99 @@ impl CheckReport {
             && dev_ok;
 
         self.result = if passed { "ok" } else { "failed" }.to_owned();
-        self.next_step = if !self.doctor_passed {
-            "run axion doctor and resolve gate failures".to_owned()
-        } else if !self.ready_for_dev {
-            "resolve readiness.blocker entries before running heavier checks".to_owned()
-        } else if !self.self_test_passed {
-            "run axion self-test for full staging diagnostics".to_owned()
-        } else if self.bundle_requested && self.bundle_preflight_passed != Some(true) {
-            "fix bundle preflight issues before running axion bundle --build-executable".to_owned()
-        } else if !dev_ok {
-            "fix dev preflight blockers before using axion dev --launch".to_owned()
-        } else if self.ready_for_gui_smoke {
-            "run axion gui-smoke, then axion bundle --build-executable".to_owned()
-        } else if self.ready_for_bundle {
-            "run axion bundle --build-executable; GUI smoke needs additional setup".to_owned()
-        } else {
+        self.failure_phase = self.failure_phase_for(dev_ok);
+        self.next_steps = self.build_next_steps(dev_ok);
+        self.next_step = self.next_steps.first().cloned().unwrap_or_else(|| {
             "run axion doctor --deny-warnings --max-risk medium for detailed diagnostics".to_owned()
-        };
+        });
+    }
+
+    fn failure_phase_for(&self, dev_ok: bool) -> Option<String> {
+        if !self.doctor_passed {
+            Some("doctor".to_owned())
+        } else if !self.ready_for_dev {
+            Some("readiness".to_owned())
+        } else if !self.self_test_passed {
+            Some("self_test".to_owned())
+        } else if self.bundle_requested && self.bundle_preflight_passed != Some(true) {
+            Some("bundle_preflight".to_owned())
+        } else if !dev_ok {
+            Some("dev_preflight".to_owned())
+        } else {
+            None
+        }
+    }
+
+    fn build_next_steps(&self, dev_ok: bool) -> Vec<String> {
+        if !self.doctor_passed {
+            let mut steps = vec![
+                "run axion doctor --deny-warnings --max-risk medium and resolve gate failures"
+                    .to_owned(),
+            ];
+            steps.extend(
+                self.doctor_failures
+                    .iter()
+                    .map(|failure| format!("doctor failure: {failure}")),
+            );
+            return steps;
+        }
+
+        if !self.ready_for_dev {
+            return self
+                .readiness_blockers
+                .iter()
+                .map(|blocker| next_step_for_readiness_blocker(blocker))
+                .collect();
+        }
+
+        if !self.self_test_passed {
+            return vec![
+                "run axion self-test --manifest-path <manifest> for full staging diagnostics"
+                    .to_owned(),
+            ];
+        }
+
+        if self.bundle_requested && self.bundle_preflight_passed != Some(true) {
+            return vec![next_step_for_bundle_error(
+                self.bundle_preflight_error.as_deref(),
+            )];
+        }
+
+        if !dev_ok {
+            return self
+                .dev_preflight
+                .as_ref()
+                .map(|dev| {
+                    dev.blockers
+                        .iter()
+                        .map(|blocker| next_step_for_dev_blocker(blocker))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|steps| !steps.is_empty())
+                .unwrap_or_else(|| {
+                    vec!["fix dev preflight blockers before using axion dev --launch".to_owned()]
+                });
+        }
+
+        let mut steps = Vec::new();
+        if self.ready_for_gui_smoke {
+            steps.push(
+                "run axion gui-smoke with --report-path target/axion/reports/gui-smoke.json"
+                    .to_owned(),
+            );
+        } else if self.ready_for_bundle {
+            steps.push("run axion bundle --build-executable; GUI smoke needs Servo checkout setup or a window.__AXION_GUI_SMOKE__ hook".to_owned());
+        }
+        if self.ready_for_bundle {
+            steps.push("run axion bundle --build-executable, then axion release --archive for preview artifacts".to_owned());
+        }
+        if steps.is_empty() {
+            steps.push(
+                "run axion doctor --deny-warnings --max-risk medium for detailed diagnostics"
+                    .to_owned(),
+            );
+        }
+        steps
     }
 
     fn mark_check_report_artifact_exists(&mut self) {
@@ -294,7 +374,14 @@ impl CheckReport {
         lines.push("Axion check".to_owned());
         lines.push(format!("manifest: {}", self.manifest_path));
         lines.push(format!("result: {}", self.result));
+        lines.push(format!(
+            "failure_phase: {}",
+            self.failure_phase.as_deref().unwrap_or("none")
+        ));
         lines.push(format!("next_step: {}", self.next_step));
+        for step in self.next_steps.iter().skip(1) {
+            lines.push(format!("next_step.detail: {step}"));
+        }
         lines.push(String::new());
         lines.push("[gate]".to_owned());
         lines.push(format!(
@@ -371,7 +458,7 @@ impl CheckReport {
 
     fn to_json(&self) -> String {
         format!(
-            "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"max_risk\":{},\"bundle_requested\":{},\"dev_requested\":{},\"report_path\":{},\"doctor\":{{\"passed\":{},\"failed_reasons\":{}}},\"capabilities\":{},\"readiness\":{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}},\"self_test\":{{\"passed\":{},\"error\":{}}},\"artifacts\":{},\"bundle_preflight\":{{\"checked\":{},\"passed\":{},\"error\":{}}},\"dev_preflight\":{},\"next_step\":{},\"result\":{}}}",
+            "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"max_risk\":{},\"bundle_requested\":{},\"dev_requested\":{},\"report_path\":{},\"doctor\":{{\"passed\":{},\"failed_reasons\":{}}},\"capabilities\":{},\"readiness\":{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}},\"self_test\":{{\"passed\":{},\"error\":{}}},\"artifacts\":{},\"bundle_preflight\":{{\"checked\":{},\"passed\":{},\"error\":{}}},\"dev_preflight\":{},\"failure_phase\":{},\"next_step\":{},\"next_steps\":{},\"next_actions\":{},\"result\":{}}}",
             json_string_literal(&self.manifest_path),
             json_string_literal(&self.max_risk),
             self.bundle_requested,
@@ -395,9 +482,102 @@ impl CheckReport {
                 .as_ref()
                 .map(DevPreflightReport::to_json)
                 .unwrap_or_else(|| "{\"checked\":false}".to_owned()),
+            optional_json_string_literal(self.failure_phase.as_deref()),
             json_string_literal(&self.next_step),
+            json_string_array_literal(&self.next_steps),
+            check_next_actions_json(&self.next_steps, self.failure_phase.is_some()),
             json_string_literal(&self.result),
         )
+    }
+}
+
+fn check_next_actions_json(steps: &[String], required: bool) -> String {
+    let actions = steps
+        .iter()
+        .map(|step| {
+            format!(
+                "{{\"kind\":{},\"required\":{},\"step\":{}}}",
+                json_string_literal(check_next_action_kind(step)),
+                required,
+                json_string_literal(step)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{actions}]")
+}
+
+fn check_next_action_kind(step: &str) -> &'static str {
+    if step.contains("gui-smoke")
+        || step.contains("GUI smoke")
+        || step.contains("__AXION_GUI_SMOKE__")
+    {
+        "gui_smoke"
+    } else if step.contains("release --archive") || step.contains("release artifacts") {
+        "release"
+    } else if step.contains("bundle")
+        || step.contains("[bundle]")
+        || step.contains("frontend asset")
+    {
+        "bundle"
+    } else if step.contains("self-test") {
+        "self_test"
+    } else if step.contains("doctor") || step.contains("security") || step.contains("risk") {
+        "doctor"
+    } else if step.contains("[dev]")
+        || step.contains("dev preflight")
+        || step.contains("--fallback-packaged")
+    {
+        "dev_preflight"
+    } else if step.contains("readiness") {
+        "readiness"
+    } else {
+        "general"
+    }
+}
+
+fn next_step_for_readiness_blocker(blocker: &str) -> String {
+    if blocker.contains("bundle icon") {
+        "configure [bundle] icon with a valid .icns/.ico/.png path before bundle/release".to_owned()
+    } else if blocker.contains("window.__AXION_GUI_SMOKE__") {
+        "add window.__AXION_GUI_SMOKE__ to frontend assets or skip GUI smoke for this app"
+            .to_owned()
+    } else if blocker.contains("servo source") {
+        "run GUI smoke from the Axion checkout or pass --cargo-target-dir target so Servo sources are discoverable".to_owned()
+    } else if blocker.contains("security warnings") || blocker.contains("security risk") {
+        "run axion doctor and narrow capabilities, navigation origins, or max risk before release"
+            .to_owned()
+    } else if blocker.contains("build assets") {
+        "fix [build].frontend_dist and [build].entry so packaged frontend assets can be validated"
+            .to_owned()
+    } else {
+        format!("resolve readiness blocker: {blocker}")
+    }
+}
+
+fn next_step_for_bundle_error(error: Option<&str>) -> String {
+    let Some(error) = error else {
+        return "fix bundle preflight issues before running axion bundle --build-executable"
+            .to_owned();
+    };
+    if error.contains("icon") {
+        "fix [bundle] icon, then rerun axion check --bundle".to_owned()
+    } else if error.contains("frontend") || error.contains("entry") {
+        "fix frontend asset paths, then rerun axion check --bundle".to_owned()
+    } else {
+        format!("fix bundle preflight issue: {error}")
+    }
+}
+
+fn next_step_for_dev_blocker(blocker: &str) -> String {
+    if blocker.contains("[dev] cwd") {
+        "fix [dev].cwd or pass --frontend-cwd to an existing frontend directory".to_owned()
+    } else if blocker.contains("[dev] command") {
+        "set a non-empty [dev] command or remove it and start the dev server separately".to_owned()
+    } else if blocker.contains("packaged fallback") {
+        "fix packaged frontend assets before using --fallback-packaged".to_owned()
+    } else {
+        format!("fix dev preflight blocker: {blocker}")
     }
 }
 
@@ -1032,14 +1212,18 @@ profiles = ["app-info"]
         assert!(json.contains("\"ready_for_dev\":true"));
         assert!(json.contains("\"bundle_preflight\":{\"checked\":true,\"passed\":true"));
         assert!(json.contains("\"dev_preflight\":{\"checked\":true,\"passed\":true"));
+        assert!(json.contains("\"failure_phase\":null"));
         assert!(json.contains("\"dev_server\":{\"status\":\"not configured\""));
         assert!(json.contains("\"warnings\":[\"no [dev] server is configured"));
         assert!(json.contains("\"recommended_commands\":["));
         assert!(json.contains("axion check --manifest-path"));
         assert!(json.contains("axion dev --manifest-path"));
         assert!(json.contains(
-            "\"next_step\":\"run axion gui-smoke, then axion bundle --build-executable\""
+            "\"next_step\":\"run axion gui-smoke with --report-path target/axion/reports/gui-smoke.json\""
         ));
+        assert!(json.contains("\"next_steps\":[\"run axion gui-smoke with --report-path target/axion/reports/gui-smoke.json\",\"run axion bundle --build-executable, then axion release --archive for preview artifacts\"]"));
+        assert!(json.contains("\"next_actions\":[{\"kind\":\"gui_smoke\",\"required\":false,\"step\":\"run axion gui-smoke with --report-path target/axion/reports/gui-smoke.json\""));
+        assert!(json.contains("{\"kind\":\"release\",\"required\":false,\"step\":\"run axion bundle --build-executable, then axion release --archive for preview artifacts\"}"));
         assert!(json.contains("\"result\":\"ok\""));
     }
 
@@ -1064,6 +1248,7 @@ profiles = ["app-info"]
         assert!(lines.contains(&"[bundle_preflight]".to_owned()));
         assert!(lines.contains(&"[dev_preflight]".to_owned()));
         assert!(lines.iter().any(|line| line.starts_with("artifact: kind=")));
+        assert!(lines.iter().any(|line| line == "failure_phase: none"));
         assert!(lines.iter().any(|line| line
             == "capabilities.window.main.profile.app-info: commands=app.echo,app.info,app.ping,app.version, events=none, protocols=axion"));
         assert!(lines.iter().any(|line| line.starts_with("dev.warning: ")));
@@ -1072,10 +1257,10 @@ profiles = ["app-info"]
                 .iter()
                 .any(|line| line.starts_with("dev.recommended_command: axion check"))
         );
-        assert!(
-            lines.iter().any(|line| line
-                == "next_step: run axion gui-smoke, then axion bundle --build-executable")
-        );
+        assert!(lines.iter().any(|line| line
+            == "next_step: run axion gui-smoke with --report-path target/axion/reports/gui-smoke.json"));
+        assert!(lines.iter().any(|line| line
+            == "next_step.detail: run axion bundle --build-executable, then axion release --archive for preview artifacts"));
         assert!(lines.iter().any(|line| line == "result: ok"));
     }
 
@@ -1143,8 +1328,10 @@ cwd = "missing-frontend"
             "[dev] command is configured without timeout_ms; default timeout will be used"
         ));
         assert!(json.contains(
-            "\"next_step\":\"fix dev preflight blockers before using axion dev --launch\""
+            "\"next_step\":\"fix [dev].cwd or pass --frontend-cwd to an existing frontend directory\""
         ));
+        assert!(json.contains("\"failure_phase\":\"dev_preflight\""));
+        assert!(json.contains("\"next_actions\":[{\"kind\":\"dev_preflight\",\"required\":true,\"step\":\"fix [dev].cwd or pass --frontend-cwd to an existing frontend directory\"}]"));
     }
 
     #[test]

@@ -14,6 +14,7 @@ The CLI report is generated through the shared `axion_runtime::DiagnosticsReport
 - `axion bundle --report-path <path>`: writes the same bundle report to disk.
 - `axion release --json`: prints the aggregate release artifact workflow using `axion.release-report.v1`.
 - `axion release --report-path <path>`: writes the same release report to disk.
+- `axion report <path>`: reads an existing Axion report and prints a normalized `axion.report-summary.v1` summary with `--json`.
 - `axion gui-smoke --report-path <path>`: runs a Servo-backed GUI smoke check and writes the returned GUI report.
 - `examples/bridge-diagnostics-demo`: exports a GUI-side report from app-data.
 - `window.__AXION__.diagnostics.reportSchema`: exposes the active schema string to frontends.
@@ -50,13 +51,13 @@ GUI reports may include an additional `diagnostics` object with bridge snapshots
 
 Each `diagnostics.smoke_checks[]` entry should include stable `id`, user-facing `label`, `status` (`pass`, `fail`, or `skip`), and optional `detail`. Check ids use dotted lower-case names such as `bridge.bootstrap`, `app.ping`, `clipboard.roundtrip`, `fs.roundtrip`, `dialog.preview`, and `input.snapshot`.
 
-CLI-generated GUI smoke failure reports use `source = "axion-cli gui-smoke"` and put process context under `diagnostics`: `failure_phase`, `help`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr`. The `failure_phase` value is one of `build`, `runtime`, or `report`.
+CLI-generated GUI smoke failure reports use `source = "axion-cli gui-smoke"` and put process context under `diagnostics`: `failure_phase`, `help`, `next_step`, `failed_check_ids`, `error_codes`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr`. The `failure_phase` value is one of `build`, `runtime`, or `report`.
 
 `doctor --json` readiness output contains `ready_for_dev`, `ready_for_bundle`, `ready_for_gui_smoke`, `blockers`, and `warnings`. Use these fields to decide which release workflow can run next before invoking heavier commands such as `gui-smoke` or `bundle`.
 
 ## Aggregate CLI Reports
 
-`axion.check-report.v1` summarizes doctor gate status, capability expansion, readiness, quiet self-test, artifact inventory, optional dev preflight, optional bundle preflight, optional `report_path`, `next_step`, and `result`. Use `check --report-path <path>` to write this JSON schema to disk for CI artifacts.
+`axion.check-report.v1` summarizes doctor gate status, capability expansion, readiness, quiet self-test, artifact inventory, optional dev preflight, optional bundle preflight, optional `report_path`, `failure_phase`, `next_step`, ordered `next_steps`, required/optional `next_actions`, and `result`. Use `check --report-path <path>` to write this JSON schema to disk for CI artifacts. `next_step` is the first recommended action for compatibility; `next_steps[]` preserves all ordered follow-up actions; `next_actions[]` repeats those steps with a stable `kind` and a `required` boolean so CI can distinguish blockers from optional follow-up validation.
 
 Check reports include `artifacts[]` entries with `kind`, `path`, `required`, and `exists`. Kinds include `check_report`, `dev_event_log_hint`, `dev_report_hint`, `bundle_report_hint`, and `release_report_hint`. These entries are an upload guide for local and CI workflows; hint entries may not exist yet during a lightweight check.
 
@@ -66,7 +67,7 @@ When `check --dev` is used, `dev_preflight` includes dev-server status, frontend
 
 `axion.bundle-report.v1` summarizes the staged bundle target, layout, generated paths, platform metadata paths, copied icon and executable, verification counters, checked paths, readiness blockers, warnings, optional `report_path`, and `result`. It is intended for release automation that needs bundle-specific output rather than the broader diagnostics report schema.
 
-`axion.release-report.v1` summarizes the full preview artifact workflow: doctor gate, readiness, self-test, embedded bundle report, optional archive artifact metadata, artifact inventory, first failure diagnostics, `next_step`, and `result`.
+`axion.release-report.v1` summarizes the full preview artifact workflow: optional reused check report metadata, doctor gate, readiness, self-test, embedded bundle report, optional archive artifact metadata, artifact inventory, first failure diagnostics, `next_step`, and `result`.
 
 Release reports include:
 
@@ -76,6 +77,8 @@ Release reports include:
 - `archive.verification`: `{ checked, passed, error }` for tar artifacts created with `--archive`.
 
 The release report artifact itself records only path and existence because report size or fingerprint would be self-referential. Other file artifacts include byte counts and `fnv1a64` when they exist and can be read.
+
+`axion.report-summary.v1` is emitted by `axion report --json`. It does not replace the source report; it provides a small normalized view with `source_schema`, `kind`, `manifest_path`, `result`, `failure_phase`, `next_step`, `next_action_kinds`, optional smoke-check summary, and artifact inventory.
 
 ## Dev Event Stream
 
@@ -130,7 +133,7 @@ The command exits non-zero if manifest loading, runtime diagnostics, asset stagi
 
 ## Local GUI Smoke
 
-`axion gui-smoke` is the preferred local entrypoint. It runs the Servo-backed window, captures the returned diagnostics report, validates the schema and `result: "ok"`, optionally writes it to `--report-path`, prints a `smoke_checks` summary for human runs, and exits. Lifecycle-aware demos should cover `window.close_requested`, window close outcome events such as `window.close_prevented`, `window.close_completed`, and `window.close_timed_out`, `app.exit_requested`, and app exit outcome events such as `app.exit_prevented` when those capabilities are enabled. The bridge diagnostics demo implements the required `window.__AXION_GUI_SMOKE__()` hook.
+`axion gui-smoke` is the preferred local entrypoint. It runs the Servo-backed window, captures the returned diagnostics report, validates the schema and `result: "ok"`, optionally writes it to `--report-path`, prints a `smoke_checks: total=N, failed=..., error_codes=...` summary for human runs, and exits. Lifecycle-aware demos should cover `window.close_requested`, window close outcome events such as `window.close_prevented`, `window.close_completed`, and `window.close_timed_out`, `app.exit_requested`, and app exit outcome events such as `app.exit_prevented` when those capabilities are enabled. The bridge diagnostics demo implements the required `window.__AXION_GUI_SMOKE__()` hook.
 
 ```sh
 cargo run -p axion-cli -- gui-smoke \
