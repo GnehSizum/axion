@@ -109,7 +109,7 @@ cargo run --features servo-runtime
 
 `--run-check` immediately runs `axion check --dev --bundle` against the generated manifest. Omit it if you only want to create files.
 
-Use `--template native-api-demo` when you want generated UI and README guidance focused on the preview native API surface: app/window metadata, clipboard text, app-data file reads and writes, dialogs, input compatibility, and GUI smoke diagnostics. The generated Native API Workbench includes a "Run all checks" button for manual validation inside the app window.
+Use `--template native-api-demo` when you want generated UI and README guidance focused on the preview native API surface: app/window metadata, clipboard text, app-data file lifecycle operations, dialogs, input compatibility, and GUI smoke diagnostics. The generated Native API Workbench includes a "Run all checks" button for manual validation inside the app window.
 
 Generated projects contain:
 
@@ -125,7 +125,7 @@ Generated projects contain:
 
 The generated `demo.greet` command is registered in Rust, allowed in `[capabilities.main]`, and invoked from frontend JavaScript. See `custom-commands.md` for the pattern.
 
-Generated manifests also include optional app metadata (`version`, `description`, `authors`, and `homepage`), `[bundle] icon = "icons/app.icns"`, `[native.dialog] backend = "headless"`, and `[native.clipboard] backend = "memory"`. These values appear in `app.info`, `axion doctor`, self-test output, and bundle metadata scaffolds. The generated frontend also demonstrates lifecycle capability reporting, clipboard read/write, `dialog.open` with multi-select and filter metadata, and `dialog.save` with `defaultPath`.
+Generated manifests also include optional app metadata (`version`, `description`, `authors`, and `homepage`), `[bundle] icon = "icons/app.icns"`, `[native.dialog] backend = "headless"`, and `[native.clipboard] backend = "memory"`. These values appear in `app.info`, `axion doctor`, self-test output, and bundle metadata scaffolds. The generated frontend also demonstrates lifecycle capability reporting, clipboard read/write, app-data create/exists/list/read/remove/write, `dialog.open` with multi-select and filter metadata, and `dialog.save` with `defaultPath`.
 
 Generated manifests include commented `[dev]` lines. Uncomment them when you attach a frontend toolchain such as Vite, Trunk, or another static server. You can start that server separately before running `axion dev --launch`, or set `[dev] command` / pass `--frontend-command` so Axion starts it for you.
 

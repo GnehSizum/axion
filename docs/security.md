@@ -45,7 +45,7 @@ Profiles reduce repetitive manifest entries but do not bypass the deny-by-defaul
 - `window-control`: current-window control commands, including close confirmation.
 - `multi-window`: multi-window coordination commands, including targeted close confirmation.
 - `clipboard-access`: clipboard read/write commands.
-- `file-access`: app-data file read/write commands.
+- `file-access`: app-data file lifecycle commands for create, exists, list, read, remove, and write.
 - `dialog-access`: native open/save dialog commands.
 
 Prefer profiles for common groups and explicit `commands` only for custom or unusual permissions:
@@ -74,7 +74,9 @@ const response = await window.__AXION__.invoke("app.ping", { from: "frontend" })
 
 Bridge payloads must be valid JSON values. Request ids, command names, event names, and payload sizes are validated before dispatch.
 
-File commands are restricted to Axion's app-data directory. Absolute paths, `..` components, root components, and symlink targets are rejected.
+File commands are restricted to Axion's app-data directory. Absolute paths, `..` components, root components, and symlink targets are rejected. Directory removal requires `recursive: true` for non-empty directories.
+
+This app-data sandbox is a framework-level path sandbox, not an operating-system permission sandbox. Do not expose `file-access`, `clipboard-access`, or `dialog-access` to untrusted remote content. `axion doctor` emits `remote_origin_native_capability` when a window can navigate to remote origins while native data capabilities are enabled.
 
 Dialog and clipboard commands are also capability-gated. Keep `[native.dialog] backend = "headless"` and `[native.clipboard] backend = "memory"` for CI and non-interactive environments. Use system backends only for trusted packaged UI, because the system clipboard can expose data across application boundaries.
 
@@ -137,7 +139,7 @@ Common warnings:
 - A nonstandard bridge protocol is declared.
 - `allow_remote_navigation = true` allows every remote origin.
 - `allowed_navigation_origins` is set while `allow_remote_navigation = true`.
-- File, clipboard, or dialog capabilities are enabled on a window with unrestricted remote navigation.
+- File, clipboard, or dialog capabilities are enabled on a window that can navigate to remote origins.
 
 CI can fail on newly introduced warnings with a simple grep:
 

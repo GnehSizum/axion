@@ -24,4 +24,10 @@ cargo run -p axion-cli -- check --manifest-path examples/bridge-diagnostics-demo
 cargo run -p axion-cli -- gui-smoke --manifest-path examples/bridge-diagnostics-demo/axion.toml --report-path target/axion/reports/bridge-diagnostics-gui-smoke.json --timeout-ms 30000 --cargo-target-dir target --serial-build
 ```
 
-This example intentionally exposes a broad diagnostics-oriented command set. Use it for inspection and smoke testing, not as a minimal production capability profile.
+## Bundle Preview
+
+```sh
+cargo run -p axion-cli -- bundle --manifest-path examples/bridge-diagnostics-demo/axion.toml --json --report-path target/axion/reports/bridge-diagnostics-bundle.json
+```
+
+This example intentionally exposes a broad diagnostics-oriented command set. Treat any notice about broad capabilities as expected for diagnostics; use narrower profiles for production-style apps.

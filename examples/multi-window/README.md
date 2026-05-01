@@ -24,4 +24,10 @@ cargo run -p axion-cli -- check --manifest-path examples/multi-window/axion.toml
 cargo run -p axion-cli -- gui-smoke --manifest-path examples/multi-window/axion.toml --report-path target/axion/reports/multi-window-gui-smoke.json --timeout-ms 30000 --cargo-target-dir target --serial-build
 ```
 
+## Bundle Preview
+
+```sh
+cargo run -p axion-cli -- bundle --manifest-path examples/multi-window/axion.toml --json --report-path target/axion/reports/multi-window-bundle.json
+```
+
 `doctor --json` includes notice-level findings for remote navigation limited to `https://docs.example`; those notices are expected for this example.

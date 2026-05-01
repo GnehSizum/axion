@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.1.26.0 - Preview
+
+Axion v0.1.26.0 expands app-data filesystem coverage and tightens generated-app and checked-in example guidance on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.26`.
+- Axion public release metadata is `v0.1.26.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `template_focus` output to `axion new` so generated project logs show the selected template's intended coverage.
+- Added GUI smoke follow-up guidance after generated project `--run-check` so developers run Servo-backed checks from the Axion checkout with a shared `target` directory.
+- Added capability-gated app-data filesystem lifecycle commands: `fs.create_dir`, `fs.exists`, `fs.list_dir`, and `fs.remove`.
+- Added file lifecycle and expected-error coverage to the generated native API demo and `file-access-demo` GUI smoke paths.
+- Added stable preview file error code prefixes such as `fs.invalid-path`, `fs.not-found`, `fs.not-directory`, and `fs.directory-not-empty`.
+- Added `axion doctor` warning `remote_origin_native_capability` for remote-navigable windows that expose file, clipboard, or dialog APIs.
+- Added bundle preview commands to checked-in example READMEs.
+- Added unit coverage that keeps generated template focus text and example README validation commands from drifting.
+
+### Changed
+
+- Expanded the `file-access` profile to cover controlled create, exists, list, read, remove, and write operations.
+- Generated app Cargo versions now use `0.1.26`.
+- Updated public docs and release metadata for v0.1.26.0.
+
 ## v0.1.25.0 - Preview
 
 Axion v0.1.25.0 adds a focused generated native API demo template on the current Servo `0.1` baseline.

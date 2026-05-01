@@ -16,7 +16,7 @@ pub use axion_bridge::{
     WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-pub const AXION_RELEASE_VERSION: &str = "v0.1.25.0";
+pub const AXION_RELEASE_VERSION: &str = "v0.1.26.0";
 pub const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 pub trait RuntimePlugin: Send + Sync {
@@ -1413,11 +1413,20 @@ fn register_builtin_commands(
         let app_data_dir = app_data_dir.clone();
         builder.register_command("fs.read_text", move |_context, request| {
             let relative_path = json_string_field(&request.payload, "path").ok_or_else(|| {
-                "fs.read_text requires a JSON string field named 'path'".to_owned()
+                fs_error(
+                    "invalid-payload",
+                    "fs.read_text requires a JSON string field named 'path'",
+                )
             })?;
             let path = resolve_app_data_path(&app_data_dir, &relative_path, false)?;
+            let metadata = path
+                .metadata()
+                .map_err(|error| fs_io_error("read app data file", &error))?;
+            if metadata.is_dir() {
+                return Err(fs_error("is-directory", "fs.read_text path must be a file"));
+            }
             let contents = std::fs::read_to_string(&path)
-                .map_err(|error| format!("failed to read app data file: {error}"))?;
+                .map_err(|error| fs_io_error("read app data file", &error))?;
             Ok(format!(
                 "{{\"path\":{},\"contents\":{}}}",
                 json_string_literal(&relative_path),
@@ -1433,18 +1442,164 @@ fn register_builtin_commands(
         let app_data_dir = app_data_dir.clone();
         builder.register_command("fs.write_text", move |_context, request| {
             let relative_path = json_string_field(&request.payload, "path").ok_or_else(|| {
-                "fs.write_text requires a JSON string field named 'path'".to_owned()
+                fs_error(
+                    "invalid-payload",
+                    "fs.write_text requires a JSON string field named 'path'",
+                )
             })?;
             let contents = json_string_field(&request.payload, "contents").ok_or_else(|| {
-                "fs.write_text requires a JSON string field named 'contents'".to_owned()
+                fs_error(
+                    "invalid-payload",
+                    "fs.write_text requires a JSON string field named 'contents'",
+                )
             })?;
             let path = resolve_app_data_path(&app_data_dir, &relative_path, true)?;
+            if path
+                .metadata()
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false)
+            {
+                return Err(fs_error(
+                    "is-directory",
+                    "fs.write_text path must be a file",
+                ));
+            }
             std::fs::write(&path, &contents)
-                .map_err(|error| format!("failed to write app data file: {error}"))?;
+                .map_err(|error| fs_io_error("write app data file", &error))?;
             Ok(format!(
                 "{{\"path\":{},\"bytes\":{}}}",
                 json_string_literal(&relative_path),
                 contents.len(),
+            ))
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "fs.exists")
+    {
+        let app_data_dir = app_data_dir.clone();
+        builder.register_command("fs.exists", move |_context, request| {
+            let relative_path = json_string_field(&request.payload, "path").ok_or_else(|| {
+                fs_error(
+                    "invalid-payload",
+                    "fs.exists requires a JSON string field named 'path'",
+                )
+            })?;
+            let exists = app_data_path_exists(&app_data_dir, &relative_path)?;
+            Ok(format!(
+                "{{\"path\":{},\"exists\":{exists}}}",
+                json_string_literal(&relative_path),
+            ))
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "fs.create_dir")
+    {
+        let app_data_dir = app_data_dir.clone();
+        builder.register_command("fs.create_dir", move |_context, request| {
+            let relative_path = json_string_field(&request.payload, "path").ok_or_else(|| {
+                fs_error(
+                    "invalid-payload",
+                    "fs.create_dir requires a JSON string field named 'path'",
+                )
+            })?;
+            let path = resolve_app_data_path(&app_data_dir, &relative_path, true)?;
+            if path
+                .symlink_metadata()
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                return Err(fs_error(
+                    "symlink-rejected",
+                    "app data path must not be a symlink",
+                ));
+            }
+            std::fs::create_dir_all(&path)
+                .map_err(|error| fs_io_error("create app data directory", &error))?;
+            Ok(format!(
+                "{{\"path\":{},\"created\":true}}",
+                json_string_literal(&relative_path),
+            ))
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "fs.list_dir")
+    {
+        let app_data_dir = app_data_dir.clone();
+        builder.register_command("fs.list_dir", move |_context, request| {
+            let relative_path = json_string_field(&request.payload, "path").ok_or_else(|| {
+                fs_error(
+                    "invalid-payload",
+                    "fs.list_dir requires a JSON string field named 'path'",
+                )
+            })?;
+            let path = resolve_app_data_path(&app_data_dir, &relative_path, false)?;
+            let metadata = path
+                .metadata()
+                .map_err(|error| fs_io_error("inspect app data directory", &error))?;
+            if !metadata.is_dir() {
+                return Err(fs_error(
+                    "not-directory",
+                    "fs.list_dir path must be a directory",
+                ));
+            }
+            let mut entries = std::fs::read_dir(&path)
+                .map_err(|error| fs_io_error("list app data directory", &error))?
+                .map(|entry| {
+                    entry
+                        .map_err(|error| fs_io_error("read app data directory entry", &error))
+                        .and_then(|entry| app_data_dir_entry_json(&relative_path, entry))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            entries.sort();
+            Ok(format!(
+                "{{\"path\":{},\"entries\":[{}]}}",
+                json_string_literal(&relative_path),
+                entries.join(","),
+            ))
+        });
+    }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "fs.remove")
+    {
+        let app_data_dir = app_data_dir.clone();
+        builder.register_command("fs.remove", move |_context, request| {
+            let relative_path = json_string_field(&request.payload, "path").ok_or_else(|| {
+                fs_error(
+                    "invalid-payload",
+                    "fs.remove requires a JSON string field named 'path'",
+                )
+            })?;
+            let recursive = json_bool_field(&request.payload, "recursive").unwrap_or(false);
+            let path = resolve_app_data_path(&app_data_dir, &relative_path, false)?;
+            let metadata = path
+                .metadata()
+                .map_err(|error| fs_io_error("inspect app data path", &error))?;
+            let kind = if metadata.is_dir() {
+                if recursive {
+                    std::fs::remove_dir_all(&path)
+                        .map_err(|error| fs_io_error("remove app data directory", &error))?;
+                } else {
+                    std::fs::remove_dir(&path)
+                        .map_err(|error| fs_io_error("remove app data directory", &error))?;
+                }
+                "directory"
+            } else {
+                std::fs::remove_file(&path)
+                    .map_err(|error| fs_io_error("remove app data file", &error))?;
+                "file"
+            };
+            Ok(format!(
+                "{{\"path\":{},\"removed\":true,\"kind\":{}}}",
+                json_string_literal(&relative_path),
+                json_string_literal(kind),
             ))
         });
     }
@@ -2112,7 +2267,11 @@ mod tests {
                         "app.version".to_owned(),
                         "clipboard.read_text".to_owned(),
                         "clipboard.write_text".to_owned(),
+                        "fs.create_dir".to_owned(),
+                        "fs.exists".to_owned(),
+                        "fs.list_dir".to_owned(),
                         "fs.read_text".to_owned(),
+                        "fs.remove".to_owned(),
                         "fs.write_text".to_owned(),
                         "dialog.open".to_owned(),
                         "dialog.save".to_owned(),
@@ -2568,7 +2727,11 @@ mod tests {
                 "clipboard.write_text".to_owned(),
                 "dialog.open".to_owned(),
                 "dialog.save".to_owned(),
+                "fs.create_dir".to_owned(),
+                "fs.exists".to_owned(),
+                "fs.list_dir".to_owned(),
                 "fs.read_text".to_owned(),
+                "fs.remove".to_owned(),
                 "fs.write_text".to_owned(),
             ]
         );
@@ -2579,7 +2742,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.25.0\""));
+        assert!(version.contains("\"release\":\"v0.1.26.0\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
@@ -2698,23 +2861,101 @@ mod tests {
             .window_bindings
             .first()
             .expect("main window binding should exist");
+        let suite_dir = format!(
+            "notes/fs-suite-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        );
+        let suite_file = format!("{suite_dir}/hello.txt");
+
+        let create_dir = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.create_dir",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_dir)),
+            ),
+        ))
+        .expect("fs.create_dir should dispatch");
+        assert!(create_dir.contains("\"created\":true"));
 
         let write = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
             &BridgeRequest::new(
                 "fs.write_text",
-                "{\"path\":\"notes/hello.txt\",\"contents\":\"hello from axion\"}",
+                format!(
+                    "{{\"path\":{},\"contents\":\"hello from axion\"}}",
+                    super::json_string_literal(&suite_file)
+                ),
             ),
         ))
         .expect("fs.write_text should dispatch");
         assert!(write.contains("\"bytes\":16"));
 
+        let exists = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.exists",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_file)),
+            ),
+        ))
+        .expect("fs.exists should dispatch");
+        assert!(exists.contains("\"exists\":true"));
+
         let read = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
-            &BridgeRequest::new("fs.read_text", "{\"path\":\"notes/hello.txt\"}"),
+            &BridgeRequest::new(
+                "fs.read_text",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_file)),
+            ),
         ))
         .expect("fs.read_text should dispatch");
         assert!(read.contains("\"contents\":\"hello from axion\""));
+
+        let list = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.list_dir",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_dir)),
+            ),
+        ))
+        .expect("fs.list_dir should dispatch");
+        assert!(list.contains("\"name\":\"hello.txt\""));
+        assert!(list.contains("\"kind\":\"file\""));
+
+        let remove = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.remove",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_file)),
+            ),
+        ))
+        .expect("fs.remove should dispatch");
+        assert!(remove.contains("\"removed\":true"));
+        assert!(remove.contains("\"kind\":\"file\""));
+
+        let missing = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.exists",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_file)),
+            ),
+        ))
+        .expect("fs.exists should dispatch");
+        assert!(missing.contains("\"exists\":false"));
+
+        let _ = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.remove",
+                format!(
+                    "{{\"path\":{},\"recursive\":true}}",
+                    super::json_string_literal(&suite_dir)
+                ),
+            ),
+        ));
     }
 
     #[test]
@@ -2735,7 +2976,162 @@ mod tests {
         ))
         .expect_err("path escape should be rejected");
 
+        assert!(format!("{error:?}").contains("fs.invalid-path"));
         assert!(format!("{error:?}").contains("parent or root components"));
+    }
+
+    #[test]
+    fn builtin_fs_commands_report_stable_error_codes() {
+        let request = launch_request(&app_with_native_commands(), axion_core::RunMode::Production)
+            .expect("launch request should build");
+        let binding = request
+            .window_bindings
+            .first()
+            .expect("main window binding should exist");
+        let suite_dir = format!(
+            "notes/fs-errors-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        );
+        let suite_file = format!("{suite_dir}/hello.txt");
+
+        let missing = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.read_text",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_file)),
+            ),
+        ))
+        .expect_err("missing file should be rejected");
+        assert!(format!("{missing:?}").contains("fs.not-found"));
+
+        block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.create_dir",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_dir)),
+            ),
+        ))
+        .expect("test directory should be created");
+
+        let read_dir = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.read_text",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_dir)),
+            ),
+        ))
+        .expect_err("read_text should reject directories");
+        assert!(format!("{read_dir:?}").contains("fs.is-directory"));
+
+        block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.write_text",
+                format!(
+                    "{{\"path\":{},\"contents\":\"hello\"}}",
+                    super::json_string_literal(&suite_file)
+                ),
+            ),
+        ))
+        .expect("test file should be written");
+
+        let list_file = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.list_dir",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_file)),
+            ),
+        ))
+        .expect_err("list_dir should reject files");
+        assert!(format!("{list_file:?}").contains("fs.not-directory"));
+
+        let remove_non_empty = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.remove",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_dir)),
+            ),
+        ))
+        .expect_err("non-empty directory removal should require recursive=true");
+        assert!(format!("{remove_non_empty:?}").contains("fs.directory-not-empty"));
+
+        let _ = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.remove",
+                format!(
+                    "{{\"path\":{},\"recursive\":true}}",
+                    super::json_string_literal(&suite_dir)
+                ),
+            ),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builtin_fs_commands_reject_symlinks() {
+        let request = launch_request(&app_with_native_commands(), axion_core::RunMode::Production)
+            .expect("launch request should build");
+        let binding = request
+            .window_bindings
+            .first()
+            .expect("main window binding should exist");
+        let suite_dir = format!(
+            "notes/fs-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        );
+
+        block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.create_dir",
+                format!("{{\"path\":{}}}", super::json_string_literal(&suite_dir)),
+            ),
+        ))
+        .expect("test directory should be created");
+
+        let app_data = request
+            .frontend_dist
+            .parent()
+            .unwrap_or(&request.frontend_dist)
+            .join("target")
+            .join("axion-data")
+            .join("axion-runtime-test");
+        let symlink_path = app_data.join(&suite_dir).join("link.txt");
+        std::os::unix::fs::symlink("/tmp", &symlink_path).expect("test symlink should be created");
+        let relative_symlink = format!("{suite_dir}/link.txt");
+        let error = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.exists",
+                format!(
+                    "{{\"path\":{}}}",
+                    super::json_string_literal(&relative_symlink)
+                ),
+            ),
+        ))
+        .expect_err("symlinks should be rejected");
+
+        assert!(format!("{error:?}").contains("fs.symlink-rejected"));
+
+        let _ = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new(
+                "fs.remove",
+                format!(
+                    "{{\"path\":{},\"recursive\":true}}",
+                    super::json_string_literal(&suite_dir)
+                ),
+            ),
+        ));
     }
 
     #[test]
@@ -3489,35 +3885,28 @@ fn resolve_app_data_path(
     relative_path: &str,
     create_parent: bool,
 ) -> Result<std::path::PathBuf, String> {
-    let relative = std::path::Path::new(relative_path);
-    if relative_path.trim().is_empty() || relative.is_absolute() {
-        return Err("app data path must be a non-empty relative path".to_owned());
-    }
-
-    for component in relative.components() {
-        if !matches!(component, std::path::Component::Normal(_)) {
-            return Err("app data path must not contain parent or root components".to_owned());
-        }
-    }
-
+    let relative = validate_app_data_relative_path(relative_path)?;
     if create_parent {
         std::fs::create_dir_all(app_data_dir)
-            .map_err(|error| format!("failed to create app data directory: {error}"))?;
+            .map_err(|error| fs_io_error("create app data directory", &error))?;
     }
     let canonical_base = app_data_dir
         .canonicalize()
-        .map_err(|error| format!("failed to access app data directory: {error}"))?;
+        .map_err(|error| fs_io_error("access app data directory", &error))?;
     let path = app_data_dir.join(relative);
 
     if create_parent {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create app data parent directory: {error}"))?;
+                .map_err(|error| fs_io_error("create app data parent directory", &error))?;
             let canonical_parent = parent
                 .canonicalize()
-                .map_err(|error| format!("failed to access app data parent directory: {error}"))?;
+                .map_err(|error| fs_io_error("access app data parent directory", &error))?;
             if !canonical_parent.starts_with(&canonical_base) {
-                return Err("app data path escapes the app data directory".to_owned());
+                return Err(fs_error(
+                    "path-escape",
+                    "app data path escapes the app data directory",
+                ));
             }
         }
     }
@@ -3527,17 +3916,129 @@ fn resolve_app_data_path(
         .map(|metadata| metadata.file_type().is_symlink())
         .unwrap_or(false)
     {
-        return Err("app data path must not be a symlink".to_owned());
+        return Err(fs_error(
+            "symlink-rejected",
+            "app data path must not be a symlink",
+        ));
     }
 
     if !create_parent {
         let canonical_path = path
             .canonicalize()
-            .map_err(|error| format!("failed to access app data file: {error}"))?;
+            .map_err(|error| fs_io_error("access app data path", &error))?;
         if !canonical_path.starts_with(&canonical_base) {
-            return Err("app data path escapes the app data directory".to_owned());
+            return Err(fs_error(
+                "path-escape",
+                "app data path escapes the app data directory",
+            ));
         }
     }
 
     Ok(path)
+}
+
+fn validate_app_data_relative_path(relative_path: &str) -> Result<&std::path::Path, String> {
+    let relative = std::path::Path::new(relative_path);
+    if relative_path.trim().is_empty() || relative.is_absolute() {
+        return Err(fs_error(
+            "invalid-path",
+            "app data path must be a non-empty relative path",
+        ));
+    }
+
+    for component in relative.components() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err(fs_error(
+                "invalid-path",
+                "app data path must not contain parent or root components",
+            ));
+        }
+    }
+
+    Ok(relative)
+}
+
+fn app_data_path_exists(
+    app_data_dir: &std::path::Path,
+    relative_path: &str,
+) -> Result<bool, String> {
+    let relative = validate_app_data_relative_path(relative_path)?;
+    if !app_data_dir.exists() {
+        return Ok(false);
+    }
+
+    let canonical_base = app_data_dir
+        .canonicalize()
+        .map_err(|error| fs_io_error("access app data directory", &error))?;
+    let path = app_data_dir.join(relative);
+    if path
+        .symlink_metadata()
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(fs_error(
+            "symlink-rejected",
+            "app data path must not be a symlink",
+        ));
+    }
+
+    let Some(canonical_path) = path.canonicalize().ok() else {
+        return Ok(false);
+    };
+    if !canonical_path.starts_with(&canonical_base) {
+        return Err(fs_error(
+            "path-escape",
+            "app data path escapes the app data directory",
+        ));
+    }
+
+    Ok(true)
+}
+
+fn app_data_dir_entry_json(relative_dir: &str, entry: std::fs::DirEntry) -> Result<String, String> {
+    let name = entry.file_name().to_string_lossy().into_owned();
+    let metadata = std::fs::symlink_metadata(entry.path())
+        .map_err(|error| fs_io_error("inspect app data directory entry", &error))?;
+    let file_type = metadata.file_type();
+    let kind = if file_type.is_symlink() {
+        "symlink"
+    } else if metadata.is_dir() {
+        "directory"
+    } else if metadata.is_file() {
+        "file"
+    } else {
+        "other"
+    };
+    let entry_path = if relative_dir == "." {
+        name.clone()
+    } else {
+        format!("{}/{}", relative_dir.trim_end_matches('/'), name)
+    };
+
+    Ok(format!(
+        "{{\"name\":{},\"path\":{},\"kind\":{},\"bytes\":{}}}",
+        json_string_literal(&name),
+        json_string_literal(&entry_path),
+        json_string_literal(kind),
+        if metadata.is_file() {
+            metadata.len().to_string()
+        } else {
+            "null".to_owned()
+        },
+    ))
+}
+
+fn fs_error(code: &str, message: &str) -> String {
+    format!("fs.{code}: {message}")
+}
+
+fn fs_io_error(operation: &str, error: &std::io::Error) -> String {
+    let code = match error.kind() {
+        std::io::ErrorKind::NotFound => "not-found",
+        std::io::ErrorKind::PermissionDenied => "permission-denied",
+        std::io::ErrorKind::AlreadyExists => "already-exists",
+        std::io::ErrorKind::DirectoryNotEmpty => "directory-not-empty",
+        _ => "io-error",
+    };
+    fs_error(code, &format!("failed to {operation}: {error}"))
 }

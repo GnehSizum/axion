@@ -221,7 +221,7 @@ window.addEventListener('DOMContentLoaded', async () => {
             runtime_event_count: bridge.events.length,
             host_events: [...bridge.hostEvents],
             trusted_origins: [...bridge.trustedOrigins],
-            allowed_navigation_origins: ['https://docs.example'],
+            allowed_navigation_origins: [],
             allow_remote_navigation: false,
             width: windowInfo.width,
             height: windowInfo.height,

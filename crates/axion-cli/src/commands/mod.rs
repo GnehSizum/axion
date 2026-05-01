@@ -22,6 +22,7 @@ pub fn run_new(args: NewArgs) -> Result<(), AxionCliError> {
     println!("Axion application created");
     println!("name: {}", project.name);
     println!("template: {}", project.template.name());
+    println!("template_focus: {}", project.template_summary());
     println!("path: {}", project.root.display());
     println!("next:");
     for step in project.next_steps() {
@@ -38,6 +39,10 @@ pub fn run_new(args: NewArgs) -> Result<(), AxionCliError> {
             json: false,
             keep_artifacts: false,
         })?;
+        println!(
+            "note: run gui-smoke from the Axion checkout with --manifest-path {} and --cargo-target-dir target",
+            project.root.join("axion.toml").display()
+        );
     }
     Ok(())
 }
@@ -149,7 +154,7 @@ impl NewProject {
                 r#"
 ## Native API Demo Focus
 
-This template is tuned for validating Axion's preview native API surface. The UI highlights app/window metadata, clipboard round trips, app-data file reads and writes, headless dialog responses, capability denial, input compatibility, and the GUI smoke hook used by `axion gui-smoke`. Use the "Run all checks" button in the Native API Workbench card for a manual in-window check pass.
+This template is tuned for validating Axion's preview native API surface. The UI highlights app/window metadata, clipboard round trips, app-data file lifecycle operations, headless dialog responses, capability denial, input compatibility, and the GUI smoke hook used by `axion gui-smoke`. Use the "Run all checks" button in the Native API Workbench card for a manual in-window check pass.
 "#
             }
         }
@@ -200,7 +205,7 @@ cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest
 
 - Bridge availability, allowed commands, frontend events, and host lifecycle events such as `window.ready`.
 - Built-in app/window commands: `app.info`, `app.version`, `app.echo`, `app.exit`, `window.info`, `window.close`, `window.reload`, `window.set_title`, and `window.set_size`.
-- Native preview APIs: `clipboard.write_text`, `clipboard.read_text`, `fs.write_text`, `fs.read_text`, `dialog.open`, and `dialog.save`.
+- Native preview APIs: `clipboard.write_text`, `clipboard.read_text`, `fs.create_dir`, `fs.exists`, `fs.write_text`, `fs.read_text`, `fs.list_dir`, `fs.remove`, `dialog.open`, and `dialog.save`.
 - A custom Rust command, `demo.greet`, registered in `src/main.rs`.
 - Capability denial behavior through an intentional `demo.missing` call.
 - Bundle icon validation through `[bundle] icon = "icons/app.icns"`.
@@ -280,7 +285,7 @@ cargo run -p axion-cli -- release --manifest-path {manifest} --json --report-pat
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.1.25\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.1.26\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root
@@ -727,6 +732,7 @@ textarea {
     let windowInfo = null;
     let greeting = null;
     let clipboardRead = null;
+    let fsSummary = null;
 
     try {
       ping = await axion.invoke('app.ping', { from: `${appName}-gui-smoke` });
@@ -774,6 +780,67 @@ textarea {
       );
     } catch (error) {
       pushCheck('clipboard.roundtrip', 'clipboard roundtrip', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      const fsDir = `notes/gui-smoke-${Date.now().toString(36)}`;
+      const fsPath = `${fsDir}/hello.txt`;
+      const fsCreateDir = await axion.invoke('fs.create_dir', { path: fsDir });
+      const fsWrite = await axion.invoke('fs.write_text', {
+        path: fsPath,
+        contents: `${appName} filesystem smoke`,
+      });
+      const fsExists = await axion.invoke('fs.exists', { path: fsPath });
+      const fsRead = await axion.invoke('fs.read_text', { path: fsPath });
+      const fsList = await axion.invoke('fs.list_dir', { path: fsDir });
+      const fsRemove = await axion.invoke('fs.remove', { path: fsPath });
+      const fsMissing = await axion.invoke('fs.exists', { path: fsPath });
+      await axion.invoke('fs.remove', { path: fsDir, recursive: true });
+      fsSummary = { fsCreateDir, fsWrite, fsExists, fsRead, fsList, fsRemove, fsMissing };
+      pushCheck(
+        'fs.lifecycle',
+        'fs create/list/remove lifecycle',
+        fsExists?.exists === true &&
+          fsRead?.contents === `${appName} filesystem smoke` &&
+          Array.isArray(fsList?.entries) &&
+          fsList.entries.some((entry) => entry.name === 'hello.txt') &&
+          fsRemove?.removed === true &&
+          fsMissing?.exists === false
+          ? 'pass'
+          : 'fail',
+        fsPath,
+      );
+    } catch (error) {
+      pushCheck('fs.lifecycle', 'fs create/list/remove lifecycle', 'fail', error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      const errorDir = `notes/gui-smoke-errors-${Date.now().toString(36)}`;
+      const errorFile = `${errorDir}/file.txt`;
+      await axion.invoke('fs.create_dir', { path: errorDir });
+      await axion.invoke('fs.write_text', { path: errorFile, contents: 'error probes' });
+      const missingError = await axion.invoke('fs.read_text', { path: `${errorDir}/missing.txt` })
+        .then(() => 'unexpected success')
+        .catch((error) => error instanceof Error ? error.message : String(error));
+      const listFileError = await axion.invoke('fs.list_dir', { path: errorFile })
+        .then(() => 'unexpected success')
+        .catch((error) => error instanceof Error ? error.message : String(error));
+      const removeNonEmptyError = await axion.invoke('fs.remove', { path: errorDir })
+        .then(() => 'unexpected success')
+        .catch((error) => error instanceof Error ? error.message : String(error));
+      await axion.invoke('fs.remove', { path: errorDir, recursive: true });
+      pushCheck(
+        'fs.expected_errors',
+        'fs expected error codes',
+        missingError.includes('fs.not-found') &&
+          listFileError.includes('fs.not-directory') &&
+          removeNonEmptyError.includes('fs.directory-not-empty')
+          ? 'pass'
+          : 'fail',
+        { missingError, listFileError, removeNonEmptyError },
+      );
+    } catch (error) {
+      pushCheck('fs.expected_errors', 'fs expected error codes', 'fail', error instanceof Error ? error.message : String(error));
     }
 
     const inputSnapshot =
@@ -840,6 +907,7 @@ textarea {
         app_version: appVersion,
         greeting,
         clipboard: clipboardRead,
+        filesystem: fsSummary,
         smoke_checks: checks,
         compat_input: inputSnapshot,
       },
@@ -858,6 +926,7 @@ textarea {
           checks: report.diagnostics?.smoke_checks ?? [],
           appVersion: report.diagnostics?.app_version ?? null,
           clipboard: report.diagnostics?.clipboard ?? null,
+          filesystem: report.diagnostics?.filesystem ?? null,
           input: report.diagnostics?.compat_input ?? null,
         });
         status.textContent = `Native API checks ${report.result}`;
@@ -916,7 +985,9 @@ textarea {
       path: 'notes/hello.txt',
       contents: `${appName} wrote this through the Axion bridge`,
     });
+    const fsExists = await axion.invoke('fs.exists', { path: 'notes/hello.txt' });
     const fsRead = await axion.invoke('fs.read_text', { path: 'notes/hello.txt' });
+    const fsList = await axion.invoke('fs.list_dir', { path: 'notes' });
     const clipboardWrite = await axion.invoke('clipboard.write_text', {
       text: `${appName} clipboard ${new Date().toISOString()}`,
     });
@@ -933,7 +1004,7 @@ textarea {
       title: 'Choose a save path for the Axion preview',
       defaultPath: 'notes/export.txt',
     });
-    renderJson('native-api', { clipboardWrite, clipboardRead, fsWrite, fsRead, dialogOpen, dialogSave });
+    renderJson('native-api', { clipboardWrite, clipboardRead, fsWrite, fsExists, fsRead, fsList, dialogOpen, dialogSave });
 
     const [greeting, pluginEvent] = await Promise.all([
       axion.invoke('demo.greet', { from: `${appName}-frontend` }),
@@ -1170,7 +1241,7 @@ mod tests {
         assert!(
             project
                 .readme()
-                .contains("clipboard round trips, app-data file reads and writes")
+                .contains("clipboard round trips, app-data file lifecycle operations")
         );
         assert!(project.index_html().contains("Axion Native API Demo"));
         assert!(project.index_html().contains("Native API Workbench"));
@@ -1185,10 +1256,16 @@ mod tests {
         assert!(project.app_js().contains("runNativeApiChecks"));
         assert!(project.app_js().contains("Native API checks"));
         assert!(project.app_js().contains("clipboard.roundtrip"));
+        assert!(project.app_js().contains("fs.create_dir"));
+        assert!(project.app_js().contains("fs.exists"));
+        assert!(project.app_js().contains("fs.list_dir"));
+        assert!(project.app_js().contains("fs.remove"));
+        assert!(project.app_js().contains("fs.expected_errors"));
+        assert!(project.app_js().contains("fs.directory-not-empty"));
         assert!(project.app_js().contains("dialog.open"));
         assert!(project.app_js().contains("fs.write_text"));
         assert!(project.style_css().contains("button:disabled"));
-        assert!(project.cargo_toml().contains("version = \"0.1.25\""));
+        assert!(project.cargo_toml().contains("version = \"0.1.26\""));
     }
 
     #[test]
@@ -1259,6 +1336,62 @@ mod tests {
         assert!(next_steps.iter().any(|step| step.contains(
             "--event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json"
         )));
+    }
+
+    #[test]
+    fn generated_project_templates_have_focus_descriptions() {
+        let root = axion_root_for_templates().expect("template root should resolve");
+        let vanilla = NewProject {
+            name: "hello-axion".to_owned(),
+            root: std::path::PathBuf::from("/tmp/hello-axion"),
+            axion_root: root.clone(),
+            template: NewTemplate::Vanilla,
+        };
+        let native_api = NewProject {
+            name: "native-lab".to_owned(),
+            root: std::path::PathBuf::from("/tmp/native-lab"),
+            axion_root: root,
+            template: NewTemplate::NativeApiDemo,
+        };
+
+        assert!(vanilla.template_summary().contains("Bridge, lifecycle"));
+        assert!(native_api.template_summary().contains("Focused clipboard"));
+        assert_ne!(vanilla.template_summary(), native_api.template_summary());
+    }
+
+    #[test]
+    fn checked_in_examples_document_validation_commands() {
+        let root = axion_root_for_templates().expect("template root should resolve");
+        for example in [
+            "hello-axion",
+            "file-access-demo",
+            "multi-window",
+            "bridge-diagnostics-demo",
+        ] {
+            let readme_path = root.join("examples").join(example).join("README.md");
+            let readme = std::fs::read_to_string(&readme_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", readme_path.display()));
+            assert!(
+                readme.contains("--plan"),
+                "{example} README should document --plan"
+            );
+            assert!(
+                readme.contains("check --manifest-path"),
+                "{example} README should document check"
+            );
+            assert!(
+                readme.contains("gui-smoke --manifest-path"),
+                "{example} README should document gui-smoke"
+            );
+            assert!(
+                readme.contains("bundle --manifest-path"),
+                "{example} README should document bundle preview"
+            );
+            assert!(
+                readme.contains("warning") || readme.contains("notice"),
+                "{example} README should explain expected warnings or notices"
+            );
+        }
     }
 
     #[test]

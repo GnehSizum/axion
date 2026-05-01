@@ -2,7 +2,7 @@
 
 Axion is a Rust desktop application framework built on a vendored Servo engine. It provides an explicit manifest, capability-gated JavaScript bridge, packaged app assets, runtime diagnostics, and a `winit` desktop backend.
 
-Axion is currently at the **v0.1.25.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
+Axion is currently at the **v0.1.26.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
 
 ## What Works Today
 
@@ -92,6 +92,12 @@ Each checked-in example includes a local `README.md` with its purpose, run comma
 
 ## Development Checks
 
+Use this quick matrix to choose the right validation level:
+
+- `check`: manifest, security, self-test, bundle preflight, dev preflight, and machine-readable report output.
+- `self-test`: non-GUI runtime planning, bridge capability registration, and deterministic native backend behavior.
+- `gui-smoke`: real Servo-backed window startup plus frontend `window.__AXION_GUI_SMOKE__()` checks.
+
 ```sh
 cargo fmt --all --check
 cargo test --workspace
@@ -123,4 +129,4 @@ Servo warnings from the vendored `servo/` subtree are not Axion release blockers
 
 ## Versioning
 
-Axion public releases use four-part tags such as `v0.1.25.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.25`. See `docs/versioning.md`.
+Axion public releases use four-part tags such as `v0.1.26.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.26`. See `docs/versioning.md`.

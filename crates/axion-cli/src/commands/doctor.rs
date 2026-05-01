@@ -343,19 +343,25 @@ fn security_diagnostics(config: &AppConfig) -> SecurityDiagnostics {
                 add_profile_suggestion_findings(&mut findings, window_id, capability);
                 add_lifecycle_capability_findings(&mut findings, window_id, capability);
 
+                let has_sensitive_native_capability = capability.commands.iter().any(|command| {
+                    command.starts_with("fs.")
+                        || command.starts_with("clipboard.")
+                        || command.starts_with("dialog.")
+                });
+                if (capability.allow_remote_navigation
+                    || !capability.allowed_navigation_origins.is_empty())
+                    && has_sensitive_native_capability
+                {
+                    findings.push(SecurityFinding::warning(
+                        window_id,
+                        "remote_origin_native_capability",
+                        "file, clipboard, or dialog capabilities are enabled on a window that can navigate to remote origins",
+                        Some("keep native capabilities in packaged app windows; remote content should use a narrower bridge surface".to_owned()),
+                    ));
+                }
+
                 if capability.allow_remote_navigation
-                    && (capability
-                        .commands
-                        .iter()
-                        .any(|command| command.starts_with("fs."))
-                        || capability
-                            .commands
-                            .iter()
-                            .any(|command| command.starts_with("clipboard."))
-                        || capability
-                            .commands
-                            .iter()
-                            .any(|command| command.starts_with("dialog."))
+                    && (has_sensitive_native_capability
                         || capability.commands.iter().any(|command| {
                             matches!(
                                 command.as_str(),
@@ -615,7 +621,14 @@ fn suggested_profiles_for_explicit_capabilities(
         ),
         (
             "file-access",
-            &["fs.read_text", "fs.write_text"][..],
+            &[
+                "fs.create_dir",
+                "fs.exists",
+                "fs.list_dir",
+                "fs.read_text",
+                "fs.remove",
+                "fs.write_text",
+            ][..],
             &[][..],
             &["axion"][..],
         ),
@@ -1770,7 +1783,7 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.1.25.0"));
+        assert!(line.contains("release=v0.1.26.0"));
         assert!(line.contains("msrv="));
     }
 
@@ -1924,7 +1937,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "security.summary: warnings=4")
+                .any(|line| line == "security.summary: warnings=5")
         );
         assert!(lines.iter().any(|line| {
             line == "security.window.main: bridge=enabled, risk=medium, commands=5, events=1, protocols=1, navigation_origins=1, remote_navigation=false"
@@ -1934,6 +1947,9 @@ mod tests {
         }));
         assert!(lines.iter().any(|line| {
             line == "security.notice.main: remote navigation is limited to https://docs.example"
+        }));
+        assert!(lines.iter().any(|line| {
+            line == "security.warning.main: file, clipboard, or dialog capabilities are enabled on a window that can navigate to remote origins"
         }));
         assert!(lines.iter().any(|line| {
             line == "security.warning.viewer: protocols does not include axion, so configured commands/events are not reachable from frontend code"
@@ -1994,16 +2010,17 @@ allowed_navigation_origins = ["https://docs.example"]
         assert!(
             json.contains("\"configured_profiles\":[\"app-events\",\"app-info\",\"file-access\"]")
         );
-        assert!(json.contains("\"security\":{\"warning_count\":0"));
+        assert!(json.contains("\"security\":{\"warning_count\":1"));
         assert!(json.contains("\"gate\":{\"passed\":true,\"failed_reasons\":[]}"));
         assert!(json.contains("\"readiness\":{"));
         assert!(json.contains("\"ready_for_dev\":true"));
         assert!(json.contains("\"profiles\":[\"app-events\",\"app-info\",\"file-access\"]"));
         assert!(json.contains("\"risk\":\"medium\""));
         assert!(json.contains(
-            "\"command_categories\":{\"app\":4,\"window\":0,\"fs\":2,\"clipboard\":0,\"dialog\":0,\"custom\":0}"
+            "\"command_categories\":{\"app\":4,\"window\":0,\"fs\":6,\"clipboard\":0,\"dialog\":0,\"custom\":0}"
         ));
         assert!(json.contains("\"code\":\"limited_remote_navigation\""));
+        assert!(json.contains("\"code\":\"remote_origin_native_capability\""));
         assert!(json.contains("\"result\":\"ok\""));
     }
 
@@ -2154,7 +2171,11 @@ protocols = ["axion"]
                         "app.exit".to_owned(),
                         "clipboard.read_text".to_owned(),
                         "clipboard.write_text".to_owned(),
+                        "fs.create_dir".to_owned(),
+                        "fs.exists".to_owned(),
+                        "fs.list_dir".to_owned(),
                         "fs.read_text".to_owned(),
+                        "fs.remove".to_owned(),
                         "fs.write_text".to_owned(),
                     ],
                     explicit_protocols: vec!["axion".to_owned()],
@@ -2162,7 +2183,11 @@ protocols = ["axion"]
                         "app.exit".to_owned(),
                         "clipboard.read_text".to_owned(),
                         "clipboard.write_text".to_owned(),
+                        "fs.create_dir".to_owned(),
+                        "fs.exists".to_owned(),
+                        "fs.list_dir".to_owned(),
                         "fs.read_text".to_owned(),
+                        "fs.remove".to_owned(),
                         "fs.write_text".to_owned(),
                     ],
                     protocols: vec!["axion".to_owned()],
@@ -2319,12 +2344,12 @@ protocols = ["axion"]
             },
         );
 
-        assert_eq!(security.warning_count(), 2);
+        assert_eq!(security.warning_count(), 3);
         assert!(!gate.passed);
         assert!(
             gate.failed_reasons
                 .iter()
-                .any(|reason| { reason == "security warnings 2 exceed allowed 0" })
+                .any(|reason| { reason == "security warnings 3 exceed allowed 0" })
         );
         assert!(
             gate.failed_reasons

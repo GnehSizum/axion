@@ -10,7 +10,7 @@ To generate a runnable project that exercises the current preview native API sur
 cargo run -p axion-cli -- new native-demo --template native-api-demo --path /tmp/native-demo --run-check
 ```
 
-The generated app includes UI and GUI smoke coverage for app/window metadata, clipboard text, app-data file reads and writes, headless dialog responses, input compatibility, and capability denial. Its Native API Workbench card includes a "Run all checks" button that executes the same checks exposed through `window.__AXION_GUI_SMOKE__()`.
+The generated app includes UI and GUI smoke coverage for app/window metadata, clipboard text, app-data file lifecycle operations, headless dialog responses, input compatibility, and capability denial. Its Native API Workbench card includes a "Run all checks" button that executes the same checks exposed through `window.__AXION_GUI_SMOKE__()`.
 
 ## Command Reference Format
 
@@ -30,7 +30,7 @@ Common profiles:
 - `window-control`: current-window control commands
 - `multi-window`: targeted window control including `window.list`
 - `clipboard-access`: `clipboard.write_text`, `clipboard.read_text`
-- `file-access`: `fs.write_text`, `fs.read_text`
+- `file-access`: `fs.create_dir`, `fs.exists`, `fs.write_text`, `fs.read_text`, `fs.list_dir`, `fs.remove`
 - `dialog-access`: `dialog.open`, `dialog.save`
 - `app-events`: frontend event emission such as `app.log`
 
@@ -127,7 +127,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.25", release: "v0.1.25.0", framework: "axion" }
+// { version: "0.1.26", release: "v0.1.26.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -336,7 +336,44 @@ File commands operate only inside Axion's app-data directory:
 <app root>/target/axion-data/<app name>/
 ```
 
-They reject absolute paths, parent-directory traversal, root components, and symlinks.
+They reject absolute paths, parent-directory traversal, root components, and symlinks. Directory removal requires `recursive: true` for non-empty directories.
+
+File command failures use stable preview error code prefixes in the thrown error message:
+
+- `fs.invalid-payload`: required JSON fields are missing or have the wrong type
+- `fs.invalid-path`: the path is empty, absolute, or contains parent/root components
+- `fs.not-found`: the target path does not exist
+- `fs.not-directory`: `fs.list_dir` was called on a file
+- `fs.is-directory`: text read/write was called on a directory
+- `fs.directory-not-empty`: `fs.remove` was called on a non-empty directory without `recursive: true`
+- `fs.symlink-rejected`: the resolved app-data path is a symlink
+- `fs.permission-denied` or `fs.io-error`: the host filesystem rejected the operation
+
+### `fs.create_dir`
+
+Creates a directory and any missing parents under app data.
+
+```js
+await window.__AXION__.invoke("fs.create_dir", {
+  path: "notes/archive",
+});
+// { path: "notes/archive", created: true }
+```
+
+Errors: `fs.invalid-path`, `fs.symlink-rejected`, `fs.permission-denied`, `fs.io-error`.
+
+### `fs.exists`
+
+Checks whether an app-data path exists without reading its contents.
+
+```js
+await window.__AXION__.invoke("fs.exists", {
+  path: "notes/hello.txt",
+});
+// { path: "notes/hello.txt", exists: true }
+```
+
+Errors: `fs.invalid-path`, `fs.symlink-rejected`, `fs.permission-denied`, `fs.io-error`.
 
 ### `fs.write_text`
 
@@ -347,7 +384,10 @@ await window.__AXION__.invoke("fs.write_text", {
   path: "notes/hello.txt",
   contents: "Hello from Axion",
 });
+// { path: "notes/hello.txt", bytes: 16 }
 ```
+
+Errors: `fs.invalid-payload`, `fs.invalid-path`, `fs.is-directory`, `fs.symlink-rejected`, `fs.permission-denied`, `fs.io-error`.
 
 ### `fs.read_text`
 
@@ -357,7 +397,36 @@ Reads UTF-8 text.
 await window.__AXION__.invoke("fs.read_text", {
   path: "notes/hello.txt",
 });
+// { path: "notes/hello.txt", contents: "Hello from Axion" }
 ```
+
+Errors: `fs.invalid-payload`, `fs.invalid-path`, `fs.not-found`, `fs.is-directory`, `fs.symlink-rejected`, `fs.permission-denied`, `fs.io-error`.
+
+### `fs.list_dir`
+
+Lists direct children of an app-data directory. Entries are sorted by name and include file size only for regular files.
+
+```js
+await window.__AXION__.invoke("fs.list_dir", {
+  path: "notes",
+});
+// { path: "notes", entries: [{ name: "hello.txt", path: "notes/hello.txt", kind: "file", bytes: 16 }] }
+```
+
+Errors: `fs.invalid-payload`, `fs.invalid-path`, `fs.not-found`, `fs.not-directory`, `fs.symlink-rejected`, `fs.permission-denied`, `fs.io-error`.
+
+### `fs.remove`
+
+Removes a file or directory under app data. Non-empty directories require `recursive: true`.
+
+```js
+await window.__AXION__.invoke("fs.remove", {
+  path: "notes/hello.txt",
+});
+// { path: "notes/hello.txt", removed: true, kind: "file" }
+```
+
+Errors: `fs.invalid-payload`, `fs.invalid-path`, `fs.not-found`, `fs.directory-not-empty`, `fs.symlink-rejected`, `fs.permission-denied`, `fs.io-error`.
 
 ## Dialog Commands
 
