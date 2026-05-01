@@ -47,7 +47,7 @@ Then validate the example app workflow:
 ```sh
 cargo run -p axion-cli -- check --manifest-path examples/hello-axion/axion.toml --dev --bundle --report-path target/axion/reports/check.json
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
-cargo run -p axion-cli -- gui-smoke --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-gui-smoke.json --timeout-ms 30000 --require-check bridge.bootstrap --require-check app.ping --require-check input.snapshot --cargo-target-dir target --serial-build
+cargo run -p axion-cli -- gui-smoke --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-gui-smoke.json --timeout-ms 30000 --require-check bridge.bootstrap --require-check app.ping --require-check input.snapshot --require-command app.ping --require-command window.info --require-host-event window.ready --require-window main --cargo-target-dir target --serial-build
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --build-executable
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --build-executable --json --report-path target/axion/reports/hello-bundle.json
 cargo run -p axion-cli -- release --manifest-path examples/hello-axion/axion.toml --check-report-path target/axion/reports/check.json --json --report-path target/axion/reports/hello-release.json --bundle-report-path target/axion/reports/hello-bundle.json --archive --archive-path target/axion/reports/hello-bundle.tar
@@ -55,7 +55,7 @@ cargo run -p axion-cli -- report target/axion/reports/hello-release.json --outpu
 cargo run -p axion-cli -- report target/axion/reports/hello-gui-smoke.json --allow-failed --output target/axion/reports/hello-gui-smoke-summary.json
 ```
 
-`gui-smoke` requires a Servo-capable local environment. Use `--require-check` for release smoke runs so missing or skipped runtime coverage fails before tagging. If it cannot run locally, keep the `doctor` readiness output and Servo compile check in the release notes.
+`gui-smoke` requires a Servo-capable local environment. Use runtime requirement flags for release smoke runs so missing or skipped runtime coverage fails before tagging. If it cannot run locally, keep the `doctor` readiness output and Servo compile check in the release notes.
 
 ## Optional CI Preview
 

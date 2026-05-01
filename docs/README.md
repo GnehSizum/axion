@@ -23,7 +23,7 @@ This directory contains public, user-facing documentation for Axion.
 
 ## Current Version
 
-Axion is at **v0.1.31.0 developer preview**. The current preview focuses on the core desktop framework loop:
+Axion is at **v0.1.32.0 developer preview**. The current preview focuses on the core desktop framework loop:
 
 1. load an app manifest
 2. build a runtime plan

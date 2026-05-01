@@ -194,6 +194,9 @@ Useful options:
 - `--serial-build`: set `CARGO_BUILD_JOBS=1` and `MAKEFLAGS=-j1` for lower-resource Servo builds.
 - `--build-env KEY=VALUE`: pass an extra build environment variable to the launched Cargo process. Repeat for multiple variables.
 - `--require-check <id>`: require a returned `diagnostics.smoke_checks[]` entry to exist and pass. Repeat it to lock down runtime coverage such as `bridge.bootstrap`, `app.ping`, or `input.snapshot`.
+- `--require-command <command>`: require a returned diagnostics report to expose a bridge command such as `app.ping` or `window.info`.
+- `--require-host-event <event>`: require a returned diagnostics report to expose a host lifecycle event such as `window.ready`.
+- `--require-window <id>`: require a returned diagnostics report to include a window entry such as `main`.
 
 Recommended generated-app validation from the Axion checkout:
 
@@ -205,11 +208,15 @@ cargo run -p axion-cli -- gui-smoke \
   --require-check bridge.bootstrap \
   --require-check app.ping \
   --require-check input.snapshot \
+  --require-command app.ping \
+  --require-command window.info \
+  --require-host-event window.ready \
+  --require-window main \
   --cargo-target-dir target \
   --serial-build
 ```
 
-GUI smoke requires the app frontend to define `window.__AXION_GUI_SMOKE__()`. The CLI validates both the report schema and `result: "ok"` before returning success, and human output includes a `smoke_checks: total=N, failed=..., error_codes=...` summary when the returned report contains `diagnostics.smoke_checks`. When `--require-check` is used, the CLI also prints `required_checks: total=N, missing=..., failed=..., skipped=...` and fails if any required id is missing, failed, or skipped. Lifecycle-aware examples also report close-confirmation, `window.close_prevented`, `window.close_completed`, `window.close_timed_out`, `window.closed`, `app.exit_requested`, `app.exit_prevented`, and `close_timeout_ms` smoke checks. Failure reports include `failure_phase`, `help`, `next_step`, `failed_check_ids`, `error_codes`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr` under `diagnostics`. Required-check policy failures write a failed `axion.diagnostics-report.v1` to `--report-path` with `diagnostics.required_checks` and the original GUI report under `diagnostics.source_report`. Runtime failures that include `GUI smoke failed` or `Winit(RegisterProtocol(...))` are classified as `runtime` even when Cargo emitted compile progress before launch.
+GUI smoke requires the app frontend to define `window.__AXION_GUI_SMOKE__()`. The CLI validates both the report schema and `result: "ok"` before returning success, and human output includes a `smoke_checks: total=N, failed=..., error_codes=...` summary when the returned report contains `diagnostics.smoke_checks`. When runtime requirements are used, the CLI also prints `required_checks: total=N, missing=..., failed=..., skipped=...` and `required_runtime: commands_missing=..., host_events_missing=..., windows_missing=...`; it fails if any required coverage is missing, failed, or skipped. Lifecycle-aware examples also report close-confirmation, `window.close_prevented`, `window.close_completed`, `window.close_timed_out`, `window.closed`, `app.exit_requested`, `app.exit_prevented`, and `close_timeout_ms` smoke checks. Failure reports include `failure_phase`, `help`, `next_step`, `failed_check_ids`, `error_codes`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr` under `diagnostics`. Runtime policy failures write a failed `axion.diagnostics-report.v1` to `--report-path` with `diagnostics.required_checks`, `diagnostics.required_runtime`, and the original GUI report under `diagnostics.source_report`. Runtime failures that include `GUI smoke failed` or `Winit(RegisterProtocol(...))` are classified as `runtime` even when Cargo emitted compile progress before launch.
 
 Troubleshooting:
 

@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.1.32.0 - Preview
+
+Axion v0.1.32.0 continues Runtime Hardening on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.32`.
+- Axion public release metadata is `v0.1.32.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added `axion gui-smoke --require-command <command>` to require runtime reports to expose expected bridge commands.
+- Added `axion gui-smoke --require-host-event <event>` to require expected host lifecycle events in GUI diagnostics reports.
+- Added `axion gui-smoke --require-window <window-id>` to require expected window entries in GUI diagnostics reports.
+- Added runtime policy failure diagnostics with `diagnostics.required_runtime` and preserved `diagnostics.source_report`.
+
+### Changed
+
+- Optional GUI smoke workflow and generated app validation commands now require core checks, app/window commands, host events, and the main window report entry.
+- Updated public docs and release metadata for v0.1.32.0.
+
 ## v0.1.31.0 - Preview
 
 Axion v0.1.31.0 starts the Runtime Hardening phase on the current Servo `0.1` baseline.

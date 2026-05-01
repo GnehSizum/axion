@@ -34,11 +34,15 @@ cargo run -p axion-cli -- gui-smoke \
   --require-check bridge.bootstrap \
   --require-check app.ping \
   --require-check input.snapshot \
+  --require-command app.ping \
+  --require-command window.info \
+  --require-host-event window.ready \
+  --require-window main \
   --cargo-target-dir target \
   --serial-build
 ```
 
-Use `--require-check` to keep optional GUI jobs useful as runtime regression gates. The command fails if the frontend omits, skips, or fails a required `diagnostics.smoke_checks[]` id, and the written report records `diagnostics.required_checks` for artifact summaries.
+Use `--require-check`, `--require-command`, `--require-host-event`, and `--require-window` to keep optional GUI jobs useful as runtime regression gates. The command fails if the frontend omits, skips, or fails required coverage, and the written report records `diagnostics.required_checks` plus `diagnostics.required_runtime` for artifact summaries.
 
 If this step fails but still writes a report, summarize it without hiding the original failure:
 

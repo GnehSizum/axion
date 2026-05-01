@@ -51,7 +51,7 @@ GUI reports may include an additional `diagnostics` object with bridge snapshots
 
 Each `diagnostics.smoke_checks[]` entry should include stable `id`, user-facing `label`, `status` (`pass`, `fail`, or `skip`), and optional `detail`. Check ids use dotted lower-case names such as `bridge.bootstrap`, `app.ping`, `clipboard.roundtrip`, `fs.roundtrip`, `dialog.preview`, and `input.snapshot`.
 
-CLI-generated GUI smoke failure reports use `source = "axion-cli gui-smoke"` and put process context under `diagnostics`: `failure_phase`, `help`, `next_step`, `failed_check_ids`, `error_codes`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr`. Required-check policy failures from `gui-smoke --require-check` also include `diagnostics.required_checks` with `required`, `missing`, `failed`, and `skipped` arrays, plus the original frontend report as `diagnostics.source_report`. The `failure_phase` value is one of `build`, `runtime`, or `report`.
+CLI-generated GUI smoke failure reports use `source = "axion-cli gui-smoke"` and put process context under `diagnostics`: `failure_phase`, `help`, `next_step`, `failed_check_ids`, `error_codes`, `status_code`, `success`, `report_found`, `timeout_ms`, `cargo_manifest_path`, `cargo_target_dir`, `serial_build`, `build_env_keys`, `stdout`, and `stderr`. Runtime policy failures from `gui-smoke --require-check`, `--require-command`, `--require-host-event`, or `--require-window` also include `diagnostics.required_checks`, `diagnostics.required_runtime`, and the original frontend report as `diagnostics.source_report`. The `failure_phase` value is one of `build`, `runtime`, or `report`.
 
 `doctor --json` readiness output contains `ready_for_dev`, `ready_for_bundle`, `ready_for_gui_smoke`, `blockers`, and `warnings`. Use these fields to decide which release workflow can run next before invoking heavier commands such as `gui-smoke` or `bundle`.
 
@@ -133,7 +133,7 @@ The command exits non-zero if manifest loading, runtime diagnostics, asset stagi
 
 ## Local GUI Smoke
 
-`axion gui-smoke` is the preferred local entrypoint. It runs the Servo-backed window, captures the returned diagnostics report, validates the schema and `result: "ok"`, optionally writes it to `--report-path`, prints a `smoke_checks: total=N, failed=..., error_codes=...` summary for human runs, and exits. Use repeated `--require-check <id>` flags when CI must prove specific runtime coverage such as `bridge.bootstrap`, `app.ping`, or `input.snapshot`; missing, failed, or skipped required checks fail the command. Lifecycle-aware demos should cover `window.close_requested`, window close outcome events such as `window.close_prevented`, `window.close_completed`, and `window.close_timed_out`, `app.exit_requested`, and app exit outcome events such as `app.exit_prevented` when those capabilities are enabled. The bridge diagnostics demo implements the required `window.__AXION_GUI_SMOKE__()` hook.
+`axion gui-smoke` is the preferred local entrypoint. It runs the Servo-backed window, captures the returned diagnostics report, validates the schema and `result: "ok"`, optionally writes it to `--report-path`, prints a `smoke_checks: total=N, failed=..., error_codes=...` summary for human runs, and exits. Use repeated runtime requirement flags when CI must prove specific coverage: `--require-check <id>` for frontend smoke checks, `--require-command <command>` for bridge command exposure, `--require-host-event <event>` for lifecycle event exposure, and `--require-window <id>` for window report entries. Lifecycle-aware demos should cover `window.close_requested`, window close outcome events such as `window.close_prevented`, `window.close_completed`, and `window.close_timed_out`, `app.exit_requested`, and app exit outcome events such as `app.exit_prevented` when those capabilities are enabled. The bridge diagnostics demo implements the required `window.__AXION_GUI_SMOKE__()` hook.
 
 ```sh
 cargo run -p axion-cli -- gui-smoke \
@@ -156,6 +156,10 @@ cargo run -p axion-cli -- gui-smoke \
   --require-check bridge.bootstrap \
   --require-check app.ping \
   --require-check input.snapshot \
+  --require-command app.ping \
+  --require-command window.info \
+  --require-host-event window.ready \
+  --require-window main \
   --cargo-target-dir target \
   --serial-build
 ```

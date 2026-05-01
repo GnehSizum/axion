@@ -89,6 +89,10 @@ jobs:
             --require-check bridge.bootstrap \
             --require-check app.ping \
             --require-check input.snapshot \
+            --require-command app.ping \
+            --require-command window.info \
+            --require-host-event window.ready \
+            --require-window main \
             --quiet
       - name: Run hello GUI smoke
         run: |
@@ -99,6 +103,10 @@ jobs:
             --require-check bridge.bootstrap \
             --require-check app.ping \
             --require-check input.snapshot \
+            --require-command app.ping \
+            --require-command window.info \
+            --require-host-event window.ready \
+            --require-window main \
             --quiet
       - name: Run file access GUI smoke
         run: |
@@ -109,6 +117,10 @@ jobs:
             --require-check bridge.bootstrap \
             --require-check app.ping \
             --require-check input.snapshot \
+            --require-command app.ping \
+            --require-command window.info \
+            --require-host-event window.ready \
+            --require-window main \
             --quiet
       - name: Check GUI smoke report
         run: |

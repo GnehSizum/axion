@@ -174,6 +174,15 @@ pub struct GuiSmokeArgs {
     #[arg(long, value_name = "CHECK_ID")]
     pub require_check: Vec<String>,
 
+    #[arg(long, value_name = "COMMAND")]
+    pub require_command: Vec<String>,
+
+    #[arg(long, value_name = "EVENT")]
+    pub require_host_event: Vec<String>,
+
+    #[arg(long, value_name = "WINDOW_ID")]
+    pub require_window: Vec<String>,
+
     #[arg(long, default_value_t = false)]
     pub quiet: bool,
 }
