@@ -14,7 +14,7 @@ The CLI report is generated through the shared `axion_runtime::DiagnosticsReport
 - `axion bundle --report-path <path>`: writes the same bundle report to disk.
 - `axion release --json`: prints the aggregate release artifact workflow using `axion.release-report.v1`.
 - `axion release --report-path <path>`: writes the same release report to disk.
-- `axion report <path>`: reads an existing Axion report and prints a normalized `axion.report-summary.v1` summary with `--json`.
+- `axion report <path>`: reads an existing Axion report and prints a normalized `axion.report-summary.v1` summary with `--json`. Use `--allow-failed` to summarize failed reports without returning a failed exit status.
 - `axion gui-smoke --report-path <path>`: runs a Servo-backed GUI smoke check and writes the returned GUI report.
 - `examples/bridge-diagnostics-demo`: exports a GUI-side report from app-data.
 - `window.__AXION__.diagnostics.reportSchema`: exposes the active schema string to frontends.
@@ -67,7 +67,7 @@ When `check --dev` is used, `dev_preflight` includes dev-server status, frontend
 
 `axion.bundle-report.v1` summarizes the staged bundle target, layout, generated paths, platform metadata paths, copied icon and executable, verification counters, checked paths, readiness blockers, warnings, optional `report_path`, and `result`. It is intended for release automation that needs bundle-specific output rather than the broader diagnostics report schema.
 
-`axion.release-report.v1` summarizes the full preview artifact workflow: optional reused check report metadata, doctor gate, readiness, self-test, embedded bundle report, optional archive artifact metadata, artifact inventory, first failure diagnostics, `next_step`, and `result`.
+`axion.release-report.v1` summarizes the full preview artifact workflow: optional reused check report metadata, doctor gate, readiness, self-test, embedded bundle report, optional archive artifact metadata, artifact inventory, first failure diagnostics, `next_step`, and `result`. `release --check-report-path` only reuses a matching check report when `result`, doctor, self-test, bundle preflight, and release readiness all pass.
 
 Release reports include:
 

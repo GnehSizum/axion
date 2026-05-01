@@ -7,6 +7,10 @@ use axion_runtime::json_string_literal;
 use crate::cli::{BundleArgs, DoctorArgs, ReleaseArgs, SelfTestArgs};
 use crate::commands::bundle::{bundle_report, write_report_if_requested};
 use crate::commands::doctor::{doctor_gate_for_manifest, doctor_readiness_for_manifest};
+use crate::commands::report_util::{
+    json_array_section, json_bool_field, json_object_section, json_string_array_literal,
+    json_string_array_values, json_string_field, optional_json_string_literal,
+};
 use crate::error::AxionCliError;
 
 pub fn run(args: ReleaseArgs) -> Result<(), AxionCliError> {
@@ -39,6 +43,7 @@ fn release_report(args: &ReleaseArgs) -> ReleaseReport {
                 report.ready_for_dev = check.ready_for_dev;
                 report.ready_for_bundle = check.ready_for_bundle;
                 report.ready_for_gui_smoke = check.ready_for_gui_smoke;
+                report.readiness_warnings = check.readiness_warnings;
                 report.self_test_passed = true;
             }
             Err(error) => {
@@ -572,6 +577,7 @@ struct CheckReportReuse {
     ready_for_dev: bool,
     ready_for_bundle: bool,
     ready_for_gui_smoke: bool,
+    readiness_warnings: Vec<String>,
 }
 
 fn load_check_report_reuse(
@@ -618,6 +624,12 @@ fn load_check_report_reuse(
             "check report missing self_test",
         )
     })?;
+    let bundle_preflight = json_object_section(&body, "\"bundle_preflight\"").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "check report missing bundle_preflight",
+        )
+    })?;
 
     if json_bool_field(doctor, "passed") != Some(true) {
         return Err(std::io::Error::new(
@@ -631,10 +643,19 @@ fn load_check_report_reuse(
             "check report self_test must pass",
         ));
     }
+    if json_bool_field(bundle_preflight, "passed") != Some(true) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "check report bundle_preflight must pass",
+        ));
+    }
 
     let ready_for_dev = json_bool_field(readiness, "ready_for_dev").unwrap_or(false);
     let ready_for_bundle = json_bool_field(readiness, "ready_for_bundle").unwrap_or(false);
     let ready_for_gui_smoke = json_bool_field(readiness, "ready_for_gui_smoke").unwrap_or(false);
+    let readiness_warnings = json_array_section(readiness, "\"warnings\"")
+        .map(json_string_array_values)
+        .unwrap_or_default();
     if !ready_for_dev || !ready_for_bundle {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -646,6 +667,7 @@ fn load_check_report_reuse(
         ready_for_dev,
         ready_for_bundle,
         ready_for_gui_smoke,
+        readiness_warnings,
     })
 }
 
@@ -891,106 +913,6 @@ fn optional_json_u64(value: Option<u64>) -> String {
         .unwrap_or_else(|| "null".to_owned())
 }
 
-fn optional_json_string_literal(value: Option<&str>) -> String {
-    value
-        .map(json_string_literal)
-        .unwrap_or_else(|| "null".to_owned())
-}
-
-fn json_string_array_literal(values: &[String]) -> String {
-    let values = values
-        .iter()
-        .map(|value| json_string_literal(value))
-        .collect::<Vec<_>>()
-        .join(",");
-
-    format!("[{values}]")
-}
-
-fn json_object_section<'a>(source: &'a str, key: &str) -> Option<&'a str> {
-    let key_index = source.find(key)?;
-    let object_start = source[key_index..].find('{')? + key_index;
-    let object_end = matching_json_delimiter(source, object_start, '{', '}')?;
-    source.get(object_start..=object_end)
-}
-
-fn matching_json_delimiter(source: &str, start: usize, open: char, close: char) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (index, character) in source
-        .char_indices()
-        .skip_while(|(index, _)| *index < start)
-    {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        if character == '"' {
-            in_string = true;
-        } else if character == open {
-            depth += 1;
-        } else if character == close {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-    }
-
-    None
-}
-
-fn json_string_field(source: &str, field: &str) -> Option<String> {
-    let key = format!("\"{field}\":\"");
-    let start = source.find(&key)? + key.len();
-    let mut value = String::new();
-    let mut escaped = false;
-    for character in source[start..].chars() {
-        if escaped {
-            value.push(match character {
-                '"' => '"',
-                '\\' => '\\',
-                '/' => '/',
-                'b' => '\u{0008}',
-                'f' => '\u{000c}',
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                other => other,
-            });
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else if character == '"' {
-            return Some(value);
-        } else {
-            value.push(character);
-        }
-    }
-    None
-}
-
-fn json_bool_field(source: &str, field: &str) -> Option<bool> {
-    let key = format!("\"{field}\":");
-    let start = source.find(&key)? + key.len();
-    if source[start..].starts_with("true") {
-        Some(true)
-    } else if source[start..].starts_with("false") {
-        Some(false)
-    } else {
-        None
-    }
-}
-
 fn artifact_array_json(values: &[ArtifactReport]) -> String {
     let values = values
         .iter()
@@ -1077,7 +999,7 @@ mod tests {
         fs::write(
             &check_report,
             format!(
-                "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"doctor\":{{\"passed\":true}},\"readiness\":{{\"ready_for_dev\":true,\"ready_for_bundle\":true,\"ready_for_gui_smoke\":false}},\"self_test\":{{\"passed\":true}},\"result\":\"ok\"}}",
+                "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"doctor\":{{\"passed\":true}},\"readiness\":{{\"ready_for_dev\":true,\"ready_for_bundle\":true,\"ready_for_gui_smoke\":false,\"warnings\":[\"dev server warning\"]}},\"self_test\":{{\"passed\":true}},\"bundle_preflight\":{{\"passed\":true}},\"result\":\"ok\"}}",
                 axion_runtime::json_string_literal(&manifest.display().to_string())
             ),
         )
@@ -1089,5 +1011,29 @@ mod tests {
         assert!(reuse.ready_for_dev);
         assert!(reuse.ready_for_bundle);
         assert!(!reuse.ready_for_gui_smoke);
+        assert_eq!(
+            reuse.readiness_warnings,
+            vec!["dev server warning".to_owned()]
+        );
+    }
+
+    #[test]
+    fn check_report_reuse_rejects_failed_bundle_preflight() {
+        let root = temp_dir("axion-release-check-report-bundle");
+        fs::create_dir_all(&root).unwrap();
+        let manifest = root.join("axion.toml");
+        let check_report = root.join("check.json");
+        fs::write(
+            &check_report,
+            format!(
+                "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"doctor\":{{\"passed\":true}},\"readiness\":{{\"ready_for_dev\":true,\"ready_for_bundle\":true,\"ready_for_gui_smoke\":true,\"warnings\":[]}},\"self_test\":{{\"passed\":true}},\"bundle_preflight\":{{\"passed\":false}},\"result\":\"ok\"}}",
+                axion_runtime::json_string_literal(&manifest.display().to_string())
+            ),
+        )
+        .unwrap();
+
+        let error = load_check_report_reuse(&check_report, &manifest).unwrap_err();
+
+        assert!(error.to_string().contains("bundle_preflight must pass"));
     }
 }

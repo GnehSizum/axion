@@ -5,6 +5,9 @@ use axion_core::{Builder, RunMode};
 use axion_runtime::{DiagnosticsReport, json_string_literal};
 
 use crate::cli::GuiSmokeArgs;
+use crate::commands::report_util::{
+    json_array_section, json_string_field, json_string_fields, next_json_object,
+};
 use crate::error::AxionCliError;
 
 const PASSED_PREFIX: &str = "Axion GUI smoke passed: ";
@@ -230,114 +233,6 @@ fn smoke_check_summary(report: &str) -> SmokeCheckSummary {
         failed_ids,
         failed_error_codes,
     }
-}
-
-fn json_array_section<'a>(source: &'a str, key: &str) -> Option<&'a str> {
-    let key_index = source.find(key)?;
-    let array_start = source[key_index..].find('[')? + key_index;
-    let array_end = matching_json_delimiter(source, array_start, '[', ']')?;
-    source.get(array_start + 1..array_end)
-}
-
-fn next_json_object(source: &str, start: usize) -> Option<(&str, usize)> {
-    let object_start = source.get(start..)?.find('{')? + start;
-    let object_end = matching_json_delimiter(source, object_start, '{', '}')?;
-    Some((source.get(object_start..=object_end)?, object_end + 1))
-}
-
-fn matching_json_delimiter(source: &str, start: usize, open: char, close: char) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (index, character) in source
-        .char_indices()
-        .skip_while(|(index, _)| *index < start)
-    {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        if character == '"' {
-            in_string = true;
-        } else if character == open {
-            depth += 1;
-        } else if character == close {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-    }
-
-    None
-}
-
-fn json_string_field(source: &str, field: &str) -> Option<String> {
-    let key = format!("\"{field}\":\"");
-    let start = source.find(&key)? + key.len();
-    let mut value = String::new();
-    let mut escaped = false;
-    for character in source[start..].chars() {
-        if escaped {
-            value.push(match character {
-                '"' => '"',
-                '\\' => '\\',
-                '/' => '/',
-                'b' => '\u{0008}',
-                'f' => '\u{000c}',
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                other => other,
-            });
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else if character == '"' {
-            return Some(value);
-        } else {
-            value.push(character);
-        }
-    }
-    None
-}
-
-fn json_string_fields(source: &str, field: &str) -> Vec<String> {
-    let key = format!("\"{field}\":\"");
-    let mut values = Vec::new();
-    let mut cursor = 0;
-    while let Some(relative_start) = source[cursor..].find(&key) {
-        let start = cursor + relative_start + key.len();
-        let mut value = String::new();
-        let mut escaped = false;
-        let mut end = start;
-        for (offset, character) in source[start..].char_indices() {
-            end = start + offset + character.len_utf8();
-            if escaped {
-                value.push(character);
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                if !values.contains(&value) {
-                    values.push(value);
-                }
-                break;
-            } else {
-                value.push(character);
-            }
-        }
-        cursor = end;
-    }
-    values
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

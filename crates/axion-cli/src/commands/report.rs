@@ -3,6 +3,10 @@ use std::path::Path;
 use axion_runtime::json_string_literal;
 
 use crate::cli::ReportArgs;
+use crate::commands::report_util::{
+    json_array_section, json_bool_field, json_string_array_literal, json_string_field,
+    json_string_fields, next_json_object, optional_json_string_field, optional_json_string_literal,
+};
 use crate::error::AxionCliError;
 
 pub fn run(args: ReportArgs) -> Result<(), AxionCliError> {
@@ -15,7 +19,7 @@ pub fn run(args: ReportArgs) -> Result<(), AxionCliError> {
         summary.print_human();
     }
 
-    if summary.result.as_deref() == Some("failed") {
+    if summary.result.as_deref() == Some("failed") && !args.allow_failed {
         return Err(std::io::Error::other("report result is failed").into());
     }
 
@@ -209,149 +213,6 @@ fn smoke_check_summary(source: &str) -> Option<SmokeSummary> {
     })
 }
 
-fn json_array_section<'a>(source: &'a str, key: &str) -> Option<&'a str> {
-    let key_index = source.find(key)?;
-    let array_start = source[key_index..].find('[')? + key_index;
-    let array_end = matching_json_delimiter(source, array_start, '[', ']')?;
-    source.get(array_start + 1..array_end)
-}
-
-fn next_json_object(source: &str, start: usize) -> Option<(&str, usize)> {
-    let object_start = source.get(start..)?.find('{')? + start;
-    let object_end = matching_json_delimiter(source, object_start, '{', '}')?;
-    Some((source.get(object_start..=object_end)?, object_end + 1))
-}
-
-fn matching_json_delimiter(source: &str, start: usize, open: char, close: char) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (index, character) in source
-        .char_indices()
-        .skip_while(|(index, _)| *index < start)
-    {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        if character == '"' {
-            in_string = true;
-        } else if character == open {
-            depth += 1;
-        } else if character == close {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-    }
-
-    None
-}
-
-fn optional_json_string_field(source: &str, field: &str) -> Option<String> {
-    if source.contains(&format!("\"{field}\":null")) {
-        None
-    } else {
-        json_string_field(source, field)
-    }
-}
-
-fn json_string_field(source: &str, field: &str) -> Option<String> {
-    let key = format!("\"{field}\":\"");
-    let start = source.find(&key)? + key.len();
-    let mut value = String::new();
-    let mut escaped = false;
-    for character in source[start..].chars() {
-        if escaped {
-            value.push(match character {
-                '"' => '"',
-                '\\' => '\\',
-                '/' => '/',
-                'b' => '\u{0008}',
-                'f' => '\u{000c}',
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                other => other,
-            });
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else if character == '"' {
-            return Some(value);
-        } else {
-            value.push(character);
-        }
-    }
-    None
-}
-
-fn json_string_fields(source: &str, field: &str) -> Vec<String> {
-    let key = format!("\"{field}\":\"");
-    let mut values = Vec::new();
-    let mut cursor = 0;
-    while let Some(relative_start) = source[cursor..].find(&key) {
-        let start = cursor + relative_start + key.len();
-        let mut value = String::new();
-        let mut escaped = false;
-        let mut end = start;
-        for (offset, character) in source[start..].char_indices() {
-            end = start + offset + character.len_utf8();
-            if escaped {
-                value.push(character);
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                if !values.contains(&value) {
-                    values.push(value);
-                }
-                break;
-            } else {
-                value.push(character);
-            }
-        }
-        cursor = end;
-    }
-    values
-}
-
-fn json_bool_field(source: &str, field: &str) -> Option<bool> {
-    let key = format!("\"{field}\":");
-    let start = source.find(&key)? + key.len();
-    if source[start..].starts_with("true") {
-        Some(true)
-    } else if source[start..].starts_with("false") {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-fn optional_json_string_literal(value: Option<&str>) -> String {
-    value
-        .map(json_string_literal)
-        .unwrap_or_else(|| "null".to_owned())
-}
-
-fn json_string_array_literal(values: &[String]) -> String {
-    let values = values
-        .iter()
-        .map(|value| json_string_literal(value))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{values}]")
-}
-
 fn smoke_summary_json(
     total: Option<usize>,
     failed_check_ids: &[String],
@@ -389,7 +250,19 @@ fn artifact_array_json(values: &[ReportArtifact]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::ReportSummary;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::cli::ReportArgs;
+
+    use super::{ReportSummary, run};
+
+    fn temp_report_path(name: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time must be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{name}-{unique}.json"))
+    }
 
     #[test]
     fn summarizes_check_report_with_typed_actions() {
@@ -418,5 +291,44 @@ mod tests {
         assert_eq!(summary.smoke_total, Some(1));
         assert_eq!(summary.failed_check_ids, vec!["fs.roundtrip".to_owned()]);
         assert_eq!(summary.error_codes, vec!["fs.not-found".to_owned()]);
+    }
+
+    #[test]
+    fn failed_reports_require_allow_failed() {
+        let path = temp_report_path("axion-report-failed");
+        std::fs::write(
+            &path,
+            r#"{"schema":"axion.check-report.v1","result":"failed"}"#,
+        )
+        .unwrap();
+
+        let error = run(ReportArgs {
+            path: path.clone(),
+            json: true,
+            allow_failed: false,
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("report result is failed"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn failed_reports_can_be_summarized_when_allowed() {
+        let path = temp_report_path("axion-report-allowed");
+        std::fs::write(
+            &path,
+            r#"{"schema":"axion.check-report.v1","result":"failed"}"#,
+        )
+        .unwrap();
+
+        run(ReportArgs {
+            path: path.clone(),
+            json: true,
+            allow_failed: true,
+        })
+        .expect("allow_failed should preserve summary success");
+
+        let _ = std::fs::remove_file(path);
     }
 }

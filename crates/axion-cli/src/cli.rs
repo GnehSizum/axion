@@ -241,6 +241,9 @@ pub struct ReportArgs {
 
     #[arg(long, default_value_t = false)]
     pub json: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub allow_failed: bool,
 }
 
 #[derive(Debug, Clone, Args)]

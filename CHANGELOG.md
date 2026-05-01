@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.1.29.0 - Preview
+
+Axion v0.1.29.0 stabilizes report consumption and release report reuse on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.29`.
+- Axion public release metadata is `v0.1.29.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added shared CLI report parsing helpers for lightweight Axion-owned JSON report fields.
+- Added `axion report --allow-failed` so CI can summarize failed reports without failing the summary step.
+- Added stricter `release --check-report-path` reuse validation for matching manifest, successful result, passed doctor, passed self-test, passed bundle preflight, and release-ready readiness.
+- Added release carry-forward of readiness warnings from reused check reports.
+
+### Changed
+
+- Generated app Cargo versions now use `0.1.29`.
+- Updated public docs and release metadata for v0.1.29.0.
+
 ## v0.1.28.0 - Preview
 
 Axion v0.1.28.0 improves the development validation loop on the current Servo `0.1` baseline.

@@ -267,7 +267,7 @@ Useful options:
 - `--archive`: create a `.tar` archive next to the generated bundle and report its bytes plus `fnv1a64` fingerprint.
 - `--archive-path <path>`: choose the archive output path.
 - `--skip-build-executable`: skip the default release executable build and use an existing or discovered executable.
-- `--check-report-path <path>`: reuse a previous `axion.check-report.v1` result when it matches the manifest and has `result = "ok"`, doctor passed, readiness passed, and self-test passed.
+- `--check-report-path <path>`: reuse a previous `axion.check-report.v1` result when it matches the manifest and has `result = "ok"`, doctor passed, readiness passed, self-test passed, bundle preflight passed, and release-ready readiness.
 - `--max-risk low|medium|high`: tune the doctor security gate; default is `medium`.
 
 JSON output uses `axion.release-report.v1` and includes `check_report`, `doctor`, `readiness`, `self_test`, embedded `bundle.report`, optional `archive`, `artifacts[]`, `failure_phase`, `failed_reasons`, `next_step`, and `result`.
@@ -281,6 +281,7 @@ Summarize an Axion JSON report without rerunning the original command. The comma
 ```sh
 cargo run -p axion-cli -- report target/axion/reports/hello-release.json
 cargo run -p axion-cli -- report target/axion/reports/hello-gui-smoke.json --json
+cargo run -p axion-cli -- report target/axion/reports/failed-gui-smoke.json --allow-failed
 ```
 
-Human output includes schema, kind, manifest, result, failure phase, next step, typed next-action kinds, smoke-check failures, error codes, and artifact inventory when those fields exist.
+Human output includes schema, kind, manifest, result, failure phase, next step, typed next-action kinds, smoke-check failures, error codes, and artifact inventory when those fields exist. By default, `report` exits non-zero when the source report has `result = "failed"` so CI can fail on summarized artifacts. Use `--allow-failed` when a later CI step should summarize and upload failed reports without changing the job status.

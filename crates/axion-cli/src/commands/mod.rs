@@ -6,6 +6,7 @@ pub mod doctor;
 pub mod gui_smoke;
 pub mod release;
 pub mod report;
+pub mod report_util;
 pub mod self_test;
 
 use std::path::{Path, PathBuf};
@@ -310,7 +311,7 @@ cargo run -p axion-cli -- report target/axion/reports/release.json
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.1.28\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.1.29\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root
@@ -1329,7 +1330,7 @@ mod tests {
         assert!(project.app_js().contains("dialog.open"));
         assert!(project.app_js().contains("fs.write_text"));
         assert!(project.style_css().contains("button:disabled"));
-        assert!(project.cargo_toml().contains("version = \"0.1.28\""));
+        assert!(project.cargo_toml().contains("version = \"0.1.29\""));
     }
 
     #[test]
