@@ -86,6 +86,9 @@ jobs:
             --manifest-path examples/bridge-diagnostics-demo/axion.toml \
             --report-path target/axion/reports/bridge-diagnostics-gui-smoke.json \
             --timeout-ms 30000 \
+            --require-check bridge.bootstrap \
+            --require-check app.ping \
+            --require-check input.snapshot \
             --quiet
       - name: Run hello GUI smoke
         run: |
@@ -93,6 +96,9 @@ jobs:
             --manifest-path examples/hello-axion/axion.toml \
             --report-path target/axion/reports/hello-gui-smoke.json \
             --timeout-ms 30000 \
+            --require-check bridge.bootstrap \
+            --require-check app.ping \
+            --require-check input.snapshot \
             --quiet
       - name: Run file access GUI smoke
         run: |
@@ -100,6 +106,9 @@ jobs:
             --manifest-path examples/file-access-demo/axion.toml \
             --report-path target/axion/reports/file-access-gui-smoke.json \
             --timeout-ms 30000 \
+            --require-check bridge.bootstrap \
+            --require-check app.ping \
+            --require-check input.snapshot \
             --quiet
       - name: Check GUI smoke report
         run: |

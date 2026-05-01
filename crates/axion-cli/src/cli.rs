@@ -171,6 +171,9 @@ pub struct GuiSmokeArgs {
     #[arg(long)]
     pub timeout_ms: Option<u64>,
 
+    #[arg(long, value_name = "CHECK_ID")]
+    pub require_check: Vec<String>,
+
     #[arg(long, default_value_t = false)]
     pub quiet: bool,
 }

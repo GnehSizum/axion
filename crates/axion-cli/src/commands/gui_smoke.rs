@@ -18,6 +18,7 @@ pub fn run(args: GuiSmokeArgs) -> Result<(), AxionCliError> {
     let launch_config = app.runtime_launch_config(RunMode::Production);
     let cargo_manifest_path = cargo_manifest_path_for(&args.manifest_path)?;
     let build_env = parse_build_env(&args.build_env)?;
+    validate_required_smoke_checks(&args.require_check)?;
     let output = run_gui_smoke_process(&cargo_manifest_path, &args, &build_env)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -34,6 +35,34 @@ pub fn run(args: GuiSmokeArgs) -> Result<(), AxionCliError> {
             if let Some(path) = &args.report_path {
                 write_report_json(path, report)?;
             }
+            let required = RequiredSmokeChecks::from_args(&args.require_check, &summary);
+            if !required.is_satisfied() {
+                if let Some(path) = &args.report_path {
+                    let report = required_check_failed_report(RequiredCheckFailedReportInput {
+                        manifest_path: &args.manifest_path,
+                        cargo_manifest_path: &cargo_manifest_path,
+                        launch_config: &launch_config,
+                        summary: &summary,
+                        required: &required,
+                        source_report: report,
+                        timeout_ms: args.timeout_ms,
+                        cargo_target_dir: args.cargo_target_dir.as_deref(),
+                        build_env_keys: build_env
+                            .iter()
+                            .map(|(key, _)| key.as_str())
+                            .collect::<Vec<_>>(),
+                        serial_build: args.serial_build,
+                    });
+                    write_report_json(path, &report)?;
+                }
+                return Err(std::io::Error::other(format!(
+                    "GUI smoke required checks were not satisfied; {}; {}; next_step: {}",
+                    summary.to_line(),
+                    required.to_line(),
+                    required.next_step()
+                ))
+                .into());
+            }
             if !args.quiet {
                 println!("Axion GUI smoke");
                 println!("manifest: {}", args.manifest_path.display());
@@ -42,6 +71,9 @@ pub fn run(args: GuiSmokeArgs) -> Result<(), AxionCliError> {
                     println!("diagnostics_report: {}", path.display());
                 }
                 println!("{}", summary.to_line());
+                if !required.required_ids.is_empty() {
+                    println!("{}", required.to_line());
+                }
                 println!("result: ok");
             }
             Ok(())
@@ -166,7 +198,9 @@ fn report_result_ok(report: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SmokeCheckSummary {
     total: usize,
+    passed_ids: Vec<String>,
     failed_ids: Vec<String>,
+    skipped_ids: Vec<String>,
     failed_error_codes: Vec<String>,
 }
 
@@ -204,35 +238,154 @@ fn smoke_check_summary(report: &str) -> SmokeCheckSummary {
     let Some(checks) = json_array_section(report, "\"smoke_checks\"") else {
         return SmokeCheckSummary {
             total: 0,
+            passed_ids: Vec::new(),
             failed_ids: Vec::new(),
+            skipped_ids: Vec::new(),
             failed_error_codes: Vec::new(),
         };
     };
 
     let mut total = 0;
+    let mut passed_ids = Vec::new();
     let mut failed_ids = Vec::new();
+    let mut skipped_ids = Vec::new();
     let mut failed_error_codes = Vec::new();
     let mut cursor = 0;
     while let Some((object, next_cursor)) = next_json_object(checks, cursor) {
         total += 1;
-        if json_string_field(object, "status").as_deref() == Some("fail") {
-            failed_ids.push(
-                json_string_field(object, "id").unwrap_or_else(|| format!("smoke-check-{total}")),
-            );
-            for code in json_string_fields(object, "code") {
-                if !failed_error_codes.contains(&code) {
-                    failed_error_codes.push(code);
+        let id = json_string_field(object, "id").unwrap_or_else(|| format!("smoke-check-{total}"));
+        match json_string_field(object, "status").as_deref() {
+            Some("pass") => {
+                if !passed_ids.contains(&id) {
+                    passed_ids.push(id);
                 }
             }
+            Some("fail") => {
+                if !failed_ids.contains(&id) {
+                    failed_ids.push(id);
+                }
+                for code in json_string_fields(object, "code") {
+                    if !failed_error_codes.contains(&code) {
+                        failed_error_codes.push(code);
+                    }
+                }
+            }
+            Some("skip") => {
+                if !skipped_ids.contains(&id) {
+                    skipped_ids.push(id);
+                }
+            }
+            _ => {}
         }
         cursor = next_cursor;
     }
 
     SmokeCheckSummary {
         total,
+        passed_ids,
         failed_ids,
+        skipped_ids,
         failed_error_codes,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RequiredSmokeChecks {
+    required_ids: Vec<String>,
+    missing_ids: Vec<String>,
+    failed_ids: Vec<String>,
+    skipped_ids: Vec<String>,
+}
+
+impl RequiredSmokeChecks {
+    fn from_args(required_ids: &[String], summary: &SmokeCheckSummary) -> Self {
+        let mut normalized_required_ids = Vec::new();
+        for id in required_ids {
+            if !normalized_required_ids.contains(id) {
+                normalized_required_ids.push(id.clone());
+            }
+        }
+
+        let mut missing_ids = Vec::new();
+        let mut failed_ids = Vec::new();
+        let mut skipped_ids = Vec::new();
+
+        for id in &normalized_required_ids {
+            if summary.failed_ids.contains(id) {
+                failed_ids.push(id.clone());
+            } else if summary.skipped_ids.contains(id) {
+                skipped_ids.push(id.clone());
+            } else if !summary.passed_ids.contains(id) {
+                missing_ids.push(id.clone());
+            }
+        }
+
+        Self {
+            required_ids: normalized_required_ids,
+            missing_ids,
+            failed_ids,
+            skipped_ids,
+        }
+    }
+
+    fn is_satisfied(&self) -> bool {
+        self.missing_ids.is_empty() && self.failed_ids.is_empty() && self.skipped_ids.is_empty()
+    }
+
+    fn to_line(&self) -> String {
+        format!(
+            "required_checks: total={}, missing={}, failed={}, skipped={}",
+            self.required_ids.len(),
+            list_or_none(&self.missing_ids),
+            list_or_none(&self.failed_ids),
+            list_or_none(&self.skipped_ids)
+        )
+    }
+
+    fn next_step(&self) -> String {
+        let mut blockers = Vec::new();
+        blockers.extend(self.missing_ids.iter().cloned());
+        blockers.extend(self.failed_ids.iter().cloned());
+        blockers.extend(self.skipped_ids.iter().cloned());
+        if blockers.is_empty() {
+            "inspect the returned diagnostics report".to_owned()
+        } else {
+            format!(
+                "make required GUI smoke checks pass: {}; update window.__AXION_GUI_SMOKE__ if coverage is missing",
+                blockers.join(",")
+            )
+        }
+    }
+}
+
+fn list_or_none(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_owned()
+    } else {
+        values.join(",")
+    }
+}
+
+fn validate_required_smoke_checks(values: &[String]) -> Result<(), AxionCliError> {
+    for value in values {
+        if value.is_empty()
+            || !value.chars().all(|character| {
+                character.is_ascii_lowercase()
+                    || character.is_ascii_digit()
+                    || matches!(character, '.' | '_' | '-')
+            })
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid --require-check value '{value}'; use stable lower-case smoke check ids such as bridge.bootstrap or input.snapshot"
+                ),
+            )
+            .into());
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,6 +493,72 @@ struct FailedReportInput<'a> {
     serial_build: bool,
 }
 
+struct RequiredCheckFailedReportInput<'a> {
+    manifest_path: &'a Path,
+    cargo_manifest_path: &'a Path,
+    launch_config: &'a axion_core::RuntimeLaunchConfig,
+    summary: &'a SmokeCheckSummary,
+    required: &'a RequiredSmokeChecks,
+    source_report: &'a str,
+    timeout_ms: Option<u64>,
+    cargo_target_dir: Option<&'a Path>,
+    build_env_keys: Vec<&'a str>,
+    serial_build: bool,
+}
+
+fn required_check_failed_report(input: RequiredCheckFailedReportInput<'_>) -> String {
+    let next_step = input.required.next_step();
+    DiagnosticsReport {
+        source: "axion-cli gui-smoke".to_owned(),
+        exported_at_unix_seconds: Some(current_unix_timestamp_secs()),
+        manifest_path: Some(input.manifest_path.to_path_buf()),
+        app_name: input.launch_config.app_name.clone(),
+        identifier: input.launch_config.identifier.clone(),
+        version: input.launch_config.version.clone(),
+        description: input.launch_config.description.clone(),
+        authors: input.launch_config.authors.clone(),
+        homepage: input.launch_config.homepage.clone(),
+        mode: Some("production".to_owned()),
+        window_count: input.launch_config.windows.len(),
+        windows: Vec::new(),
+        frontend_dist: Some(input.launch_config.frontend_dist.clone()),
+        entry: Some(input.launch_config.packaged_entry.clone()),
+        configured_dialog_backend: None,
+        dialog_backend: None,
+        configured_clipboard_backend: None,
+        clipboard_backend: None,
+        close_timeout_ms: Some(input.launch_config.native.lifecycle.close_timeout_ms),
+        icon: None,
+        host_events: Vec::new(),
+        staged_app_dir: None,
+        asset_manifest_path: None,
+        artifacts_removed: None,
+        diagnostics: Some(format!(
+            "{{\"error\":\"required GUI smoke checks were not satisfied\",\"failure_phase\":\"runtime\",\"help\":{},\"next_step\":{},\"failed_check_ids\":{},\"error_codes\":{},\"required_checks\":{{\"required\":{},\"missing\":{},\"failed\":{},\"skipped\":{}}},\"smoke_check_summary\":{{\"total\":{},\"passed\":{},\"failed\":{},\"skipped\":{}}},\"status_code\":0,\"success\":false,\"report_found\":true,\"timeout_ms\":{},\"cargo_manifest_path\":{},\"cargo_target_dir\":{},\"serial_build\":{},\"build_env_keys\":{},\"source_report\":{}}}",
+            json_string_literal(RUNTIME_FAILURE_HELP),
+            json_string_literal(&next_step),
+            string_vec_json(&input.summary.failed_ids),
+            string_vec_json(&input.summary.failed_error_codes),
+            string_vec_json(&input.required.required_ids),
+            string_vec_json(&input.required.missing_ids),
+            string_vec_json(&input.required.failed_ids),
+            string_vec_json(&input.required.skipped_ids),
+            input.summary.total,
+            string_vec_json(&input.summary.passed_ids),
+            string_vec_json(&input.summary.failed_ids),
+            string_vec_json(&input.summary.skipped_ids),
+            optional_timeout_ms(input.timeout_ms),
+            json_string_literal(&input.cargo_manifest_path.display().to_string()),
+            optional_path_json_string(input.cargo_target_dir),
+            input.serial_build,
+            string_array_json(&input.build_env_keys),
+            input.source_report,
+        )),
+        result: "failed".to_owned(),
+    }
+    .to_json()
+}
+
 fn failed_report(input: FailedReportInput<'_>) -> String {
     DiagnosticsReport {
         source: "axion-cli gui-smoke".to_owned(),
@@ -407,6 +626,15 @@ fn optional_path_json_string(path: Option<&Path>) -> String {
 }
 
 fn string_array_json(values: &[&str]) -> String {
+    let values = values
+        .iter()
+        .map(|value| json_string_literal(value))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{values}]")
+}
+
+fn string_vec_json(values: &[String]) -> String {
     let values = values
         .iter()
         .map(|value| json_string_literal(value))
@@ -494,9 +722,10 @@ fn current_unix_timestamp_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        FailedReportInput, FailurePhase, PASSED_PREFIX, classify_failure_phase,
-        extract_gui_smoke_report, failed_report, gui_smoke_failure, gui_smoke_failure_message,
-        parse_build_env, report_result_ok, smoke_check_summary,
+        FailedReportInput, FailurePhase, PASSED_PREFIX, RequiredCheckFailedReportInput,
+        RequiredSmokeChecks, classify_failure_phase, extract_gui_smoke_report, failed_report,
+        gui_smoke_failure, gui_smoke_failure_message, parse_build_env, report_result_ok,
+        required_check_failed_report, smoke_check_summary, validate_required_smoke_checks,
     };
 
     #[cfg(unix)]
@@ -544,13 +773,16 @@ mod tests {
             "{\"schema\":\"axion.diagnostics-report.v1\",\"result\":\"failed\",",
             "\"diagnostics\":{\"smoke_checks\":[",
             "{\"id\":\"app.ping\",\"status\":\"pass\",\"detail\":\"ok\"},",
+            "{\"id\":\"dialog.preview\",\"status\":\"skip\",\"detail\":\"unavailable\"},",
             "{\"id\":\"window.close\",\"status\":\"fail\",\"detail\":{\"error\":{\"code\":\"window.unavailable\"}}},",
             "{\"id\":\"window.prevent_close\",\"status\":\"fail\",\"detail\":{\"error\":{\"code\":\"window.duplicate\"}}}",
             "]}}"
         );
         let summary = smoke_check_summary(report);
 
-        assert_eq!(summary.total, 3);
+        assert_eq!(summary.total, 4);
+        assert_eq!(summary.passed_ids, vec!["app.ping".to_owned()]);
+        assert_eq!(summary.skipped_ids, vec!["dialog.preview".to_owned()]);
         assert_eq!(
             summary.failed_ids,
             vec!["window.close".to_owned(), "window.prevent_close".to_owned()]
@@ -564,7 +796,7 @@ mod tests {
         );
         assert_eq!(
             summary.to_line(),
-            "smoke_checks: total=3, failed=window.close,window.prevent_close, error_codes=window.unavailable,window.duplicate"
+            "smoke_checks: total=4, failed=window.close,window.prevent_close, error_codes=window.unavailable,window.duplicate"
         );
     }
 
@@ -577,6 +809,66 @@ mod tests {
             summary.to_line(),
             "smoke_checks: total=0, failed=none, error_codes=none"
         );
+    }
+
+    #[test]
+    fn required_smoke_checks_report_missing_failed_and_skipped_ids() {
+        let report = concat!(
+            "{\"schema\":\"axion.diagnostics-report.v1\",\"result\":\"ok\",",
+            "\"diagnostics\":{\"smoke_checks\":[",
+            "{\"id\":\"bridge.bootstrap\",\"status\":\"pass\"},",
+            "{\"id\":\"input.snapshot\",\"status\":\"skip\"},",
+            "{\"id\":\"window.close\",\"status\":\"fail\"}",
+            "]}}"
+        );
+        let summary = smoke_check_summary(report);
+        let required = RequiredSmokeChecks::from_args(
+            &[
+                "bridge.bootstrap".to_owned(),
+                "input.snapshot".to_owned(),
+                "window.close".to_owned(),
+                "window.reload".to_owned(),
+                "bridge.bootstrap".to_owned(),
+            ],
+            &summary,
+        );
+
+        assert!(!required.is_satisfied());
+        assert_eq!(
+            required.required_ids,
+            vec![
+                "bridge.bootstrap".to_owned(),
+                "input.snapshot".to_owned(),
+                "window.close".to_owned(),
+                "window.reload".to_owned(),
+            ]
+        );
+        assert_eq!(required.missing_ids, vec!["window.reload".to_owned()]);
+        assert_eq!(required.failed_ids, vec!["window.close".to_owned()]);
+        assert_eq!(required.skipped_ids, vec!["input.snapshot".to_owned()]);
+        assert_eq!(
+            required.to_line(),
+            "required_checks: total=4, missing=window.reload, failed=window.close, skipped=input.snapshot"
+        );
+        assert!(
+            required
+                .next_step()
+                .contains("make required GUI smoke checks pass")
+        );
+    }
+
+    #[test]
+    fn validates_required_smoke_check_ids() {
+        assert!(
+            validate_required_smoke_checks(&[
+                "bridge.bootstrap".to_owned(),
+                "input_snapshot".to_owned(),
+                "window-close".to_owned()
+            ])
+            .is_ok()
+        );
+        assert!(validate_required_smoke_checks(&["".to_owned()]).is_err());
+        assert!(validate_required_smoke_checks(&["Bridge.Bootstrap".to_owned()]).is_err());
     }
 
     #[test]
@@ -709,5 +1001,56 @@ mod tests {
         assert!(report.contains("\"cargo_target_dir\":\"target\""));
         assert!(report.contains("\"serial_build\":true"));
         assert!(report.contains("\"build_env_keys\":[\"CARGO_BUILD_JOBS\"]"));
+    }
+
+    #[test]
+    fn required_check_failed_report_includes_policy_context() {
+        let launch_config = axion_core::RuntimeLaunchConfig {
+            app_name: "gui-smoke-test".to_owned(),
+            identifier: Some("dev.axion.gui-smoke-test".to_owned()),
+            version: Some("0.1.0".to_owned()),
+            description: None,
+            authors: Vec::new(),
+            homepage: None,
+            mode: axion_core::RunMode::Production,
+            entrypoint: axion_core::LaunchEntrypoint::Packaged(std::path::PathBuf::from(
+                "frontend/index.html",
+            )),
+            frontend_dist: std::path::PathBuf::from("frontend"),
+            packaged_entry: std::path::PathBuf::from("frontend/index.html"),
+            native: axion_core::NativeConfig::default(),
+            windows: Vec::new(),
+        };
+        let source_report = concat!(
+            "{\"schema\":\"axion.diagnostics-report.v1\",\"result\":\"ok\",",
+            "\"diagnostics\":{\"smoke_checks\":[",
+            "{\"id\":\"bridge.bootstrap\",\"status\":\"pass\"},",
+            "{\"id\":\"input.snapshot\",\"status\":\"skip\"}",
+            "]}}"
+        );
+        let summary = smoke_check_summary(source_report);
+        let required = RequiredSmokeChecks::from_args(
+            &["bridge.bootstrap".to_owned(), "input.snapshot".to_owned()],
+            &summary,
+        );
+        let report = required_check_failed_report(RequiredCheckFailedReportInput {
+            manifest_path: std::path::Path::new("axion.toml"),
+            cargo_manifest_path: std::path::Path::new("Cargo.toml"),
+            launch_config: &launch_config,
+            summary: &summary,
+            required: &required,
+            source_report,
+            timeout_ms: Some(30000),
+            cargo_target_dir: Some(std::path::Path::new("target")),
+            build_env_keys: vec!["CARGO_BUILD_JOBS"],
+            serial_build: true,
+        });
+
+        assert!(report.contains("\"result\":\"failed\""));
+        assert!(report.contains("\"failure_phase\":\"runtime\""));
+        assert!(report.contains("\"required\":[\"bridge.bootstrap\",\"input.snapshot\"]"));
+        assert!(report.contains("\"skipped\":[\"input.snapshot\"]"));
+        assert!(report.contains("\"source_report\":{\"schema\":\"axion.diagnostics-report.v1\""));
+        assert!(report.contains("\"report_found\":true"));
     }
 }

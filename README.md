@@ -2,7 +2,7 @@
 
 Axion is a Rust desktop application framework built on a vendored Servo engine. It provides an explicit manifest, capability-gated JavaScript bridge, packaged app assets, runtime diagnostics, and a `winit` desktop backend.
 
-Axion is currently at the **v0.1.30.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
+Axion is currently at the **v0.1.31.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
 
 ## What Works Today
 
@@ -111,7 +111,7 @@ cargo check -p bridge-diagnostics-demo --features servo-runtime
 cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- check --manifest-path examples/hello-axion/axion.toml --dev --bundle --json --report-path target/axion/reports/hello-check.json
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
-cargo run -p axion-cli -- gui-smoke --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-gui-smoke.json --timeout-ms 30000
+cargo run -p axion-cli -- gui-smoke --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-gui-smoke.json --timeout-ms 30000 --require-check bridge.bootstrap --require-check app.ping --require-check input.snapshot
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --json
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-bundle.json
@@ -120,18 +120,18 @@ cargo run -p axion-cli -- report target/axion/reports/hello-release.json --outpu
 cargo run -p axion-cli -- report target/axion/reports/hello-gui-smoke.json --allow-failed --output target/axion/reports/hello-gui-smoke-summary.json
 cargo run -p axion-cli -- doctor --manifest-path examples/file-access-demo/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/file-access-demo/axion.toml
-cargo run -p axion-cli -- gui-smoke --manifest-path examples/file-access-demo/axion.toml --report-path target/axion/reports/file-access-gui-smoke.json --timeout-ms 30000
+cargo run -p axion-cli -- gui-smoke --manifest-path examples/file-access-demo/axion.toml --report-path target/axion/reports/file-access-gui-smoke.json --timeout-ms 30000 --require-check bridge.bootstrap --require-check app.ping --require-check input.snapshot
 cargo run -p axion-cli -- doctor --manifest-path examples/multi-window/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/multi-window/axion.toml
 cargo run -p axion-cli -- bundle --manifest-path examples/multi-window/axion.toml
 cargo run -p axion-cli -- doctor --manifest-path examples/bridge-diagnostics-demo/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/bridge-diagnostics-demo/axion.toml --json
-cargo run -p axion-cli -- gui-smoke --manifest-path examples/bridge-diagnostics-demo/axion.toml --report-path target/axion/reports/bridge-diagnostics-gui-smoke.json --timeout-ms 30000
+cargo run -p axion-cli -- gui-smoke --manifest-path examples/bridge-diagnostics-demo/axion.toml --report-path target/axion/reports/bridge-diagnostics-gui-smoke.json --timeout-ms 30000 --require-check bridge.bootstrap --require-check app.ping --require-check input.snapshot
 ```
 
 Servo warnings from the vendored `servo/` subtree are not Axion release blockers unless they correspond to an Axion regression.
-`gui-smoke --timeout-ms <milliseconds>` can extend the local GUI smoke timeout for slow debug builds.
+`gui-smoke --timeout-ms <milliseconds>` can extend the local GUI smoke timeout for slow debug builds. Add repeated `--require-check <id>` flags when local or CI validation must fail if a runtime smoke check is missing, skipped, or failed.
 
 ## Versioning
 
-Axion public releases use four-part tags such as `v0.1.30.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.30`. See `docs/versioning.md`.
+Axion public releases use four-part tags such as `v0.1.31.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.31`. See `docs/versioning.md`.

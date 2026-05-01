@@ -31,9 +31,14 @@ cargo run -p axion-cli -- gui-smoke \
   --manifest-path examples/hello-axion/axion.toml \
   --report-path target/axion/reports/gui-smoke.json \
   --timeout-ms 30000 \
+  --require-check bridge.bootstrap \
+  --require-check app.ping \
+  --require-check input.snapshot \
   --cargo-target-dir target \
   --serial-build
 ```
+
+Use `--require-check` to keep optional GUI jobs useful as runtime regression gates. The command fails if the frontend omits, skips, or fails a required `diagnostics.smoke_checks[]` id, and the written report records `diagnostics.required_checks` for artifact summaries.
 
 If this step fails but still writes a report, summarize it without hiding the original failure:
 

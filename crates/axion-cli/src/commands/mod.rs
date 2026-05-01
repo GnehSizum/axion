@@ -112,7 +112,7 @@ impl NewProject {
                 "from Axion checkout: cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle --json --report-path target/axion/reports/check.json"
             ),
             format!(
-                "from Axion checkout: cargo run -p axion-cli -- gui-smoke --manifest-path {manifest} --report-path target/axion/reports/gui-smoke.json --timeout-ms 30000 --cargo-target-dir target --serial-build"
+                "from Axion checkout: cargo run -p axion-cli -- gui-smoke --manifest-path {manifest} --report-path target/axion/reports/gui-smoke.json --timeout-ms 30000 --require-check bridge.bootstrap --require-check app.ping --require-check input.snapshot --cargo-target-dir target --serial-build"
             ),
             format!(
                 "from Axion checkout: cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest} --launch --fallback-packaged --watch --reload --restart-on-change --event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json"
@@ -283,7 +283,7 @@ Run these commands from the Axion repository root so `gui-smoke` can reuse the c
 cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle --json --report-path target/axion/reports/check.json
 cargo run -p axion-cli -- doctor --manifest-path {manifest} --deny-warnings --max-risk medium
 cargo run -p axion-cli -- self-test --manifest-path {manifest}
-cargo run -p axion-cli -- gui-smoke --manifest-path {manifest} --report-path target/axion/reports/gui-smoke.json --timeout-ms 30000 --cargo-target-dir target --serial-build
+cargo run -p axion-cli -- gui-smoke --manifest-path {manifest} --report-path target/axion/reports/gui-smoke.json --timeout-ms 30000 --require-check bridge.bootstrap --require-check app.ping --require-check input.snapshot --cargo-target-dir target --serial-build
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable
 cargo run -p axion-cli -- bundle --manifest-path {manifest} --build-executable --json --report-path target/axion/reports/bundle.json
 cargo run -p axion-cli -- release --manifest-path {manifest} --check-report-path target/axion/reports/check.json --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar
@@ -314,7 +314,7 @@ cargo run -p axion-cli -- report target/axion/reports/release.json --output targ
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.1.30\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.1.31\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root
@@ -1333,7 +1333,7 @@ mod tests {
         assert!(project.app_js().contains("dialog.open"));
         assert!(project.app_js().contains("fs.write_text"));
         assert!(project.style_css().contains("button:disabled"));
-        assert!(project.cargo_toml().contains("version = \"0.1.30\""));
+        assert!(project.cargo_toml().contains("version = \"0.1.31\""));
     }
 
     #[test]

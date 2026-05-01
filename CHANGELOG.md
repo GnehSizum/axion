@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.1.31.0 - Preview
+
+Axion v0.1.31.0 starts the Runtime Hardening phase on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.31`.
+- Axion public release metadata is `v0.1.31.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added repeated `axion gui-smoke --require-check <id>` flags so local and CI GUI smoke runs can require specific `diagnostics.smoke_checks[]` entries to exist and pass.
+- Added required-check failure diagnostics with `diagnostics.required_checks` and the original GUI report embedded under `diagnostics.source_report`.
+- Added optional GUI smoke workflow coverage gates for bridge bootstrap, app ping, and text input snapshots.
+
+### Changed
+
+- Generated app next steps and README validation commands now include required GUI smoke checks for runtime coverage.
+- Updated public docs and release metadata for v0.1.31.0.
+
 ## v0.1.30.0 - Preview
 
 Axion v0.1.30.0 hardens report consumption and CI guidance on the current Servo `0.1` baseline.

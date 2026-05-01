@@ -58,7 +58,7 @@ struct ReportArtifact {
 impl ReportSummary {
     fn from_json(path: &Path, body: &str) -> Result<Self, AxionCliError> {
         validate_report_shape(body)?;
-        let schema = json_string_field(body, "schema").ok_or_else(|| {
+        let schema = top_level_json_string_field(body, "schema").ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
@@ -78,9 +78,9 @@ impl ReportSummary {
                 )
             })?
             .to_owned();
-        let manifest_path = json_string_field(body, "manifest_path")
-            .or_else(|| json_string_field(body, "manifestPath"));
-        let result = json_string_field(body, "result").ok_or_else(|| {
+        let manifest_path = top_level_json_string_field(body, "manifest_path")
+            .or_else(|| top_level_json_string_field(body, "manifestPath"));
+        let result = top_level_json_string_field(body, "result").ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "report is missing string result field",
@@ -235,6 +235,98 @@ fn report_kind(schema: &str) -> Option<&'static str> {
     }
 }
 
+fn top_level_json_string_field(source: &str, field: &str) -> Option<String> {
+    let source = source.trim();
+    let key = format!("\"{field}\"");
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, character) in source.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match character {
+            '"' => {
+                if depth == 1 && source[index..].starts_with(&key) {
+                    let mut cursor = index + key.len();
+                    cursor = skip_json_whitespace(source, cursor);
+                    if source.get(cursor..=cursor)? != ":" {
+                        in_string = true;
+                        continue;
+                    }
+                    cursor = skip_json_whitespace(source, cursor + 1);
+                    return parse_json_string(source, cursor).map(|(value, _)| value);
+                }
+                in_string = true;
+            }
+            '{' | '[' => depth += 1,
+            '}' | ']' => depth = depth.checked_sub(1)?,
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn skip_json_whitespace(source: &str, mut cursor: usize) -> usize {
+    while source
+        .get(cursor..)
+        .and_then(|tail| tail.chars().next())
+        .is_some_and(char::is_whitespace)
+    {
+        cursor += source[cursor..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(0);
+    }
+    cursor
+}
+
+fn parse_json_string(source: &str, start: usize) -> Option<(String, usize)> {
+    if source.get(start..=start)? != "\"" {
+        return None;
+    }
+
+    let mut value = String::new();
+    let mut escaped = false;
+    let content_start = start + 1;
+    for (offset, character) in source[content_start..].char_indices() {
+        let end = content_start + offset + character.len_utf8();
+        if escaped {
+            value.push(match character {
+                '"' => '"',
+                '\\' => '\\',
+                '/' => '/',
+                'b' => '\u{0008}',
+                'f' => '\u{000c}',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            });
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            return Some((value, end));
+        } else {
+            value.push(character);
+        }
+    }
+
+    None
+}
+
 fn write_summary_json(path: &Path, summary_json: &str) -> Result<(), AxionCliError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -333,7 +425,7 @@ mod tests {
 
     use crate::cli::ReportArgs;
 
-    use super::{ReportSummary, run};
+    use super::{ReportSummary, run, top_level_json_string_field};
 
     fn temp_report_path(name: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
@@ -370,6 +462,38 @@ mod tests {
         assert_eq!(summary.smoke_total, Some(1));
         assert_eq!(summary.failed_check_ids, vec!["fs.roundtrip".to_owned()]);
         assert_eq!(summary.error_codes, vec!["fs.not-found".to_owned()]);
+    }
+
+    #[test]
+    fn summary_uses_top_level_result_when_nested_reports_exist() {
+        let report = concat!(
+            "{\"schema\":\"axion.diagnostics-report.v1\",",
+            "\"diagnostics\":{\"source_report\":{\"result\":\"ok\"},\"failure_phase\":\"runtime\"},",
+            "\"result\":\"failed\"}"
+        );
+        let summary = ReportSummary::from_json(std::path::Path::new("gui.json"), report)
+            .expect("summary should parse");
+
+        assert_eq!(summary.result, "failed");
+        assert_eq!(summary.failure_phase.as_deref(), Some("runtime"));
+    }
+
+    #[test]
+    fn top_level_string_fields_ignore_nested_values() {
+        let report = concat!(
+            "{\"schema\":\"axion.diagnostics-report.v1\",",
+            "\"diagnostics\":{\"schema\":\"nested\",\"result\":\"ok\"},",
+            "\"result\":\"failed\"}"
+        );
+
+        assert_eq!(
+            top_level_json_string_field(report, "schema").as_deref(),
+            Some("axion.diagnostics-report.v1")
+        );
+        assert_eq!(
+            top_level_json_string_field(report, "result").as_deref(),
+            Some("failed")
+        );
     }
 
     #[test]
