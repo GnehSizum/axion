@@ -27,12 +27,13 @@ Prefer profiles for common groups and explicit entries for app-specific commands
 | `window-control` | `window.close`, `window.confirm_close`, `window.focus`, `window.hide`, `window.info`, `window.prevent_close`, `window.reload`, `window.set_size`, `window.set_title`, `window.show` | none | `axion` |
 | `multi-window` | `window.close`, `window.confirm_close`, `window.focus`, `window.info`, `window.list`, `window.prevent_close`, `window.reload`, `window.set_title` | none | `axion` |
 | `clipboard-access` | `clipboard.read_text`, `clipboard.write_text` | none | `axion` |
+| `shell-access` | `shell.open` | none | `axion` |
 | `file-access` | `fs.create_dir`, `fs.exists`, `fs.list_dir`, `fs.read_text`, `fs.remove`, `fs.write_text` | none | `axion` |
 | `dialog-access` | `dialog.open`, `dialog.save` | none | `axion` |
 
 ## Risk Guidance
 
-- Keep `fs.*`, `clipboard.*`, and `dialog.*` on packaged app windows. Do not expose them to windows that can navigate to remote content.
+- Keep `fs.*`, `clipboard.*`, `shell.*`, and `dialog.*` on packaged app windows. Do not expose them to windows that can navigate to remote content.
 - Treat `app.exit`, `window.close`, and `window.reload` as runtime-control capabilities. Pair `window.close` with `window.confirm_close` and `window.prevent_close`.
 - Prefer `allowed_navigation_origins` over `allow_remote_navigation = true`.
 - Avoid duplicating explicit commands already provided by a profile; `doctor` reports these as notices.

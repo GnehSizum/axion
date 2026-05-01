@@ -19,7 +19,7 @@ Capabilities are scoped to a window id:
 
 ```toml
 [capabilities.main]
-profiles = ["app-info", "app-control", "multi-window", "clipboard-access", "file-access", "dialog-access", "app-events"]
+profiles = ["app-info", "app-control", "multi-window", "clipboard-access", "shell-access", "file-access", "dialog-access", "app-events"]
 allowed_navigation_origins = []
 allow_remote_navigation = false
 ```
@@ -32,6 +32,7 @@ Higher-risk command groups should stay local to trusted packaged UI:
 - `clipboard.*`: reads or writes clipboard text through the configured preview backend.
 - `fs.*`: restricted to app-data paths, but still reads or writes user-visible data.
 - `dialog.*`: opens native file dialogs and can expose selected paths to the app.
+- `shell.*`: opens validated URLs in external apps or browsers.
 - `app.exit`, `window.close`, and `window.reload`: affect runtime control flow and user state.
 
 ## Capability Profiles
@@ -45,6 +46,7 @@ Profiles reduce repetitive manifest entries but do not bypass the deny-by-defaul
 - `window-control`: current-window control commands, including close confirmation.
 - `multi-window`: multi-window coordination commands, including targeted close confirmation.
 - `clipboard-access`: clipboard read/write commands.
+- `shell-access`: validated URL opening through the platform opener.
 - `file-access`: app-data file lifecycle commands for create, exists, list, read, remove, and write.
 - `dialog-access`: native open/save dialog commands.
 
@@ -76,9 +78,9 @@ Bridge payloads must be valid JSON values. Request ids, command names, event nam
 
 File commands are restricted to Axion's app-data directory. Absolute paths, `..` components, root components, and symlink targets are rejected. Directory removal requires `recursive: true` for non-empty directories.
 
-This app-data sandbox is a framework-level path sandbox, not an operating-system permission sandbox. Do not expose `file-access`, `clipboard-access`, or `dialog-access` to untrusted remote content. `axion doctor` emits `remote_origin_native_capability` when a window can navigate to remote origins while native data capabilities are enabled.
+This app-data sandbox is a framework-level path sandbox, not an operating-system permission sandbox. Do not expose `file-access`, `clipboard-access`, `shell-access`, or `dialog-access` to untrusted remote content. `axion doctor` emits `remote_origin_native_capability` when a window can navigate to remote origins while native data capabilities are enabled.
 
-Dialog and clipboard commands are also capability-gated. Keep `[native.dialog] backend = "headless"` and `[native.clipboard] backend = "memory"` for CI and non-interactive environments. Use system backends only for trusted packaged UI, because the system clipboard can expose data across application boundaries.
+Dialog, clipboard, and shell commands are also capability-gated. Keep `[native.dialog] backend = "headless"` and `[native.clipboard] backend = "memory"` for CI and non-interactive environments. Use shell-opening only for trusted packaged UI, because opener calls can hand control to external apps or browsers.
 
 Close confirmation is intentionally timeout-bound. Keep `[native.lifecycle] close_timeout_ms` long enough for trusted UI prompts, but do not rely on it as a security boundary; it is a lifecycle safety net for unsaved-state flows.
 
@@ -128,7 +130,7 @@ Key lines:
 - `security.window.<id>`: bridge status, risk level, command count, event count, protocol count, navigation allowlist count, and remote-navigation flag.
 - `security.window.<id>.profiles`: declared capability profiles, or `none`.
 - `security.window.<id>.profile.<profile>`: commands, events, and protocols supplied by that profile.
-- `security.window.<id>.commands`: command categories: `app`, `window`, `fs`, `clipboard`, `dialog`, and `custom`.
+- `security.window.<id>.commands`: command categories: `app`, `window`, `fs`, `clipboard`, `dialog`, `shell`, and `custom`.
 - `security.notice.<id>`: non-failing notes such as restricted remote navigation.
 - `security.warning.<id>`: configuration that weakens or contradicts the deny-by-default model.
 - `security.recommendation.<id>`: suggested tightening step.

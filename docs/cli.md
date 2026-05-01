@@ -20,7 +20,7 @@ Project names are normalized to lowercase kebab-case for package use.
 Options:
 
 - `--template vanilla`: generate a plain HTML/CSS/JavaScript app with bridge, native API, custom command, capability-denial, and bundle-icon demos.
-- `--template native-api-demo`: generate the same no-dependency app structure with UI copy, a Native API Workbench "Run all checks" button, and README guidance focused on app/window metadata, clipboard, app-data filesystem, dialogs, input compatibility, and GUI smoke diagnostics.
+- `--template native-api-demo`: generate the same no-dependency app structure with UI copy, a Native API Workbench "Run all checks" button, and README guidance focused on app/window metadata, clipboard, shell URL validation, app-data filesystem, dialogs, input compatibility, and GUI smoke diagnostics.
 - `--path <path>`: choose the output directory.
 - `--run-check`: run `check --dev --bundle` immediately after generation.
 
@@ -109,7 +109,7 @@ After the window opens, edit a file under `examples/hello-axion/frontend/`. A su
 
 ## `doctor`
 
-Validate Axion version metadata, local tooling, manifest configuration, app metadata, native dialog, clipboard, and lifecycle configuration, effective runtime native backends, frontend assets, runtime diagnostics, capability categories including clipboard access, and Servo path availability.
+Validate Axion version metadata, local tooling, manifest configuration, app metadata, native dialog, clipboard, shell, and lifecycle configuration, effective runtime native backends, frontend assets, runtime diagnostics, capability categories including clipboard and shell access, and Servo path availability.
 
 ```sh
 cargo run -p axion-cli -- doctor --manifest-path examples/hello-axion/axion.toml

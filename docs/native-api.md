@@ -47,6 +47,7 @@ Stable preview error-code prefixes:
 - `clipboard.*`: clipboard command failures, including `clipboard.invalid-payload` and `clipboard.state-unavailable`
 - `dialog.*`: dialog command payload validation failures, currently `dialog.invalid-payload`
 - `fs.*`: app-data filesystem validation and host I/O failures
+- `shell.*`: validated URL opening and platform opener failures, including `shell.invalid-payload`, `shell.invalid-target`, `shell.unsupported-target`, and `shell.open-failed`
 
 Common profiles:
 
@@ -55,6 +56,7 @@ Common profiles:
 - `window-control`: current-window control commands
 - `multi-window`: targeted window control including `window.list`
 - `clipboard-access`: `clipboard.write_text`, `clipboard.read_text`
+- `shell-access`: `shell.open`
 - `file-access`: `fs.create_dir`, `fs.exists`, `fs.write_text`, `fs.read_text`, `fs.list_dir`, `fs.remove`
 - `dialog-access`: `dialog.open`, `dialog.save`
 - `app-events`: frontend event emission such as `app.log`
@@ -169,7 +171,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.1.32", release: "v0.1.32.0", framework: "axion" }
+// { version: "0.1.33", release: "v0.1.33.0", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -478,6 +480,18 @@ await window.__AXION__.invoke("fs.remove", {
 
 Errors: `fs.invalid-payload`, `fs.invalid-path`, `fs.not-found`, `fs.directory-not-empty`, `fs.symlink-rejected`, `fs.permission-denied`, `fs.io-error`.
 
+## Shell Commands
+
+`shell.open` opens a validated `http`, `https`, or `mailto` URL through the platform opener. The command is capability-gated and accepts a JSON payload with a single `target` field:
+
+```js
+await window.__AXION__.invoke("shell.open", {
+  target: "https://example.dev/docs"
+});
+```
+
+The command rejects empty values, relative paths, unsupported schemes, and malformed targets before launch. Errors: `shell.invalid-payload`, `shell.invalid-target`, `shell.unsupported-target`, `shell.open-failed`.
+
 ## Dialog Commands
 
 `dialog.open` and `dialog.save` are registered capability-gated preview commands. The dialog backend is configured in `[native.dialog]`:
@@ -533,5 +547,5 @@ Response shape:
 
 ```toml
 [capabilities.main]
-profiles = ["app-info", "app-control", "multi-window", "clipboard-access", "file-access", "dialog-access", "app-events"]
+profiles = ["app-info", "app-control", "multi-window", "clipboard-access", "shell-access", "file-access", "dialog-access", "app-events"]
 ```

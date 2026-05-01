@@ -550,6 +550,7 @@ fn profile_commands(profile: &str) -> &'static [&'static str] {
             "window.prevent_close",
         ],
         "clipboard-access" => &["clipboard.read_text", "clipboard.write_text"],
+        "shell-access" => &["shell.open"],
         "file-access" => &[
             "fs.create_dir",
             "fs.exists",
@@ -573,7 +574,8 @@ fn profile_events(profile: &str) -> &'static [&'static str] {
 fn profile_protocols(profile: &str) -> &'static [&'static str] {
     match profile {
         "minimal" | "app-info" | "app-control" | "app-events" | "window-control"
-        | "multi-window" | "clipboard-access" | "file-access" | "dialog-access" => &["axion"],
+        | "multi-window" | "clipboard-access" | "shell-access" | "file-access"
+        | "dialog-access" => &["axion"],
         _ => &[],
     }
 }
@@ -588,6 +590,7 @@ fn is_known_capability_profile(value: &str) -> bool {
             | "window-control"
             | "multi-window"
             | "clipboard-access"
+            | "shell-access"
             | "file-access"
             | "dialog-access"
     )
@@ -1350,7 +1353,7 @@ frontend_dist = "frontend"
 entry = "frontend/index.html"
 
 [capabilities.main]
-profiles = [" app-info ", "window-control", "clipboard-access", "file-access", "dialog-access", "app-events"]
+profiles = [" app-info ", "window-control", "clipboard-access", "shell-access", "file-access", "dialog-access", "app-events"]
 commands = ["demo.greet", "app.ping"]
 events = ["demo.ready"]
 allowed_navigation_origins = ["https://docs.example"]
@@ -1368,6 +1371,7 @@ allowed_navigation_origins = ["https://docs.example"]
                 "clipboard-access",
                 "dialog-access",
                 "file-access",
+                "shell-access",
                 "window-control"
             ]
         );
@@ -1389,6 +1393,7 @@ allowed_navigation_origins = ["https://docs.example"]
                 "fs.read_text",
                 "fs.remove",
                 "fs.write_text",
+                "shell.open",
                 "window.close",
                 "window.confirm_close",
                 "window.focus",

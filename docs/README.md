@@ -23,7 +23,7 @@ This directory contains public, user-facing documentation for Axion.
 
 ## Current Version
 
-Axion is at **v0.1.32.0 developer preview**. The current preview focuses on the core desktop framework loop:
+Axion is at **v0.1.33.0 developer preview**. The current preview focuses on the core desktop framework loop:
 
 1. load an app manifest
 2. build a runtime plan
@@ -32,7 +32,7 @@ Axion is at **v0.1.32.0 developer preview**. The current preview focuses on the 
 5. launch a Servo-backed `winit` window when `servo-runtime` is enabled
 6. generate, validate, fingerprint, bundle, and inspect release-ready application scaffolds through `axion-cli`
 7. configure preview file-dialog and clipboard backends through `[native.dialog]` and `[native.clipboard]`
-8. validate controlled clipboard, app-data filesystem, and dialog flows through examples and generated apps
+8. validate controlled clipboard, shell URL, app-data filesystem, and dialog flows through examples and generated apps
 9. reuse bridge-provided text-input compatibility helpers in examples and generated apps
 10. inspect bridge snapshots and run frontend diagnostics through `examples/bridge-diagnostics-demo`
 11. export machine-readable diagnostics through GUI examples and `axion self-test --json`

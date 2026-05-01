@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.1.33.0 - Preview
+
+Axion v0.1.33.0 starts the Native API Expansion phase on the current Servo `0.1` baseline.
+
+### Baseline
+
+- Cargo workspace version is `0.1.33`.
+- Axion public release metadata is `v0.1.33.0`.
+- Versioning policy continues to use `v<servo-major>.<servo-minor>.<feature>.<bugfix>` for public releases.
+
+### Added
+
+- Added capability-gated `shell.open` for validated `http`, `https`, and `mailto` URL launch requests through the platform opener.
+- Added the `shell-access` capability profile and profile expansion diagnostics.
+- Added generated native API demo coverage for `shell.open` availability and stable `shell.invalid-payload` error handling without launching external apps during smoke checks.
+
+### Changed
+
+- Extended security diagnostics, command category summaries, public docs, and generated app templates for shell capabilities.
+
 ## v0.1.32.0 - Preview
 
 Axion v0.1.32.0 continues Runtime Hardening on the current Servo `0.1` baseline.

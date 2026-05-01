@@ -347,6 +347,7 @@ fn security_diagnostics(config: &AppConfig) -> SecurityDiagnostics {
                     command.starts_with("fs.")
                         || command.starts_with("clipboard.")
                         || command.starts_with("dialog.")
+                        || command.starts_with("shell.")
                 });
                 if (capability.allow_remote_navigation
                     || !capability.allowed_navigation_origins.is_empty())
@@ -355,7 +356,7 @@ fn security_diagnostics(config: &AppConfig) -> SecurityDiagnostics {
                     findings.push(SecurityFinding::warning(
                         window_id,
                         "remote_origin_native_capability",
-                        "file, clipboard, or dialog capabilities are enabled on a window that can navigate to remote origins",
+                        "file, clipboard, dialog, or shell capabilities are enabled on a window that can navigate to remote origins",
                         Some("keep native capabilities in packaged app windows; remote content should use a narrower bridge surface".to_owned()),
                     ));
                 }
@@ -638,6 +639,7 @@ fn suggested_profiles_for_explicit_capabilities(
             &[][..],
             &["axion"][..],
         ),
+        ("shell-access", &["shell.open"][..], &[][..], &["axion"][..]),
         (
             "dialog-access",
             &["dialog.open", "dialog.save"][..],
@@ -676,6 +678,7 @@ fn capability_risk_level(
             command.starts_with("fs.")
                 || command.starts_with("clipboard.")
                 || command.starts_with("dialog.")
+                || command.starts_with("shell.")
                 || command == "app.exit"
                 || command == "window.close"
                 || command == "window.reload"
@@ -708,6 +711,10 @@ fn command_category_counts(commands: &[String]) -> CommandCategoryCounts {
         .iter()
         .filter(|command| command.starts_with("dialog."))
         .count();
+    let shell = commands
+        .iter()
+        .filter(|command| command.starts_with("shell."))
+        .count();
     let custom = commands
         .iter()
         .filter(|command| {
@@ -716,6 +723,7 @@ fn command_category_counts(commands: &[String]) -> CommandCategoryCounts {
                 && !command.starts_with("fs.")
                 && !command.starts_with("clipboard.")
                 && !command.starts_with("dialog.")
+                && !command.starts_with("shell.")
         })
         .count();
 
@@ -725,6 +733,7 @@ fn command_category_counts(commands: &[String]) -> CommandCategoryCounts {
         fs,
         clipboard,
         dialog,
+        shell,
         custom,
     }
 }
@@ -743,21 +752,22 @@ struct CommandCategoryCounts {
     fs: usize,
     clipboard: usize,
     dialog: usize,
+    shell: usize,
     custom: usize,
 }
 
 impl CommandCategoryCounts {
     fn summary(&self) -> String {
         format!(
-            "app={}, window={}, fs={}, clipboard={}, dialog={}, custom={}",
-            self.app, self.window, self.fs, self.clipboard, self.dialog, self.custom
+            "app={}, window={}, fs={}, clipboard={}, dialog={}, shell={}, custom={}",
+            self.app, self.window, self.fs, self.clipboard, self.dialog, self.shell, self.custom
         )
     }
 
     fn to_json(&self) -> String {
         format!(
-            "{{\"app\":{},\"window\":{},\"fs\":{},\"clipboard\":{},\"dialog\":{},\"custom\":{}}}",
-            self.app, self.window, self.fs, self.clipboard, self.dialog, self.custom
+            "{{\"app\":{},\"window\":{},\"fs\":{},\"clipboard\":{},\"dialog\":{},\"shell\":{},\"custom\":{}}}",
+            self.app, self.window, self.fs, self.clipboard, self.dialog, self.shell, self.custom
         )
     }
 }
@@ -1783,7 +1793,7 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.1.32.0"));
+        assert!(line.contains("release=v0.1.33.0"));
         assert!(line.contains("msrv="));
     }
 
@@ -1943,13 +1953,13 @@ mod tests {
             line == "security.window.main: bridge=enabled, risk=medium, commands=5, events=1, protocols=1, navigation_origins=1, remote_navigation=false"
         }));
         assert!(lines.iter().any(|line| {
-            line == "security.window.main.commands: app=1, window=1, fs=1, clipboard=0, dialog=1, custom=1"
+            line == "security.window.main.commands: app=1, window=1, fs=1, clipboard=0, dialog=1, shell=0, custom=1"
         }));
         assert!(lines.iter().any(|line| {
             line == "security.notice.main: remote navigation is limited to https://docs.example"
         }));
         assert!(lines.iter().any(|line| {
-            line == "security.warning.main: file, clipboard, or dialog capabilities are enabled on a window that can navigate to remote origins"
+            line == "security.warning.main: file, clipboard, dialog, or shell capabilities are enabled on a window that can navigate to remote origins"
         }));
         assert!(lines.iter().any(|line| {
             line == "security.warning.viewer: protocols does not include axion, so configured commands/events are not reachable from frontend code"
@@ -2017,7 +2027,7 @@ allowed_navigation_origins = ["https://docs.example"]
         assert!(json.contains("\"profiles\":[\"app-events\",\"app-info\",\"file-access\"]"));
         assert!(json.contains("\"risk\":\"medium\""));
         assert!(json.contains(
-            "\"command_categories\":{\"app\":4,\"window\":0,\"fs\":6,\"clipboard\":0,\"dialog\":0,\"custom\":0}"
+            "\"command_categories\":{\"app\":4,\"window\":0,\"fs\":6,\"clipboard\":0,\"dialog\":0,\"shell\":0,\"custom\":0}"
         ));
         assert!(json.contains("\"code\":\"limited_remote_navigation\""));
         assert!(json.contains("\"code\":\"remote_origin_native_capability\""));

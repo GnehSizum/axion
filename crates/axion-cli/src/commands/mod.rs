@@ -131,7 +131,7 @@ impl NewProject {
                 "Bridge, lifecycle, native API, custom command, capability-denial, and bundle demos"
             }
             NewTemplate::NativeApiDemo => {
-                "Focused clipboard, app-data filesystem, dialog, app/window API, and diagnostics demo"
+                "Focused clipboard, shell, app-data filesystem, dialog, app/window API, and diagnostics demo"
             }
         }
     }
@@ -164,7 +164,7 @@ impl NewProject {
                 r#"
 ## Native API Demo Focus
 
-This template is tuned for validating Axion's preview native API surface. The UI highlights app/window metadata, clipboard round trips, app-data file lifecycle operations, headless dialog responses, capability denial, input compatibility, and the GUI smoke hook used by `axion gui-smoke`. Use the "Run all checks" button in the Native API Workbench card for a manual in-window check pass.
+This template is tuned for validating Axion's preview native API surface. The UI highlights app/window metadata, clipboard round trips, shell URL validation, app-data file lifecycle operations, headless dialog responses, capability denial, input compatibility, and the GUI smoke hook used by `axion gui-smoke`. Use the "Run all checks" button in the Native API Workbench card for a manual in-window check pass.
 "#
             }
         }
@@ -215,7 +215,7 @@ cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest
 
 - Bridge availability, allowed commands, frontend events, and host lifecycle events such as `window.ready`.
 - Built-in app/window commands: `app.info`, `app.version`, `app.echo`, `app.exit`, `window.info`, `window.close`, `window.reload`, `window.set_title`, and `window.set_size`.
-- Native preview APIs: `clipboard.write_text`, `clipboard.read_text`, `fs.create_dir`, `fs.exists`, `fs.write_text`, `fs.read_text`, `fs.list_dir`, `fs.remove`, `dialog.open`, and `dialog.save`.
+- Native preview APIs: `clipboard.write_text`, `clipboard.read_text`, `shell.open`, `fs.create_dir`, `fs.exists`, `fs.write_text`, `fs.read_text`, `fs.list_dir`, `fs.remove`, `dialog.open`, and `dialog.save`.
 - A custom Rust command, `demo.greet`, registered in `src/main.rs`.
 - Capability denial behavior through an intentional `demo.missing` call.
 - Bundle icon validation through `[bundle] icon = "icons/app.icns"`.
@@ -231,6 +231,7 @@ The generated manifest grants the main window these profiles:
 - `app-control`: `app.exit`.
 - `window-control`: current-window metadata, reload, focus, title, size, visibility, and close decisions.
 - `clipboard-access`: text clipboard read/write.
+- `shell-access`: validated URL opening through the platform shell.
 - `file-access`: app-data filesystem create/exists/list/read/remove/write.
 - `dialog-access`: `dialog.open` and `dialog.save`.
 - `app-events`: frontend `app.log` event emission.
@@ -314,7 +315,7 @@ cargo run -p axion-cli -- report target/axion/reports/release.json --output targ
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.1.32\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.1.33\"\nedition = \"2024\"\nrust-version = \"1.86.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root
@@ -343,7 +344,7 @@ cargo run -p axion-cli -- report target/axion/reports/release.json --output targ
             NewTemplate::NativeApiDemo => "Generated Axion native API demo application",
         };
         format!(
-            "[app]\nname = {name:?}\nidentifier = \"dev.axion.{identifier}\"\nversion = \"0.1.0\"\ndescription = {description:?}\nauthors = [\"Axion Developer\"]\nhomepage = \"https://example.dev/{name}\"\n\n[window]\nid = \"main\"\ntitle = {title:?}\nwidth = 960\nheight = 720\nresizable = true\nvisible = true\n\n[build]\nfrontend_dist = \"frontend\"\nentry = \"frontend/index.html\"\n\n# To use `axion dev --launch` with a frontend dev server, uncomment and update:\n# [dev]\n# url = \"http://127.0.0.1:3000\"\n# command = \"python3 -m http.server 3000 --bind 127.0.0.1 --directory frontend\"\n# timeout_ms = 15000\n\n[bundle]\nicon = \"icons/app.icns\"\n\n[native.dialog]\nbackend = \"headless\"\n\n[native.clipboard]\nbackend = \"memory\"\n\n[native.lifecycle]\nclose_timeout_ms = 3000\n\n[capabilities.main]\nprofiles = [\"app-info\", \"app-control\", \"window-control\", \"clipboard-access\", \"file-access\", \"dialog-access\", \"app-events\"]\ncommands = [\"demo.greet\"]\nallowed_navigation_origins = []\nallow_remote_navigation = false\n",
+            "[app]\nname = {name:?}\nidentifier = \"dev.axion.{identifier}\"\nversion = \"0.1.0\"\ndescription = {description:?}\nauthors = [\"Axion Developer\"]\nhomepage = \"https://example.dev/{name}\"\n\n[window]\nid = \"main\"\ntitle = {title:?}\nwidth = 960\nheight = 720\nresizable = true\nvisible = true\n\n[build]\nfrontend_dist = \"frontend\"\nentry = \"frontend/index.html\"\n\n# To use `axion dev --launch` with a frontend dev server, uncomment and update:\n# [dev]\n# url = \"http://127.0.0.1:3000\"\n# command = \"python3 -m http.server 3000 --bind 127.0.0.1 --directory frontend\"\n# timeout_ms = 15000\n\n[bundle]\nicon = \"icons/app.icns\"\n\n[native.dialog]\nbackend = \"headless\"\n\n[native.clipboard]\nbackend = \"memory\"\n\n[native.lifecycle]\nclose_timeout_ms = 3000\n\n[capabilities.main]\nprofiles = [\"app-info\", \"app-control\", \"window-control\", \"clipboard-access\", \"shell-access\", \"file-access\", \"dialog-access\", \"app-events\"]\ncommands = [\"demo.greet\"]\nallowed_navigation_origins = []\nallow_remote_navigation = false\n",
             name = self.name,
             identifier = self.name.replace('-', "."),
             description = description,
@@ -754,6 +755,12 @@ textarea {
       axion.commands.includes('window.close') ? 'window.close' : 'missing window.close',
     );
     pushCheck(
+      'shell.open.available',
+      'shell.open capability exposed',
+      axion.commands.includes('shell.open') ? 'pass' : 'fail',
+      axion.commands.includes('shell.open') ? 'shell.open' : 'missing shell.open',
+    );
+    pushCheck(
       'window.close_decision.available',
       'window close decision capabilities exposed',
       axion.commands.includes('window.confirm_close') &&
@@ -829,15 +836,19 @@ textarea {
       const windowPayloadError = await axion.invoke('window.set_size', { width: 0, height: 480 })
         .then(() => 'unexpected success')
         .catch(normalizeError);
+      const shellPayloadError = await axion.invoke('shell.open', {})
+        .then(() => 'unexpected success')
+        .catch(normalizeError);
       pushCheck(
         'native.expected_errors',
         'native expected error codes',
         clipboardPayloadError.code === 'clipboard.invalid-payload' &&
           dialogPayloadError.code === 'dialog.invalid-payload' &&
-          windowPayloadError.code === 'window.invalid-size'
+          windowPayloadError.code === 'window.invalid-size' &&
+          shellPayloadError.code === 'shell.invalid-payload'
           ? 'pass'
           : 'fail',
-        { clipboardPayloadError, dialogPayloadError, windowPayloadError },
+        { clipboardPayloadError, dialogPayloadError, windowPayloadError, shellPayloadError },
       );
     } catch (error) {
       pushCheck('native.expected_errors', 'native expected error codes', 'fail', error instanceof Error ? error.message : String(error));
@@ -1214,10 +1225,12 @@ mod tests {
         assert!(project.app_js().contains("window.set_size"));
         assert!(project.app_js().contains("app.exit.available"));
         assert!(project.app_js().contains("window.close.available"));
+        assert!(project.app_js().contains("shell.open.available"));
         assert!(project.app_js().contains("window.close_decision.available"));
         assert!(project.app_js().contains("clipboard.write_text"));
         assert!(project.app_js().contains("clipboard.read_text"));
         assert!(project.app_js().contains("clipboard.roundtrip"));
+        assert!(project.app_js().contains("shell.open"));
         assert!(project.app_js().contains("dialog.open"));
         assert!(project.app_js().contains("dialog.save"));
         assert!(project.app_js().contains("window.__AXION_GUI_SMOKE__"));
@@ -1245,6 +1258,7 @@ mod tests {
         assert!(project.manifest().contains("\"app-control\""));
         assert!(project.manifest().contains("\"window-control\""));
         assert!(project.manifest().contains("\"clipboard-access\""));
+        assert!(project.manifest().contains("\"shell-access\""));
         assert!(project.manifest().contains("\"file-access\""));
         assert!(project.manifest().contains("\"dialog-access\""));
         assert!(project.manifest().contains("\"app-events\""));
@@ -1301,11 +1315,9 @@ mod tests {
         assert!(project.readme().contains("Capability Profiles"));
         assert!(project.readme().contains("docs/capabilities.md"));
         assert!(project.readme().contains("Run all checks"));
-        assert!(
-            project
-                .readme()
-                .contains("clipboard round trips, app-data file lifecycle operations")
-        );
+        assert!(project.readme().contains(
+            "clipboard round trips, shell URL validation, app-data file lifecycle operations"
+        ));
         assert!(project.index_html().contains("Axion Native API Demo"));
         assert!(project.index_html().contains("Native API Workbench"));
         assert!(project.index_html().contains("run-native-api-checks"));
@@ -1323,6 +1335,8 @@ mod tests {
         assert!(project.app_js().contains("clipboard.invalid-payload"));
         assert!(project.app_js().contains("dialog.invalid-payload"));
         assert!(project.app_js().contains("window.invalid-size"));
+        assert!(project.app_js().contains("shell.invalid-payload"));
+        assert!(project.app_js().contains("shell.open"));
         assert!(project.app_js().contains("fs.create_dir"));
         assert!(project.app_js().contains("fs.exists"));
         assert!(project.app_js().contains("fs.list_dir"));
@@ -1333,7 +1347,7 @@ mod tests {
         assert!(project.app_js().contains("dialog.open"));
         assert!(project.app_js().contains("fs.write_text"));
         assert!(project.style_css().contains("button:disabled"));
-        assert!(project.cargo_toml().contains("version = \"0.1.32\""));
+        assert!(project.cargo_toml().contains("version = \"0.1.33\""));
     }
 
     #[test]

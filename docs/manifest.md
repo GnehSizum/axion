@@ -155,7 +155,7 @@ Capabilities are scoped by window id:
 
 ```toml
 [capabilities.main]
-profiles = ["app-info", "app-control", "multi-window", "clipboard-access", "file-access", "dialog-access", "app-events"]
+profiles = ["app-info", "app-control", "multi-window", "clipboard-access", "shell-access", "file-access", "dialog-access", "app-events"]
 allowed_navigation_origins = ["https://docs.example"]
 allow_remote_navigation = false
 ```
@@ -171,6 +171,7 @@ Built-in profiles:
 - `window-control`: enables current-window control commands such as `window.info`, `window.close`, `window.confirm_close`, `window.prevent_close`, `window.reload`, `window.focus`, `window.set_title`, and `window.set_size`.
 - `multi-window`: enables multi-window coordination commands including `window.list`, `window.info`, `window.close`, `window.confirm_close`, `window.prevent_close`, `window.reload`, `window.focus`, and `window.set_title`.
 - `clipboard-access`: enables `clipboard.read_text` and `clipboard.write_text` using the configured preview text clipboard backend.
+- `shell-access`: enables validated `shell.open` URL launch requests through the platform opener.
 - `file-access`: enables app-data filesystem lifecycle commands: `fs.create_dir`, `fs.exists`, `fs.list_dir`, `fs.read_text`, `fs.remove`, and `fs.write_text`.
 - `dialog-access`: enables `dialog.open` and `dialog.save`.
 

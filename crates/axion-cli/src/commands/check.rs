@@ -789,6 +789,7 @@ fn capability_summary_risk(
             command.starts_with("fs.")
                 || command.starts_with("clipboard.")
                 || command.starts_with("dialog.")
+                || command.starts_with("shell.")
                 || command == "app.exit"
                 || command == "window.close"
                 || command == "window.reload"

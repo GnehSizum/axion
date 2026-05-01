@@ -16,7 +16,7 @@ pub use axion_bridge::{
     WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-pub const AXION_RELEASE_VERSION: &str = "v0.1.32.0";
+pub const AXION_RELEASE_VERSION: &str = "v0.1.33.0";
 pub const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 pub trait RuntimePlugin: Send + Sync {
@@ -1646,6 +1646,193 @@ fn register_builtin_commands(
             Ok(execute_dialog_request(dialog_backend, request).to_json())
         });
     }
+
+    if allowed_commands
+        .iter()
+        .any(|command| command == "shell.open")
+    {
+        builder.register_command("shell.open", move |_context, request| {
+            let request = ShellOpenRequest::from_payload(&request.payload)
+                .map_err(|error| error.to_string())?;
+            execute_shell_open_request(request)
+        });
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellOpenRequest {
+    target: String,
+    scheme: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellOpenRequestError {
+    InvalidPayload { message: String },
+    InvalidTarget { message: String },
+    UnsupportedTarget { message: String },
+    OpenFailed { message: String },
+}
+
+impl std::fmt::Display for ShellOpenRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPayload { message } => {
+                write!(formatter, "{}", shell_error("invalid-payload", message))
+            }
+            Self::InvalidTarget { message } => {
+                write!(formatter, "{}", shell_error("invalid-target", message))
+            }
+            Self::UnsupportedTarget { message } => {
+                write!(formatter, "{}", shell_error("unsupported-target", message))
+            }
+            Self::OpenFailed { message } => {
+                write!(formatter, "{}", shell_error("open-failed", message))
+            }
+        }
+    }
+}
+
+impl std::error::Error for ShellOpenRequestError {}
+
+impl ShellOpenRequest {
+    fn from_payload(payload: &str) -> Result<Self, ShellOpenRequestError> {
+        let target = json_string_field(payload, "target").ok_or_else(|| {
+            ShellOpenRequestError::InvalidPayload {
+                message: "shell.open requires a JSON string field named 'target'".to_owned(),
+            }
+        })?;
+        Self::from_target(&target)
+    }
+
+    fn from_target(target: &str) -> Result<Self, ShellOpenRequestError> {
+        let trimmed = target.trim();
+        if trimmed.is_empty() {
+            return Err(ShellOpenRequestError::InvalidTarget {
+                message: "shell.open target must not be empty".to_owned(),
+            });
+        }
+        if trimmed != target || trimmed.chars().any(char::is_control) {
+            return Err(ShellOpenRequestError::InvalidTarget {
+                message: "shell.open target must be a clean URL string".to_owned(),
+            });
+        }
+        if trimmed.len() > 2048 {
+            return Err(ShellOpenRequestError::InvalidTarget {
+                message: "shell.open target is too long".to_owned(),
+            });
+        }
+
+        let url =
+            url::Url::parse(trimmed).map_err(|error| ShellOpenRequestError::InvalidTarget {
+                message: format!("shell.open target must be an absolute URL: {error}"),
+            })?;
+        let scheme = url.scheme().to_ascii_lowercase();
+        match scheme.as_str() {
+            "http" | "https" => {
+                if url.host_str().is_none() {
+                    return Err(ShellOpenRequestError::InvalidTarget {
+                        message: "shell.open http(s) URLs require a host".to_owned(),
+                    });
+                }
+            }
+            "mailto" => {
+                if url.path().trim().is_empty() {
+                    return Err(ShellOpenRequestError::InvalidTarget {
+                        message: "shell.open mailto URLs require a recipient".to_owned(),
+                    });
+                }
+            }
+            _ => {
+                return Err(ShellOpenRequestError::UnsupportedTarget {
+                    message: "shell.open only supports http, https, and mailto URLs".to_owned(),
+                });
+            }
+        }
+
+        Ok(Self {
+            target: url.as_str().to_owned(),
+            scheme,
+        })
+    }
+}
+
+fn execute_shell_open_request(request: ShellOpenRequest) -> Result<String, String> {
+    let command = platform_shell_open_command(&request.target).ok_or_else(|| {
+        ShellOpenRequestError::OpenFailed {
+            message: "shell.open is not available on this platform".to_owned(),
+        }
+        .to_string()
+    })?;
+
+    let child = std::process::Command::new(&command.program)
+        .args(&command.args)
+        .spawn()
+        .map_err(|error| {
+            ShellOpenRequestError::OpenFailed {
+                message: format!("failed to launch platform opener: {error}"),
+            }
+            .to_string()
+        })?;
+
+    Ok(format!(
+        "{{\"opened\":true,\"target\":{},\"scheme\":{},\"backend\":{},\"pid\":{}}}",
+        json_string_literal(&request.target),
+        json_string_literal(&request.scheme),
+        json_string_literal(&command.backend),
+        child.id(),
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShellOpenCommand {
+    program: String,
+    args: Vec<String>,
+    backend: String,
+}
+
+fn platform_shell_open_command(target: &str) -> Option<ShellOpenCommand> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(ShellOpenCommand {
+            program: "open".to_owned(),
+            args: vec![target.to_owned()],
+            backend: "open".to_owned(),
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Some(ShellOpenCommand {
+            program: "rundll32".to_owned(),
+            args: vec!["url.dll,FileProtocolHandler".to_owned(), target.to_owned()],
+            backend: "rundll32".to_owned(),
+        })
+    }
+
+    #[cfg(all(
+        not(target_os = "macos"),
+        not(target_os = "windows"),
+        any(target_os = "linux", target_os = "freebsd", target_os = "openbsd")
+    ))]
+    {
+        Some(ShellOpenCommand {
+            program: "xdg-open".to_owned(),
+            args: vec![target.to_owned()],
+            backend: "xdg-open".to_owned(),
+        })
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "openbsd"
+    )))]
+    {
+        let _ = target;
+        None
+    }
 }
 
 impl DialogRequest {
@@ -2308,6 +2495,7 @@ mod tests {
                         "fs.write_text".to_owned(),
                         "dialog.open".to_owned(),
                         "dialog.save".to_owned(),
+                        "shell.open".to_owned(),
                     ],
                     events: Vec::new(),
                     protocols: vec!["axion".to_owned()],
@@ -2766,6 +2954,7 @@ mod tests {
                 "fs.read_text".to_owned(),
                 "fs.remove".to_owned(),
                 "fs.write_text".to_owned(),
+                "shell.open".to_owned(),
             ]
         );
 
@@ -2775,7 +2964,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.1.32.0\""));
+        assert!(version.contains("\"release\":\"v0.1.33.0\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,
@@ -2844,6 +3033,48 @@ mod tests {
         ))
         .expect_err("dialog.open should reject invalid filters");
         assert!(format!("{dialog_error:?}").contains("dialog.invalid-payload"));
+
+        let shell_payload_error = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("shell.open", "{}"),
+        ))
+        .expect_err("shell.open should reject missing target");
+        assert!(format!("{shell_payload_error:?}").contains("shell.invalid-payload"));
+
+        let shell_target_error = block_on(binding.bridge_bindings.command_registry.dispatch(
+            &binding.command_context,
+            &BridgeRequest::new("shell.open", "{\"target\":\"file:///tmp/example.txt\"}"),
+        ))
+        .expect_err("shell.open should reject unsupported target schemes");
+        assert!(format!("{shell_target_error:?}").contains("shell.unsupported-target"));
+    }
+
+    #[test]
+    fn shell_open_request_accepts_safe_url_targets() {
+        let request = super::ShellOpenRequest::from_target("https://example.dev/docs?from=axion")
+            .expect("https URL should be accepted");
+        assert_eq!(request.scheme, "https");
+        assert_eq!(request.target, "https://example.dev/docs?from=axion");
+
+        let mail = super::ShellOpenRequest::from_target("mailto:hello@example.dev")
+            .expect("mailto URL should be accepted");
+        assert_eq!(mail.scheme, "mailto");
+    }
+
+    #[test]
+    fn shell_open_request_rejects_unsafe_targets() {
+        assert!(matches!(
+            super::ShellOpenRequest::from_target("https://example.dev/\n"),
+            Err(super::ShellOpenRequestError::InvalidTarget { .. })
+        ));
+        assert!(matches!(
+            super::ShellOpenRequest::from_target("notes/readme.txt"),
+            Err(super::ShellOpenRequestError::InvalidTarget { .. })
+        ));
+        assert!(matches!(
+            super::ShellOpenRequest::from_target("ftp://example.dev/file.txt"),
+            Err(super::ShellOpenRequestError::UnsupportedTarget { .. })
+        ));
     }
 
     #[test]
@@ -4114,6 +4345,10 @@ fn dialog_error(code: &str, message: &str) -> String {
 
 fn fs_error(code: &str, message: &str) -> String {
     format!("fs.{code}: {message}")
+}
+
+fn shell_error(code: &str, message: &str) -> String {
+    format!("shell.{code}: {message}")
 }
 
 fn fs_io_error(operation: &str, error: &std::io::Error) -> String {
