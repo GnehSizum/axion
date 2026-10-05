@@ -5,11 +5,9 @@ use axion_core::{Builder, RunMode};
 use axion_runtime::{DiagnosticsReport, json_string_literal};
 
 use crate::cli::GuiSmokeArgs;
-use crate::commands::report_util::{
-    json_array_section, json_string_array_values, json_string_field, json_string_fields,
-    matching_json_delimiter, next_json_object,
-};
+use crate::commands::report_util::{json_string_field, json_string_fields};
 use crate::error::AxionCliError;
+use serde_json::Value;
 
 const PASSED_PREFIX: &str = "Axion GUI smoke passed: ";
 
@@ -200,14 +198,19 @@ fn extract_gui_smoke_report(stdout: &str) -> Option<&str> {
         .find_map(|line| line.strip_prefix(PASSED_PREFIX))
         .map(str::trim)
         .filter(|report| {
-            report.starts_with('{')
-                && report.ends_with('}')
-                && report.contains("\"schema\":\"axion.diagnostics-report.v1\"")
+            serde_json::from_str::<Value>(report)
+                .ok()
+                .is_some_and(|value| {
+                    value.get("schema").and_then(Value::as_str)
+                        == Some("axion.diagnostics-report.v1")
+                })
         })
 }
 
 fn report_result_ok(report: &str) -> bool {
-    report.contains("\"result\":\"ok\"")
+    serde_json::from_str::<Value>(report)
+        .ok()
+        .is_some_and(|value| value.get("result").and_then(Value::as_str) == Some("ok"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,7 +253,13 @@ impl SmokeCheckSummary {
 }
 
 fn smoke_check_summary(report: &str) -> SmokeCheckSummary {
-    let Some(checks) = json_array_section(report, "\"smoke_checks\"") else {
+    let parsed: Value = serde_json::from_str(report).unwrap_or(Value::Null);
+    let Some(checks) = parsed
+        .get("diagnostics")
+        .and_then(|diagnostics| diagnostics.get("smoke_checks"))
+        .or_else(|| parsed.get("smoke_checks"))
+        .and_then(Value::as_array)
+    else {
         return SmokeCheckSummary {
             total: 0,
             passed_ids: Vec::new(),
@@ -265,8 +274,7 @@ fn smoke_check_summary(report: &str) -> SmokeCheckSummary {
     let mut failed_ids = Vec::new();
     let mut skipped_ids = Vec::new();
     let mut failed_error_codes = Vec::new();
-    let mut cursor = 0;
-    while let Some((object, next_cursor)) = next_json_object(checks, cursor) {
+    for object in checks {
         total += 1;
         let id = json_string_field(object, "id").unwrap_or_else(|| format!("smoke-check-{total}"));
         match json_string_field(object, "status").as_deref() {
@@ -292,7 +300,6 @@ fn smoke_check_summary(report: &str) -> SmokeCheckSummary {
             }
             _ => {}
         }
-        cursor = next_cursor;
     }
 
     SmokeCheckSummary {
@@ -511,44 +518,39 @@ fn missing_values(required: &[String], available: &[String]) -> Vec<String> {
 }
 
 fn report_array_values(report: &str, field: &str) -> Vec<String> {
-    let key = format!("\"{field}\"");
+    let parsed: Value = serde_json::from_str(report).unwrap_or(Value::Null);
     let mut values = Vec::new();
-    let mut cursor = 0;
-    while let Some(relative_index) = report[cursor..].find(&key) {
-        let key_index = cursor + relative_index;
-        let Some(array_start) = report[key_index..].find('[').map(|start| key_index + start) else {
-            break;
-        };
-        let Some(array_end) = matching_json_delimiter(report, array_start, '[', ']') else {
-            break;
-        };
-        if let Some(section) = report.get(array_start + 1..array_end) {
-            for value in json_string_array_values(section) {
-                if !values.contains(&value) {
-                    values.push(value);
-                }
+    let windows = parsed
+        .get("windows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
+    for object in std::iter::once(&parsed).chain(windows) {
+        for value in object
+            .get(field)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if !values.iter().any(|candidate| candidate == value) {
+                values.push(value.to_owned());
             }
         }
-        cursor = array_end + 1;
     }
+    values.sort();
     values
 }
 
 fn report_window_ids(report: &str) -> Vec<String> {
-    let Some(windows) = json_array_section(report, "\"windows\"") else {
-        return Vec::new();
-    };
-    let mut ids = Vec::new();
-    let mut cursor = 0;
-    while let Some((window, next_cursor)) = next_json_object(windows, cursor) {
-        if let Some(id) = json_string_field(window, "id") {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
-        cursor = next_cursor;
-    }
-    ids
+    let parsed: Value = serde_json::from_str(report).unwrap_or(Value::Null);
+    parsed
+        .get("windows")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|window| json_string_field(window, "id"))
+        .collect()
 }
 
 fn runtime_policy_next_step(
@@ -1108,7 +1110,7 @@ mod tests {
         );
         assert_eq!(
             report_array_values(report, "host_events"),
-            vec!["window.closed".to_owned(), "app.ready".to_owned()]
+            vec!["app.ready".to_owned(), "window.closed".to_owned()]
         );
         assert_eq!(
             report_array_values(report, "hostEvents"),

@@ -22,7 +22,11 @@ cargo run -p axion-cli -- check \
 
 Upload `target/axion/reports/check.json` as the primary readiness artifact. The report uses `axion.check-report.v1` and includes `failure_phase`, `next_step`, `next_actions[]`, `artifacts[]`, `dev_preflight`, and `bundle_preflight`.
 
-The checked-in `.github/workflows/ci.yml` runs this lightweight check for `examples/hello-axion` and uploads `target/axion/reports/*.json` with the diagnostics artifacts.
+The checked-in `.github/workflows/ci.yml` also selects Node.js 24 LTS, syntax-checks the three bridge JavaScript assets and runs the bootstrap behavior tests. It runs this lightweight check for `examples/hello-axion` and uploads `target/axion/reports/*.json` with the diagnostics artifacts.
+
+## Servo Feature Compile Gate
+
+Code changes in `crates`, `examples`, `servo`, Cargo/toolchain/build configuration or this workflow trigger the Ubuntu 24.04 `native-check` job. It caches registry/git dependencies and `target`, selects Clang 19, installs native dependencies and runs `cargo check --workspace --features servo-runtime --locked`. Pure documentation changes keep the lightweight gate without rebuilding the engine. Default workspace tests include JSON, input/output path, archive permission and state-boundary regressions.
 
 ## Optional GUI Smoke
 
@@ -47,6 +51,8 @@ cargo run -p axion-cli -- gui-smoke \
 ```
 
 Use `--require-check`, `--require-command`, `--require-host-event`, and `--require-window` to keep optional GUI jobs useful as runtime regression gates. The command fails if the frontend omits, skips, or fails required coverage, and the written report records `diagnostics.required_checks` plus `diagnostics.required_runtime` for artifact summaries.
+
+The manual GUI job runs the hello, diagnostics, file-access and multi-window examples. The multi-window step validates the smoke checks provided by its partial report: `app.ping`, `window.info`, close prevention, confirmed close completion, close timeout, application exit prevention and `app.exit.idempotent`. Its report and summary use the existing `*-gui-smoke*.json` artifact collection.
 
 If this step fails but still writes a report, summarize it without hiding the original failure:
 
@@ -74,6 +80,6 @@ cargo run -p axion-cli -- report target/axion/reports/release.json \
   --output target/axion/reports/release-summary.json
 ```
 
-`release --check-report-path` only reuses a check report when it matches the manifest and has successful `result`, doctor, self-test, bundle preflight, and release readiness. Upload `check.json`, `release.json`, `release-summary.json`, `bundle.json`, `bundle.tar`, and GUI smoke summaries when present.
+`release --check-report-path` always reruns the current doctor gate and readiness. It reuses self-test and bundle-preflight success only when the report matches the canonical manifest location, risk threshold and content identity; changing configuration, frontend files, icon or framework version requires a fresh check. Upload `check.json`, `release.json`, `release-summary.json`, `bundle.json`, `bundle.tar`, and GUI smoke summaries when present.
 
-The optional `release-preview` workflow job follows this pattern: it writes `hello-check.json`, reuses it during release, writes `hello-release-summary.json`, verifies `release.summary`, and uploads all preview artifacts.
+The optional `release-preview` workflow job generates an application, builds a Servo release bundle, unpacks the archive, hides the generated source directory and starts the executable under xvfb from another working directory. It checks GUI smoke results and executable permissions, then uploads the reports, archive and `release-deployment.log`. The report filenames retain the `hello-` prefix. This job requires a native Linux runner; local macOS unit tests do not establish that the workflow itself passed.

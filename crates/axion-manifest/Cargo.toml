@@ -7,6 +7,7 @@ rust-version.workspace = true
 [dependencies]
 axion-core.workspace = true
 serde.workspace = true
+serde_ignored = "0.1.14"
 thiserror.workspace = true
 toml.workspace = true
 url.workspace = true

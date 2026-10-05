@@ -1,5 +1,8 @@
 use thiserror::Error;
 
+#[cfg(any(feature = "servo-runtime", test))]
+mod state;
+
 #[cfg(feature = "servo-runtime")]
 pub use enabled::WindowBridgeBinding;
 
@@ -16,6 +19,9 @@ impl WinitWindowBackend {
 pub enum WinitRunError {
     #[error("the Servo desktop runtime is disabled; rebuild with `--features servo-runtime`")]
     ServoRuntimeDisabled,
+    #[cfg(feature = "servo-runtime")]
+    #[error("window close_timeout_ms must be greater than zero")]
+    InvalidCloseTimeout,
     #[cfg(feature = "servo-runtime")]
     #[error("app must define at least one window before the winit backend can run")]
     MissingWindow,
@@ -57,15 +63,15 @@ mod enabled {
     use std::io::BufReader;
     use std::path::PathBuf;
     use std::pin::Pin;
-    use std::rc::Rc;
+    use std::rc::{Rc, Weak};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use axion_bridge::{
-        BootstrapConfig, BridgeBindings, BridgeEmitRequest, BridgeEvent, BridgePayloadError,
-        BridgeRequest, BridgeRequestIdError, CommandContext, CommandDispatchError,
-        EventDispatchError, WindowControlHandle, WindowControlRequest, WindowControlResponse,
-        WindowStateSnapshot, is_valid_command_name, is_valid_event_name,
+        BootstrapConfig, BridgeBindings, BridgeEmitRequest, BridgeError, BridgeEvent,
+        BridgePayloadError, BridgeRequest, BridgeRequestIdError, CommandContext,
+        CommandDispatchError, EventDispatchError, WindowControlHandle, WindowControlRequest,
+        WindowControlResponse, WindowStateSnapshot, is_valid_command_name, is_valid_event_name,
     };
     use axion_core::WindowLaunchConfig;
     use axion_protocol::{AXION_SCHEME, AppAssetResolver, ResourcePolicy};
@@ -95,7 +101,7 @@ mod enabled {
     use winit::event::{
         ElementState, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
     };
-    use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
     use winit::keyboard::{
         Key as WinitKey, KeyCode, KeyLocation as WinitKeyLocation, ModifiersState,
         NamedKey as WinitNamedKey, PhysicalKey,
@@ -104,22 +110,21 @@ mod enabled {
     use winit::window::{Window, WindowAttributes};
 
     use crate::WinitRunError;
+    use crate::state::{
+        AppExitRequestState, AppExitTracker, PendingCloseRequest, WebViewPolicy,
+        expired_close_requests, next_close_deadline, policy_for_webview, receive_control_response,
+        token_matches,
+    };
+    use axion_bridge::lifecycle::{
+        APP_EXIT_COMPLETED_EVENT, APP_EXIT_PREVENTED_EVENT, APP_EXIT_REQUESTED_EVENT,
+        WINDOW_BLURRED_EVENT, WINDOW_CLOSE_COMPLETED_EVENT, WINDOW_CLOSE_PREVENTED_EVENT,
+        WINDOW_CLOSE_REQUESTED_EVENT, WINDOW_CLOSE_TIMED_OUT_EVENT, WINDOW_CLOSED_EVENT,
+        WINDOW_FOCUSED_EVENT, WINDOW_MOVED_EVENT, WINDOW_REDRAW_FAILED_EVENT, WINDOW_RESIZED_EVENT,
+        host_event_names,
+    };
 
-    const WINDOW_CLOSE_REQUESTED_EVENT: &str = "window.close_requested";
-    const WINDOW_CLOSE_PREVENTED_EVENT: &str = "window.close_prevented";
-    const WINDOW_CLOSE_COMPLETED_EVENT: &str = "window.close_completed";
-    const WINDOW_CLOSE_TIMED_OUT_EVENT: &str = "window.close_timed_out";
-    const WINDOW_CLOSED_EVENT: &str = "window.closed";
-    const WINDOW_RESIZED_EVENT: &str = "window.resized";
-    const WINDOW_FOCUSED_EVENT: &str = "window.focused";
-    const WINDOW_BLURRED_EVENT: &str = "window.blurred";
-    const WINDOW_MOVED_EVENT: &str = "window.moved";
-    const WINDOW_REDRAW_FAILED_EVENT: &str = "window.redraw_failed";
-    const APP_EXIT_REQUESTED_EVENT: &str = "app.exit_requested";
-    const APP_EXIT_PREVENTED_EVENT: &str = "app.exit_prevented";
-    const APP_EXIT_COMPLETED_EVENT: &str = "app.exit_completed";
     const DEFAULT_SELF_TEST_TIMEOUT: Duration = Duration::from_secs(10);
-    const DEFAULT_CLOSE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
+    const WINDOW_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
     pub fn run_dev_server(
         app_name: String,
@@ -216,6 +221,9 @@ mod enabled {
             startup_target: StartupTarget,
             close_timeout_ms: u64,
         ) -> Result<Self, WinitRunError> {
+            if close_timeout_ms == 0 {
+                return Err(WinitRunError::InvalidCloseTimeout);
+            }
             if windows.is_empty() {
                 return Err(WinitRunError::MissingWindow);
             }
@@ -233,11 +241,13 @@ mod enabled {
             let self_test_bridge = std::env::var_os("AXION_SELFTEST_BRIDGE").is_some();
             let gui_smoke = std::env::var_os("AXION_GUI_SMOKE").is_some();
             let self_test_timeout = launch_self_test_timeout(gui_smoke);
-            let close_timeout = if close_timeout_ms == 0 {
-                DEFAULT_CLOSE_CONFIRM_TIMEOUT
-            } else {
-                Duration::from_millis(close_timeout_ms)
-            };
+            let close_timeout = Duration::from_millis(close_timeout_ms);
+
+            if Instant::now().checked_add(close_timeout).is_none() {
+                return Err(WinitRunError::RegisterProtocol(
+                    "window close timeout exceeds the event loop clock range".to_owned(),
+                ));
+            }
 
             Ok(Self {
                 app_name,
@@ -270,13 +280,20 @@ mod enabled {
             }
         }
 
-        fn protocol_registry(&self) -> Result<ProtocolRegistry, WinitRunError> {
+        fn protocol_registry(
+            &self,
+            webview_policies: Arc<Mutex<BTreeMap<servo::WebViewId, WebViewPolicy>>>,
+        ) -> Result<ProtocolRegistry, WinitRunError> {
             let mut registry = ProtocolRegistry::default();
 
             registry
                 .register(
                     AXION_SCHEME,
-                    AxionProtocolHandler::new(self.resolver.clone(), self.window_bindings.clone()),
+                    AxionProtocolHandler::new(
+                        self.resolver.clone(),
+                        self.window_bindings.clone(),
+                        webview_policies,
+                    ),
                 )
                 .map_err(|error| WinitRunError::RegisterProtocol(format!("{error:?}")))?;
 
@@ -318,14 +335,10 @@ mod enabled {
         visible: std::cell::Cell<bool>,
         focused: std::cell::Cell<bool>,
         cursor_position: std::cell::Cell<DevicePoint>,
-        window: Window,
-        rendering_context: Rc<WindowRenderingContext>,
+        // Release the WebView and graphics context while the native window is alive.
         webview: WebView,
-    }
-
-    struct PendingCloseRequest {
-        window_id: winit::window::WindowId,
-        reason: String,
+        rendering_context: Rc<WindowRenderingContext>,
+        window: Window,
     }
 
     struct DeferredHostEvent {
@@ -333,22 +346,6 @@ mod enabled {
         bridge_token: String,
         event_name: String,
         payload_json: String,
-    }
-
-    struct AppExitRequestState {
-        request_id: String,
-        window_count: usize,
-        request_count: usize,
-        closed_count: usize,
-        prevented_count: usize,
-        timed_out_count: usize,
-        close_requests: Vec<(String, String)>,
-        closed_windows: Vec<String>,
-        prevented_windows: Vec<String>,
-        timed_out_windows: Vec<String>,
-        closed_requests: Vec<(String, String)>,
-        prevented_requests: Vec<(String, String)>,
-        timed_out_requests: Vec<(String, String)>,
     }
 
     struct AppState {
@@ -366,16 +363,36 @@ mod enabled {
         window_registry: Arc<Mutex<BTreeMap<String, winit::window::WindowId>>>,
         close_request_counter: std::cell::Cell<u64>,
         app_exit_request_counter: std::cell::Cell<u64>,
-        pending_close_requests: RefCell<BTreeMap<String, PendingCloseRequest>>,
-        pending_app_exit_requests: RefCell<BTreeMap<String, AppExitRequestState>>,
-        close_request_app_exits: RefCell<BTreeMap<String, String>>,
+        pending_close_requests:
+            RefCell<BTreeMap<String, PendingCloseRequest<winit::window::WindowId>>>,
+        app_exit_tracker: RefCell<AppExitTracker>,
+        webview_policies: Arc<Mutex<BTreeMap<servo::WebViewId, WebViewPolicy>>>,
         deferred_host_events: RefCell<Vec<DeferredHostEvent>>,
         windows: RefCell<Vec<RuntimeWindow>>,
     }
 
-    impl servo::WebViewDelegate for AppState {
+    impl Drop for AppState {
+        fn drop(&mut self) {
+            if let Ok(mut policies) = self.webview_policies.lock() {
+                policies.clear();
+            }
+            if let Ok(mut registry) = self.window_registry.lock() {
+                registry.clear();
+            }
+            self.deferred_host_events.get_mut().clear();
+            self.windows.get_mut().clear();
+        }
+    }
+
+    struct AppWebViewDelegate {
+        state: Weak<AppState>,
+    }
+
+    impl servo::WebViewDelegate for AppWebViewDelegate {
         fn notify_new_frame_ready(&self, webview: WebView) {
-            self.request_redraw_for_webview(webview.id());
+            if let Some(state) = self.state.upgrade() {
+                state.request_redraw_for_webview(webview.id());
+            }
         }
 
         fn notify_load_status_changed(
@@ -383,18 +400,21 @@ mod enabled {
             webview: WebView,
             status: embedder_traits::LoadStatus,
         ) {
+            let Some(state) = self.state.upgrade() else {
+                return;
+            };
             if status != embedder_traits::LoadStatus::Complete {
                 return;
             }
 
-            if self.self_test_bridge || self.gui_smoke {
-                if self.is_first_webview(webview.id()) && !self.self_test_started.replace(true) {
-                    self.start_self_test(webview);
+            if state.self_test_bridge || state.gui_smoke {
+                if state.is_first_webview(webview.id()) && !state.self_test_started.replace(true) {
+                    state.start_self_test(webview);
                 } else {
-                    self.queue_startup_events(&webview);
+                    state.queue_startup_events(&webview);
                 }
             } else {
-                self.queue_startup_events(&webview);
+                state.queue_startup_events(&webview);
             }
         }
 
@@ -403,7 +423,11 @@ mod enabled {
             webview: WebView,
             navigation_request: servo::NavigationRequest,
         ) {
-            if self.allows_navigation(webview.id(), &navigation_request.url) {
+            if self
+                .state
+                .upgrade()
+                .is_some_and(|state| state.allows_navigation(webview.id(), &navigation_request.url))
+            {
                 navigation_request.allow();
             } else {
                 navigation_request.deny();
@@ -513,6 +537,11 @@ mod enabled {
             let state = self
                 .window_state_for_id(window_id)
                 .ok_or_else(|| "window control target is unavailable".to_owned())?;
+            let deadline = Instant::now()
+                .checked_add(self.close_timeout)
+                .ok_or_else(|| {
+                    "window close timeout exceeds the event loop clock range".to_owned()
+                })?;
             let counter = self.close_request_counter.get().saturating_add(1);
             self.close_request_counter.set(counter);
             let request_id = format!("axion-close-{counter}");
@@ -521,6 +550,7 @@ mod enabled {
                 PendingCloseRequest {
                     window_id,
                     reason: reason.to_owned(),
+                    deadline,
                 },
             );
             self.dispatch_window_event(
@@ -528,16 +558,6 @@ mod enabled {
                 WINDOW_CLOSE_REQUESTED_EVENT,
                 self.close_requested_payload(window_id, &request_id, reason),
             );
-
-            let proxy = self.event_loop_proxy.clone();
-            let timeout_request_id = request_id.clone();
-            let close_timeout = self.close_timeout;
-            std::thread::spawn(move || {
-                std::thread::sleep(close_timeout);
-                let _ = proxy.send_event(WakerEvent::CloseTimeout {
-                    request_id: timeout_request_id,
-                });
-            });
 
             Ok(WindowControlResponse::CloseRequested {
                 request_id,
@@ -657,7 +677,11 @@ mod enabled {
                 .iter()
                 .position(|runtime_window| runtime_window.window.id() == window_id)
             {
-                Some(windows.remove(position).window_id)
+                let removed = windows.remove(position);
+                if let Ok(mut policies) = self.webview_policies.lock() {
+                    policies.remove(&removed.webview.id());
+                }
+                Some(removed.window_id)
             } else {
                 None
             };
@@ -769,93 +793,33 @@ mod enabled {
         }
 
         fn record_app_exit_closed(&self, close_request_id: &str, window_id: &str, timed_out: bool) {
-            let Some(app_exit_request_id) = self
-                .close_request_app_exits
-                .borrow_mut()
-                .remove(close_request_id)
-            else {
-                return;
-            };
-
-            let final_payload = {
-                let mut requests = self.pending_app_exit_requests.borrow_mut();
-                let Some(state) = requests.get_mut(&app_exit_request_id) else {
-                    return;
-                };
-                state.closed_count += 1;
-                state.closed_windows.push(window_id.to_owned());
-                state
-                    .closed_requests
-                    .push((close_request_id.to_owned(), window_id.to_owned()));
-                if timed_out {
-                    state.timed_out_count += 1;
-                    state.timed_out_windows.push(window_id.to_owned());
-                    state
-                        .timed_out_requests
-                        .push((close_request_id.to_owned(), window_id.to_owned()));
-                }
-                if state.closed_count + state.prevented_count >= state.request_count {
-                    let payload = app_exit_result_payload(state, "completed");
-                    requests.remove(&app_exit_request_id);
-                    Some(payload)
-                } else {
-                    None
-                }
-            };
-
-            if let Some(payload) = final_payload {
-                self.queue_app_event(APP_EXIT_COMPLETED_EVENT, payload);
+            let completed = self.app_exit_tracker.borrow_mut().record_closed(
+                close_request_id,
+                window_id,
+                timed_out,
+            );
+            if let Some(state) = completed {
+                self.queue_app_event(
+                    APP_EXIT_COMPLETED_EVENT,
+                    app_exit_result_payload(&state, "completed"),
+                );
             }
         }
 
         fn record_app_exit_prevented(&self, close_request_id: &str, window_id: &str) {
-            let Some(app_exit_request_id) = self
-                .close_request_app_exits
-                .borrow()
-                .get(close_request_id)
-                .cloned()
-            else {
-                return;
-            };
-
-            let Some(mut state) = self
-                .pending_app_exit_requests
+            let prevented = self
+                .app_exit_tracker
                 .borrow_mut()
-                .remove(&app_exit_request_id)
-            else {
-                return;
-            };
-            state.prevented_count += 1;
-            state.prevented_windows.push(window_id.to_owned());
-            state
-                .prevented_requests
-                .push((close_request_id.to_owned(), window_id.to_owned()));
-
-            let close_request_ids = self
-                .close_request_app_exits
-                .borrow()
-                .iter()
-                .filter_map(|(close_id, app_exit_id)| {
-                    (app_exit_id == &app_exit_request_id).then_some(close_id.clone())
-                })
-                .collect::<Vec<_>>();
-            {
-                let mut pending_close_requests = self.pending_close_requests.borrow_mut();
-                for close_id in &close_request_ids {
-                    pending_close_requests.remove(close_id);
+                .record_prevented(close_request_id, window_id);
+            if let Some(state) = prevented {
+                for (close_id, _) in &state.close_requests {
+                    self.pending_close_requests.borrow_mut().remove(close_id);
                 }
+                self.dispatch_app_event(
+                    APP_EXIT_PREVENTED_EVENT,
+                    app_exit_result_payload(&state, "prevented"),
+                );
             }
-            {
-                let mut close_request_app_exits = self.close_request_app_exits.borrow_mut();
-                for close_id in &close_request_ids {
-                    close_request_app_exits.remove(close_id);
-                }
-            }
-
-            self.dispatch_app_event(
-                APP_EXIT_PREVENTED_EVENT,
-                app_exit_result_payload(&state, "prevented"),
-            );
         }
 
         fn app_exit_requested_payload(
@@ -935,6 +899,23 @@ mod enabled {
                     WINDOW_RESIZED_EVENT,
                     &payload_json,
                 );
+            }
+        }
+
+        fn scale_factor_changed(&self, window_id: winit::window::WindowId, scale_factor: f64) {
+            if let Some(runtime_window) = self
+                .windows
+                .borrow()
+                .iter()
+                .find(|window| window.window.id() == window_id)
+            {
+                runtime_window
+                    .webview
+                    .set_hidpi_scale_factor(Scale::new(scale_factor as f32));
+                runtime_window
+                    .webview
+                    .resize(runtime_window.window.inner_size());
+                runtime_window.window.request_redraw();
             }
         }
 
@@ -1062,18 +1043,10 @@ mod enabled {
                 .iter()
                 .find(|runtime_window| runtime_window.window.id() == window_id)
             {
-                let (x, y, mode) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => {
-                        ((x * 76.0) as f64, (y * 76.0) as f64, WheelMode::DeltaLine)
-                    }
-                    MouseScrollDelta::PixelDelta(delta) => {
-                        (delta.x, delta.y, WheelMode::DeltaPixel)
-                    }
-                };
                 runtime_window
                     .webview
                     .notify_input_event(InputEvent::Wheel(WheelEvent::new(
-                        WheelDelta { x, y, z: 0.0, mode },
+                        wheel_delta_from_winit(delta),
                         runtime_window.cursor_position.get().into(),
                     )));
             }
@@ -1129,6 +1102,13 @@ mod enabled {
             request: WindowControlRequest,
         ) -> Result<WindowControlResponse, String> {
             if matches!(request, WindowControlRequest::ExitApp) {
+                if let Some(state) = self.app_exit_tracker.borrow().active() {
+                    return Ok(WindowControlResponse::AppExit {
+                        request_id: state.request_id.clone(),
+                        window_count: state.window_count,
+                        request_count: state.request_count,
+                    });
+                }
                 let window_ids = self
                     .windows
                     .borrow()
@@ -1157,30 +1137,11 @@ mod enabled {
                         }
                     }
                 }
-                self.pending_app_exit_requests.borrow_mut().insert(
+                self.app_exit_tracker.borrow_mut().start(
                     request_id.clone(),
-                    AppExitRequestState {
-                        request_id: request_id.clone(),
-                        window_count,
-                        request_count,
-                        closed_count: 0,
-                        prevented_count: 0,
-                        timed_out_count: 0,
-                        close_requests: close_requests.clone(),
-                        closed_windows: Vec::new(),
-                        prevented_windows: Vec::new(),
-                        timed_out_windows: Vec::new(),
-                        closed_requests: Vec::new(),
-                        prevented_requests: Vec::new(),
-                        timed_out_requests: Vec::new(),
-                    },
+                    window_count,
+                    close_requests,
                 );
-                {
-                    let mut close_request_app_exits = self.close_request_app_exits.borrow_mut();
-                    for (close_request_id, _) in close_requests {
-                        close_request_app_exits.insert(close_request_id, request_id.clone());
-                    }
-                }
                 return Ok(WindowControlResponse::AppExit {
                     request_id,
                     window_count,
@@ -1345,9 +1306,12 @@ mod enabled {
                 return;
             }
 
-            let app_state = self.clone();
+            let app_state = Rc::downgrade(self);
             let event_loop_proxy = self.event_loop_proxy.clone();
             webview.evaluate_javascript("window.__AXION_SELFTEST__ ?? null", move |result| {
+                let Some(app_state) = app_state.upgrade() else {
+                    return;
+                };
                 app_state.self_test_poll_in_flight.set(false);
                 match result {
                     Ok(embedder_traits::JSValue::String(value)) if value.starts_with("ERROR:") => {
@@ -1459,17 +1423,14 @@ mod enabled {
                         }
                     }
                     WakerEvent::WindowControl(control) => {
-                        let result =
-                            state.apply_window_control(control.window_id, control.request.clone());
+                        let result = if Instant::now() >= control.deadline {
+                            Err("window.control-timeout: request expired before execution"
+                                .to_owned())
+                        } else {
+                            state.apply_window_control(control.window_id, control.request.clone())
+                        };
                         let windows_empty = state.windows.borrow().is_empty();
                         let _ = control.response.send(result);
-                        state.flush_deferred_host_events();
-                        if windows_empty {
-                            event_loop.exit();
-                        }
-                    }
-                    WakerEvent::CloseTimeout { request_id } => {
-                        let windows_empty = state.close_timeout(&request_id);
                         state.flush_deferred_host_events();
                         if windows_empty {
                             event_loop.exit();
@@ -1499,6 +1460,28 @@ mod enabled {
                     }
                 }
             }
+        }
+
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            let Lifecycle::Running(state) = &self.lifecycle else {
+                return;
+            };
+            let expired =
+                expired_close_requests(&state.pending_close_requests.borrow(), Instant::now());
+            for request_id in expired {
+                state.close_timeout(&request_id);
+            }
+            state.flush_deferred_host_events();
+            if state.windows.borrow().is_empty() {
+                event_loop.exit();
+                return;
+            }
+            event_loop.set_control_flow(
+                match next_close_deadline(&state.pending_close_requests.borrow()) {
+                    Some(deadline) => ControlFlow::WaitUntil(deadline),
+                    None => ControlFlow::Wait,
+                },
+            );
         }
 
         fn window_event(
@@ -1531,6 +1514,10 @@ mod enabled {
                 }
                 WindowEvent::Resized(new_size) => {
                     state.resize_window(window_id, new_size);
+                    spin_after_event = true;
+                }
+                WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                    state.scale_factor_changed(window_id, scale_factor);
                     spin_after_event = true;
                 }
                 WindowEvent::Focused(focused) => {
@@ -1584,7 +1571,8 @@ mod enabled {
         launch: LaunchRequest,
         waker: Waker,
     ) -> Result<Rc<AppState>, WinitRunError> {
-        let protocol_registry = launch.protocol_registry()?;
+        let webview_policies = Arc::new(Mutex::new(BTreeMap::new()));
+        let protocol_registry = launch.protocol_registry(webview_policies.clone())?;
 
         let servo = ServoBuilder::default()
             .protocol_registry(protocol_registry)
@@ -1607,8 +1595,8 @@ mod enabled {
             close_request_counter: std::cell::Cell::new(0),
             app_exit_request_counter: std::cell::Cell::new(0),
             pending_close_requests: RefCell::new(BTreeMap::new()),
-            pending_app_exit_requests: RefCell::new(BTreeMap::new()),
-            close_request_app_exits: RefCell::new(BTreeMap::new()),
+            app_exit_tracker: RefCell::new(AppExitTracker::default()),
+            webview_policies,
             deferred_host_events: RefCell::new(Vec::new()),
             windows: RefCell::new(Vec::new()),
         });
@@ -1641,7 +1629,7 @@ mod enabled {
 
             let user_content_manager = Rc::new(UserContentManager::new(&app_state.servo));
             if binding.security_policy.allows_protocol(AXION_SCHEME) {
-                let host_events = host_event_names(&binding.bridge_bindings);
+                let host_events = host_event_names(&binding.bridge_bindings.startup_events);
                 user_content_manager.add_script(Rc::new(UserScript::new(
                     BootstrapConfig::new(launch.app_name.clone(), binding.bridge_token.clone())
                         .with_commands(binding.bridge_bindings.command_registry.command_names())
@@ -1653,12 +1641,28 @@ mod enabled {
                 )));
             }
 
+            // The initial fetch may start on Servo's network thread during build. Holding
+            // this lock publishes its native identity before any protocol request reads it.
+            let mut policies = app_state.webview_policies.lock().map_err(|_| {
+                WinitRunError::RegisterProtocol("webview policy lock was poisoned".to_owned())
+            })?;
             let webview = WebViewBuilder::new(&app_state.servo, rendering_context.clone())
                 .url(launch.initial_url())
                 .hidpi_scale_factor(Scale::new(window.scale_factor() as f32))
                 .user_content_manager(user_content_manager.clone())
-                .delegate(app_state.clone())
+                .delegate(Rc::new(AppWebViewDelegate {
+                    state: Rc::downgrade(&app_state),
+                }))
                 .build();
+            policies.insert(
+                webview.id(),
+                WebViewPolicy {
+                    window_id: binding.window_id.clone(),
+                    bridge_token: binding.bridge_token.clone(),
+                    content_security_policy: binding.security_policy.content_security_policy(),
+                },
+            );
+            drop(policies);
 
             if let Ok(mut registry) = app_state.window_registry.lock() {
                 registry.insert(binding.window_id.clone(), window.id());
@@ -1670,6 +1674,7 @@ mod enabled {
                     event_loop_proxy: app_state.event_loop_proxy.clone(),
                     window_registry: app_state.window_registry.clone(),
                     current_window_id: binding.window_id.clone(),
+                    event_loop_thread: std::thread::current().id(),
                 }));
 
             app_state.windows.borrow_mut().push(RuntimeWindow {
@@ -1705,35 +1710,6 @@ mod enabled {
             payload_json,
         );
         webview.evaluate_javascript(script, |_| {});
-    }
-
-    fn host_event_names(bindings: &BridgeBindings) -> Vec<String> {
-        let mut events = Vec::new();
-        for event in &bindings.startup_events {
-            if !events.contains(&event.name) {
-                events.push(event.name.clone());
-            }
-        }
-        for event in [
-            WINDOW_CLOSE_REQUESTED_EVENT,
-            WINDOW_CLOSE_PREVENTED_EVENT,
-            WINDOW_CLOSE_COMPLETED_EVENT,
-            WINDOW_CLOSE_TIMED_OUT_EVENT,
-            WINDOW_CLOSED_EVENT,
-            WINDOW_RESIZED_EVENT,
-            WINDOW_FOCUSED_EVENT,
-            WINDOW_BLURRED_EVENT,
-            WINDOW_MOVED_EVENT,
-            WINDOW_REDRAW_FAILED_EVENT,
-            APP_EXIT_REQUESTED_EVENT,
-            APP_EXIT_PREVENTED_EVENT,
-            APP_EXIT_COMPLETED_EVENT,
-        ] {
-            if !events.iter().any(|existing| existing == event) {
-                events.push(event.to_owned());
-            }
-        }
-        events
     }
 
     fn window_payload(runtime_window: &RuntimeWindow) -> String {
@@ -1809,6 +1785,7 @@ mod enabled {
         window_id: Option<winit::window::WindowId>,
         request: WindowControlRequest,
         response: std::sync::mpsc::SyncSender<Result<WindowControlResponse, String>>,
+        deadline: Instant,
     }
 
     #[derive(Debug, Clone)]
@@ -1820,9 +1797,6 @@ mod enabled {
             payload_json: String,
         },
         WindowControl(Arc<WindowControlEvent>),
-        CloseTimeout {
-            request_id: String,
-        },
         SelfTestPassed(String),
         SelfTestFailed(String),
     }
@@ -1840,6 +1814,19 @@ mod enabled {
 
         fn wake(&self) {
             let _ = self.0.send_event(WakerEvent::Wake);
+        }
+    }
+
+    fn wheel_delta_from_winit(delta: MouseScrollDelta) -> WheelDelta {
+        let (x, y) = match delta {
+            MouseScrollDelta::LineDelta(x, y) => ((x * 76.0) as f64, (y * 76.0) as f64),
+            MouseScrollDelta::PixelDelta(delta) => (delta.x, delta.y),
+        };
+        WheelDelta {
+            x,
+            y,
+            z: 0.0,
+            mode: WheelMode::DeltaPixel,
         }
     }
 
@@ -1968,6 +1955,7 @@ mod enabled {
         event_loop_proxy: EventLoopProxy<WakerEvent>,
         window_registry: Arc<Mutex<BTreeMap<String, winit::window::WindowId>>>,
         current_window_id: String,
+        event_loop_thread: std::thread::ThreadId,
     }
 
     impl axion_bridge::WindowControlExecutor for WinitWindowControlExecutor {
@@ -1976,6 +1964,9 @@ mod enabled {
             target_window_id: Option<&str>,
             request: WindowControlRequest,
         ) -> Result<WindowControlResponse, String> {
+            if std::thread::current().id() == self.event_loop_thread {
+                return Err("window control cannot wait on the event loop thread".to_owned());
+            }
             let window_id = match &request {
                 WindowControlRequest::ListStates
                 | WindowControlRequest::ExitApp
@@ -2001,34 +1992,31 @@ mod enabled {
                     window_id,
                     request,
                     response: sender,
+                    deadline: Instant::now() + WINDOW_CONTROL_TIMEOUT,
                 })))
                 .map_err(|_| {
                     "failed to send window control request to the event loop".to_owned()
                 })?;
-            receiver
-                .recv()
-                .map_err(|_| "window control response channel was closed".to_owned())?
+            receive_control_response(&receiver, WINDOW_CONTROL_TIMEOUT)
         }
     }
     #[derive(Clone)]
     struct AxionProtocolHandler {
         resolver: AppAssetResolver,
         window_bindings: Vec<WindowBridgeBinding>,
-        content_security_policy: String,
+        webview_policies: Arc<Mutex<BTreeMap<servo::WebViewId, WebViewPolicy>>>,
     }
 
     impl AxionProtocolHandler {
-        fn new(resolver: AppAssetResolver, window_bindings: Vec<WindowBridgeBinding>) -> Self {
-            let content_security_policy = window_bindings
-                .first()
-                .map(|binding| binding.security_policy.content_security_policy())
-                .unwrap_or_else(|| {
-                    "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'".to_owned()
-                });
+        fn new(
+            resolver: AppAssetResolver,
+            window_bindings: Vec<WindowBridgeBinding>,
+            webview_policies: Arc<Mutex<BTreeMap<servo::WebViewId, WebViewPolicy>>>,
+        ) -> Self {
             Self {
                 resolver,
                 window_bindings,
-                content_security_policy,
+                webview_policies,
             }
         }
 
@@ -2037,10 +2025,14 @@ mod enabled {
                 .headers
                 .get("X-Axion-Bridge-Token")
                 .and_then(|value| value.to_str().ok())?;
-
-            self.window_bindings
-                .iter()
-                .find(|binding| binding.bridge_token == token)
+            let policies = self.webview_policies.lock().ok()?;
+            let policy = policy_for_webview(&policies, request.target_webview_id.as_ref())?;
+            if !token_matches(policy, Some(token)) {
+                return None;
+            }
+            self.window_bindings.iter().find(|binding| {
+                binding.window_id == policy.window_id && binding.bridge_token == token
+            })
         }
 
         async fn response_for_invoke(&self, request: &Request) -> Response {
@@ -2059,17 +2051,6 @@ mod enabled {
                     StatusCode::FORBIDDEN,
                     None,
                     "Axion protocol is not allowed",
-                );
-            }
-
-            if !request_origin_is_trusted(request, &binding.security_policy)
-                && !bridge_token_matches(request, &binding.bridge_token)
-            {
-                return json_error_response(
-                    request,
-                    StatusCode::FORBIDDEN,
-                    None,
-                    "Axion invoke origin is not trusted",
                 );
             }
 
@@ -2214,17 +2195,6 @@ mod enabled {
                 );
             }
 
-            if !request_origin_is_trusted(request, &binding.security_policy)
-                && !bridge_token_matches(request, &binding.bridge_token)
-            {
-                return json_error_response(
-                    request,
-                    StatusCode::FORBIDDEN,
-                    None,
-                    "Axion emit origin is not trusted",
-                );
-            }
-
             let current_url = request.current_url();
             let path = current_url.path().trim_start_matches('/');
             let event = path.trim_start_matches("__axion__/emit/");
@@ -2347,9 +2317,20 @@ mod enabled {
             done_chan: &mut DoneChannel,
             context: &FetchContext,
         ) -> Pin<Box<dyn Future<Output = Response> + Send>> {
+            let content_security_policy = self.webview_policies.lock().ok().and_then(|policies| {
+                policy_for_webview(&policies, request.target_webview_id.as_ref())
+                    .map(|policy| policy.content_security_policy.clone())
+            });
+            let Some(content_security_policy) = content_security_policy else {
+                return Box::pin(std::future::ready(Response::network_error(
+                    NetworkError::ResourceLoadError(
+                        "Axion asset has no registered WebView context".to_owned(),
+                    ),
+                )));
+            };
             let resolved = match self
                 .resolver
-                .resolve_existing_request_path(request.current_url().path())
+                .resolve_existing_url(request.current_url().as_url())
             {
                 Ok(resolved) => resolved,
                 Err(error) => {
@@ -2375,7 +2356,7 @@ mod enabled {
                         response.headers.insert(name, value);
                     }
                 }
-                if let Ok(header_value) = HeaderValue::from_str(&self.content_security_policy) {
+                if let Ok(header_value) = HeaderValue::from_str(&content_security_policy) {
                     response
                         .headers
                         .insert(CONTENT_SECURITY_POLICY, header_value);
@@ -2463,49 +2444,20 @@ mod enabled {
     }
 
     fn json_error_object(status: StatusCode, message: &str) -> String {
-        format!(
-            "{{\"code\":{},\"message\":{}}}",
-            json_string_literal(&error_code(status, message)),
-            json_string_literal(message),
-        )
+        serde_json::to_string(&bridge_error(status, message))
+            .expect("BridgeError string fields must serialize as JSON")
     }
 
-    fn error_code(status: StatusCode, message: &str) -> String {
-        if let Some(code) = prefixed_error_code(message) {
-            return code.to_owned();
-        }
-
-        match status {
+    fn bridge_error(status: StatusCode, message: &str) -> BridgeError {
+        let fallback = match status {
             StatusCode::FORBIDDEN => "bridge.forbidden",
             StatusCode::NOT_FOUND => "bridge.not-found",
             StatusCode::PAYLOAD_TOO_LARGE => "bridge.payload-too-large",
             StatusCode::INTERNAL_SERVER_ERROR => "bridge.internal-error",
             StatusCode::BAD_REQUEST => "bridge.bad-request",
             _ => "bridge.error",
-        }
-        .to_owned()
-    }
-
-    fn prefixed_error_code(message: &str) -> Option<&str> {
-        let (code, _message) = message.split_once(": ")?;
-        let mut segments = code.split('.');
-        let first = segments.next()?;
-        if segments.next().is_none() || !valid_error_code_segment(first) {
-            return None;
-        }
-        if code.split('.').all(valid_error_code_segment) {
-            Some(code)
-        } else {
-            None
-        }
-    }
-
-    fn valid_error_code_segment(segment: &str) -> bool {
-        let mut chars = segment.chars();
-        matches!(chars.next(), Some(first) if first.is_ascii_lowercase())
-            && chars.all(|character| {
-                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-            })
+        };
+        BridgeError::from_legacy_with_fallback(message, fallback)
     }
 
     fn json_response(request: &Request, status: StatusCode, body: String) -> Response {
@@ -2523,13 +2475,7 @@ mod enabled {
     }
 
     fn json_string_literal(value: &str) -> String {
-        let escaped = value
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('\t', "\\t");
-        format!("\"{escaped}\"")
+        serde_json::to_string(value).expect("strings must serialize as JSON")
     }
 
     fn json_string_array_literal(values: &[String]) -> String {
@@ -2572,70 +2518,48 @@ mod enabled {
             })
     }
 
-    fn request_origin_is_trusted(request: &Request, security_policy: &SecurityPolicy) -> bool {
-        let request_origin = match &request.origin {
-            RequestOrigin::Origin(origin) => Some(origin.ascii_serialization()),
-            RequestOrigin::Client => None,
-        };
-
-        if request_origin
-            .as_ref()
-            .is_some_and(|origin| security_policy.is_trusted_origin(origin))
-        {
-            return true;
-        }
-
-        let referrer_origin = match &request.referrer {
-            Referrer::Client(url) | Referrer::ReferrerUrl(url) => {
-                Some(url.origin().ascii_serialization().into_owned())
-            }
-            Referrer::NoReferrer => None,
-        };
-
-        if referrer_origin
-            .as_ref()
-            .is_some_and(|origin| security_policy.is_trusted_origin(origin))
-        {
-            return true;
-        }
-
-        let origin_header = request
-            .headers
-            .get(ORIGIN)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-
-        if let Some(origin) = origin_header {
-            return security_policy.is_trusted_origin(&origin);
-        }
-
-        let referer_origin = request
-            .headers
-            .get(REFERER)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| Url::parse(value).ok())
-            .map(|url| SecurityPolicy::origin_string(&url));
-
-        referer_origin
-            .as_ref()
-            .is_some_and(|origin| security_policy.is_trusted_origin(origin))
-    }
-
-    fn bridge_token_matches(request: &Request, expected_token: &str) -> bool {
-        request
-            .headers
-            .get("X-Axion-Bridge-Token")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value == expected_token)
-    }
-
     #[cfg(test)]
     mod tests {
         use std::time::Duration;
 
         use http::StatusCode;
 
-        use super::{error_code, json_error_object, parse_timeout_ms};
+        use super::{bridge_error, json_error_object, parse_timeout_ms, wheel_delta_from_winit};
+
+        #[test]
+        fn launch_rejects_zero_close_timeout_before_native_startup() {
+            let root = std::path::PathBuf::from("/test/frontend");
+            let resolver =
+                axion_protocol::AppAssetResolver::new(root.clone(), root.join("index.html"))
+                    .unwrap();
+            let target = super::StartupTarget::AppProtocol {
+                initial_url: resolver.initial_url(),
+            };
+            let result = super::LaunchRequest::new(
+                "test-app".to_owned(),
+                resolver,
+                Vec::new(),
+                Vec::new(),
+                target,
+                0,
+            );
+            assert!(matches!(
+                result,
+                Err(super::WinitRunError::InvalidCloseTimeout)
+            ));
+        }
+
+        #[test]
+        fn wheel_lines_are_converted_once_and_pixel_deltas_are_preserved() {
+            let line = wheel_delta_from_winit(winit::event::MouseScrollDelta::LineDelta(1.0, -2.0));
+            assert_eq!((line.x, line.y), (76.0, -152.0));
+            assert!(matches!(line.mode, servo::WheelMode::DeltaPixel));
+            let pixel = wheel_delta_from_winit(winit::event::MouseScrollDelta::PixelDelta(
+                winit::dpi::PhysicalPosition::new(2.5, -3.25),
+            ));
+            assert_eq!((pixel.x, pixel.y), (2.5, -3.25));
+            assert!(matches!(pixel.mode, servo::WheelMode::DeltaPixel));
+        }
 
         #[test]
         fn parse_timeout_ms_accepts_positive_values() {
@@ -2656,7 +2580,7 @@ mod enabled {
         #[test]
         fn bridge_error_object_preserves_prefixed_codes() {
             assert_eq!(
-                error_code(StatusCode::BAD_REQUEST, "fs.not-found: missing"),
+                bridge_error(StatusCode::BAD_REQUEST, "fs.not-found: missing").code,
                 "fs.not-found"
             );
             assert_eq!(
@@ -2666,16 +2590,26 @@ mod enabled {
         }
 
         #[test]
+        fn bridge_error_envelope_preserves_control_characters_as_json() {
+            let message = "fs.invalid: \"quoted\"\n\0中文";
+            let error: axion_bridge::BridgeError =
+                serde_json::from_str(&json_error_object(StatusCode::BAD_REQUEST, message)).unwrap();
+            assert_eq!(error.code, "fs.invalid");
+            assert_eq!(error.message, message);
+        }
+
+        #[test]
         fn bridge_error_object_falls_back_to_status_codes() {
             assert_eq!(
-                error_code(StatusCode::FORBIDDEN, "Axion protocol is not allowed"),
+                bridge_error(StatusCode::FORBIDDEN, "Axion protocol is not allowed").code,
                 "bridge.forbidden"
             );
             assert_eq!(
-                error_code(
+                bridge_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Axion command returned invalid JSON payload"
-                ),
+                )
+                .code,
                 "bridge.internal-error"
             );
         }

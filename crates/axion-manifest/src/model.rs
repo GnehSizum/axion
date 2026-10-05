@@ -91,11 +91,18 @@ pub struct BundleSection {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NativeSection {
     #[serde(default)]
+    pub fs: Option<FsSection>,
+    #[serde(default)]
     pub dialog: Option<DialogSection>,
     #[serde(default)]
     pub clipboard: Option<ClipboardSection>,
     #[serde(default)]
     pub lifecycle: Option<LifecycleSection>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FsSection {
+    pub app_data_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

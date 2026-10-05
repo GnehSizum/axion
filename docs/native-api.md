@@ -53,7 +53,7 @@ Common profiles:
 
 - `app-info`: `app.ping`, `app.info`, `app.version`, `app.echo`
 - `app-control`: `app.exit`
-- `window-control`: current-window control commands
+- `window-control`: window control commands (current window by default; explicit `target` may address another window)
 - `multi-window`: targeted window control including `window.list`
 - `clipboard-access`: `clipboard.write_text`, `clipboard.read_text`
 - `shell-access`: `shell.open`
@@ -171,7 +171,7 @@ Returns the Axion runtime Cargo version and public release version used by the a
 
 ```js
 await window.__AXION__.invoke("app.version", null);
-// { version: "0.6.0", release: "v0.6.0", framework: "axion" }
+// { version: "0.6.1", release: "v0.6.1", framework: "axion" }
 ```
 
 ### `app.echo`
@@ -299,7 +299,7 @@ await window.__AXION__.invoke("window.prevent_close", {
 
 ### `app.exit`
 
-Requests application shutdown by asking all runtime windows to close. If windows do not answer, the preview backend defaults to allowing close after the reported timeout from `[native.lifecycle] close_timeout_ms`.
+Requests application shutdown by asking all runtime windows to close. While an exit is pending, repeated calls return the same request id and counts. A prevent decision cancels that exit and releases its remaining pending closes; a later call starts a new request. If windows do not answer, the preview backend defaults to allowing close after the reported timeout from `[native.lifecycle] close_timeout_ms`.
 
 ```js
 await window.__AXION__.invoke("app.exit", null);
@@ -382,13 +382,28 @@ Errors: `clipboard.state-unavailable`.
 
 ## File Commands
 
-File commands operate only inside Axion's app-data directory:
+File commands operate only inside Axion's app-data directory. Development keeps the preview layout `<frontend parent>/target/axion-data/<sanitized app name>/`. Production uses a writable user data directory, independently of the bundle location:
 
-```text
-<app root>/target/axion-data/<app name>/
+| Platform | Production directory |
+| --- | --- |
+| macOS | `$HOME/Library/Application Support/<identity>/` |
+| Linux | `$XDG_DATA_HOME/<identity>/` when XDG_DATA_HOME is absolute; otherwise `$HOME/.local/share/<identity>/` |
+| Windows | `%LOCALAPPDATA%/<identity>/` |
+
+Production prefers the stable `[app].identifier`; it must be a non-empty directory segment containing ASCII letters, digits, dots, hyphens, or underscores, and cannot be `.` or `..`. Without an identifier, Axion uses the sanitized app name. Keep an identifier stable when renaming an app to preserve its data directory. If no absolute operating-system data root is available, launch fails instead of writing into the bundle.
+
+Set an explicit directory for tests or deployments that need a different location:
+
+```toml
+[native.fs]
+app_data_dir = "test-data"
 ```
 
-They reject absolute paths, parent-directory traversal, root components, and symlinks. Directory removal requires `recursive: true` for non-empty directories.
+Manifest-relative overrides resolve against the manifest directory. Rust callers can use `NativeConfig::with_app_data_dir`; a relative Rust override resolves against the current working directory. An override selects the exact directory, without appending the app identity. Tests should use temporary overrides to avoid writing into real user data directories.
+
+File paths passed to commands remain relative to the selected directory. Absolute paths, parent/root components, NUL, backslashes, and symlinks at the sandbox base or any requested path component are rejected. Existing components are checked before creating parent directories and checked again afterward. Directory removal requires `recursive: true` for non-empty directories.
+
+This is a framework path sandbox. Trusted ancestors may resolve through operating-system aliases, and these checks do not provide an operating-system permission boundary or eliminate races with a local process that can modify the directory concurrently. Do not grant file capabilities to untrusted content.
 
 File command failures use stable preview error code prefixes in the thrown error message:
 
@@ -398,7 +413,7 @@ File command failures use stable preview error code prefixes in the thrown error
 - `fs.not-directory`: `fs.list_dir` was called on a file
 - `fs.is-directory`: text read/write was called on a directory
 - `fs.directory-not-empty`: `fs.remove` was called on a non-empty directory without `recursive: true`
-- `fs.symlink-rejected`: the resolved app-data path is a symlink
+- `fs.symlink-rejected`: the app-data base or a requested path component is a symlink
 - `fs.permission-denied` or `fs.io-error`: the host filesystem rejected the operation
 
 ### `fs.create_dir`
@@ -491,6 +506,8 @@ await window.__AXION__.invoke("shell.open", {
 ```
 
 The command rejects empty values, relative paths, unsupported schemes, and malformed targets before launch. Errors: `shell.invalid-payload`, `shell.invalid-target`, `shell.unsupported-target`, `shell.open-failed`.
+
+A successful response contains `opened: true` and the opener process `pid`. This means the platform opener was spawned successfully; it does not confirm that a browser or external application displayed the URL. Axion returns promptly and waits for the opener in the background to reap the child process, including when it exits with a failure status.
 
 ## Dialog Commands
 

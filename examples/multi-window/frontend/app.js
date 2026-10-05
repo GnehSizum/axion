@@ -251,6 +251,17 @@ window.addEventListener('DOMContentLoaded', async () => {
             formatPretty(exitRequest),
           );
 
+          const repeatedExit = await bridge.invoke('app.exit', null);
+          addCheck(
+            'app.exit.idempotent',
+            repeatedExit?.pending === true &&
+              repeatedExit?.requestId === exitRequest?.requestId &&
+              repeatedExit?.requestCount === exitRequest?.requestCount
+              ? 'pass'
+              : 'fail',
+            formatPretty(repeatedExit),
+          );
+
           const exitEvent = await waitFor(() =>
             results.lifecycleEvents.find(
               (event) =>

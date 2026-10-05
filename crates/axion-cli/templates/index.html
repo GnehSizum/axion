@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>@TITLE@</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">@EYEBROW@</p>
+        <h1>@TITLE@</h1>
+        <p id="bridge-status" class="status">Waiting for Axion bridge...</p>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2>Bridge Surface</h2>
+          <p>Commands exposed to this window:</p>
+          <ul id="command-list"></ul>
+          <p>Frontend events:</p>
+          <ul id="event-list"></ul>
+          <p>Host events:</p>
+          <ul id="host-event-list"></ul>
+        </article>
+
+        <article class="card">
+          <h2>App & Window API</h2>
+          <pre id="app-info">Waiting...</pre>
+        </article>
+
+        <article class="card">
+          <h2>@NATIVE_API_HEADING@</h2>@NATIVE_API_CONTROLS@
+          <pre id="native-api">Waiting...</pre>
+        </article>
+
+        <article class="card">
+          <h2>Input Compatibility</h2>
+          <label class="field">
+            <span>Sample Input</span>
+            <input id="compat-input" type="text" value="Axion caret placement demo">
+          </label>
+          <label class="field">
+            <span>Sample Textarea</span>
+            <textarea id="compat-textarea" rows="5">Try clicking, selecting, and pressing Tab here.
+The template wires this textarea to Axion's text selection compatibility helper.</textarea>
+          </label>
+          <pre id="compat-diagnostics">Waiting for text input interaction...</pre>
+        </article>
+
+        <article class="card">
+          <h2>Custom Rust Command</h2>
+          <pre id="custom-command">Waiting...</pre>
+        </article>
+
+        <article class="card">
+          <h2>Capability Denial</h2>
+          <pre id="capability-denial">Waiting...</pre>
+        </article>
+
+        <article class="card">
+          <h2>Event Log</h2>
+          <pre id="event-log">Waiting...</pre>
+        </article>
+      </section>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

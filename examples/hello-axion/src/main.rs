@@ -1,6 +1,8 @@
 use std::path::Path;
 
 use axion_core::{Builder, RunMode};
+#[cfg(feature = "servo-runtime")]
+use axion_runtime::json_string_literal;
 
 #[cfg(feature = "servo-runtime")]
 struct GreetingPlugin;
@@ -25,14 +27,12 @@ impl axion_runtime::RuntimePlugin for GreetingPlugin {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("axion.toml");
-    let config = axion_manifest::load_app_config_from_path(&manifest_path)?;
+    let config = axion_manifest::load_app_config_for_executable(&manifest_path)?;
+    let crash_report_dir = axion_runtime::app_data_dir_for_config(&config)?.join("crash-reports");
     let app = Builder::new().apply_config(config).build()?;
     axion_runtime::install_panic_reporter(axion_runtime::PanicReportConfig {
         app_name: app.config().identity.name.clone(),
-        output_dir: Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("axion")
-            .join("crash-reports"),
+        output_dir: crash_report_dir,
     });
 
     if std::env::args().skip(1).any(|arg| arg == "--plan") {
@@ -56,15 +56,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         axion_runtime::run_with_plugins(app, RunMode::Production, &plugins)?;
         Ok(())
     }
-}
-
-#[cfg(feature = "servo-runtime")]
-fn json_string_literal(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
-    format!("\"{escaped}\"")
 }

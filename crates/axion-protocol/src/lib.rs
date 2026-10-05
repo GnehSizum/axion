@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use percent_encoding::percent_decode_str;
 use thiserror::Error;
 use url::Url;
 
@@ -123,11 +124,13 @@ impl AppAssetResolver {
     }
 
     pub fn url_for_path(&self, request_path: &str) -> Url {
-        Url::parse(&format!(
-            "{AXION_SCHEME}://{AXION_APP_AUTHORITY}/{}",
-            request_path.trim_start_matches('/')
-        ))
-        .expect("Axion protocol URLs must be well-formed")
+        let mut url = Url::parse(&format!("{AXION_SCHEME}://{AXION_APP_AUTHORITY}/"))
+            .expect("Axion protocol URLs must be well-formed");
+        url.path_segments_mut()
+            .expect("Axion protocol URLs have path segments")
+            .clear()
+            .extend(request_path.trim_start_matches('/').split('/'));
+        url
     }
 
     pub fn parse_request(&self, url: &Url) -> Result<ResourceRequest, ProtocolError> {
@@ -144,7 +147,8 @@ impl AppAssetResolver {
             });
         }
 
-        let path = self.normalize_request_path(url.path())?;
+        let decoded_path = decode_url_path(url.path())?;
+        let path = self.normalize_request_path(&decoded_path)?;
 
         Ok(ResourceRequest {
             scheme: AXION_SCHEME.to_owned(),
@@ -170,6 +174,12 @@ impl AppAssetResolver {
         })
     }
 
+    pub fn resolve_existing_url(&self, url: &Url) -> Result<ResolvedAsset, ProtocolError> {
+        let request = self.parse_request(url)?;
+        self.resolve_existing_request_path(&request.path)
+    }
+
+    /// Resolves a decoded, relative asset path. Use `resolve_existing_url` for URL input.
     pub fn resolve_existing_request_path(
         &self,
         request_path: &str,
@@ -194,13 +204,31 @@ impl AppAssetResolver {
     }
 
     fn normalize_request_path(&self, request_path: &str) -> Result<String, ProtocolError> {
-        let trimmed = request_path.trim();
-        if trimmed.is_empty() || trimmed == "/" {
+        if request_path.is_empty() || request_path == "/" {
             return Ok(self.default_document.clone());
         }
 
-        normalize_relative_path(Path::new(trimmed.trim_start_matches('/')))
+        normalize_relative_path(Path::new(request_path.trim_start_matches('/')))
     }
+}
+
+fn decode_url_path(path: &str) -> Result<String, ProtocolError> {
+    path.split('/')
+        .map(|segment| {
+            let decoded = percent_decode_str(segment).decode_utf8().map_err(|_| {
+                ProtocolError::InvalidUrl {
+                    value: path.to_owned(),
+                }
+            })?;
+            if matches!(decoded.as_ref(), "." | "..") || decoded.contains(['/', '\\', '\0']) {
+                return Err(ProtocolError::PathTraversal {
+                    path: path.to_owned(),
+                });
+            }
+            Ok(decoded.into_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|segments| segments.join("/"))
 }
 
 fn reject_symlinked_path(root: &Path, relative_path: &str) -> Result<(), ProtocolError> {
@@ -231,6 +259,11 @@ fn reject_symlink(path: &Path) -> Result<(), ProtocolError> {
 }
 
 fn normalize_relative_path(path: &Path) -> Result<String, ProtocolError> {
+    if path.as_os_str().to_string_lossy().contains(['\\', '\0']) {
+        return Err(ProtocolError::PathTraversal {
+            path: path.display().to_string(),
+        });
+    }
     let mut segments = Vec::new();
 
     for component in path.components() {
@@ -296,6 +329,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use url::Url;
 
     use super::{
         AXION_APP_AUTHORITY, AXION_SCHEME, AppAssetResolver, ProtocolError, ResourcePolicy,
@@ -471,5 +505,105 @@ mod tests {
             Some("same-origin")
         );
         assert!(default_resource_policy_summary().contains("static-assets"));
+    }
+    #[test]
+    fn resource_urls_round_trip_special_file_names_without_double_decoding() {
+        let frontend = temp_dir("encoded-assets");
+        fs::create_dir_all(frontend.join("nested")).unwrap();
+        fs::write(frontend.join("index.html"), "index").unwrap();
+        let resolver =
+            AppAssetResolver::new(frontend.clone(), frontend.join("index.html")).unwrap();
+        for name in [
+            "中文.js",
+            "a b.js",
+            "a#b.js",
+            "a?b.js",
+            " a .js ",
+            "a%20b.js",
+            "%2Fsecret.js",
+            "%2e%2e.txt",
+        ] {
+            let relative = format!("nested/{name}");
+            fs::write(frontend.join(&relative), name).unwrap();
+            let url = resolver.url_for_path(&relative);
+            assert_eq!(url.query(), None);
+            assert_eq!(url.fragment(), None);
+            let request = resolver.parse_request(&url).unwrap();
+            assert_eq!(request.path, relative);
+            assert_eq!(
+                resolver.resolve_url(&url).unwrap().file_path,
+                frontend.join(&relative)
+            );
+            let resolved = resolver.resolve_existing_url(&url).unwrap();
+            assert_eq!(fs::read_to_string(&resolved.file_path).unwrap(), name);
+        }
+        // Encoded and literal-percent names must remain distinct.
+        assert_ne!(
+            resolver.url_for_path("nested/a b.js"),
+            resolver.url_for_path("nested/a%20b.js")
+        );
+        let entry_resolver =
+            AppAssetResolver::new(frontend.clone(), frontend.join("nested/a%20b.js")).unwrap();
+        assert_eq!(
+            entry_resolver
+                .resolve_existing_url(&entry_resolver.initial_url())
+                .unwrap()
+                .file_path,
+            frontend.join("nested/a%20b.js")
+        );
+    }
+
+    #[test]
+    fn url_decoding_rejects_unsafe_segments_and_non_app_authorities() {
+        let resolver = AppAssetResolver::new(
+            PathBuf::from("/tmp/frontend"),
+            PathBuf::from("/tmp/frontend/index.html"),
+        )
+        .unwrap();
+        for path in [
+            "/%2e%2e",
+            "/safe/%2e%2e%2fsecret",
+            "/%2fsecret",
+            "/%5csecret",
+            "/%00",
+        ] {
+            assert!(
+                matches!(
+                    super::decode_url_path(path),
+                    Err(ProtocolError::PathTraversal { .. })
+                ),
+                "{path}"
+            );
+        }
+        let invalid_utf8 = Url::parse("axion://app/%ff.js").unwrap();
+        assert!(matches!(
+            resolver.resolve_existing_url(&invalid_utf8),
+            Err(ProtocolError::InvalidUrl { .. })
+        ));
+        let wrong_authority = Url::parse("axion://other/index.html").unwrap();
+        assert!(matches!(
+            resolver.resolve_existing_url(&wrong_authority),
+            Err(ProtocolError::UnsupportedAuthority { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn url_resolution_rejects_encoded_symlink_names() {
+        use std::os::unix::fs::symlink;
+        let frontend = temp_dir("encoded-symlink");
+        fs::create_dir_all(&frontend).unwrap();
+        fs::write(frontend.join("index.html"), "index").unwrap();
+        symlink(
+            frontend.join("index.html"),
+            frontend.join("alias file.html"),
+        )
+        .unwrap();
+        let resolver =
+            AppAssetResolver::new(frontend.clone(), frontend.join("index.html")).unwrap();
+        assert!(matches!(
+            resolver.resolve_existing_url(&resolver.url_for_path("alias file.html")),
+            Err(ProtocolError::SymlinkNotAllowed { .. })
+        ));
     }
 }

@@ -6,6 +6,7 @@ use thiserror::Error;
 
 pub const AXION_ASSET_MANIFEST_FILE_NAME: &str = "axion-assets.json";
 pub const AXION_BUNDLE_MANIFEST_FILE_NAME: &str = "axion-bundle-manifest.json";
+pub const AXION_DEPLOYMENT_MANIFEST_FILE_NAME: &str = "axion.toml";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BundleTarget {
@@ -127,6 +128,10 @@ pub enum PackagerError {
         output_dir: PathBuf,
         frontend_dist: PathBuf,
     },
+    #[error("output directory '{output_dir}' overlaps input '{input}'")]
+    OutputOverlapsInput { output_dir: PathBuf, input: PathBuf },
+    #[error("bundle app name '{value}' must be a single directory name")]
+    InvalidAppName { value: String },
     #[error("frontend_dist must not contain reserved generated asset path '{path}'")]
     ReservedAssetPath { path: PathBuf },
     #[error("bundle executable '{path}' must exist and be a file")]
@@ -168,6 +173,7 @@ pub fn stage_web_assets(
 
     let app_dir = output_dir.join("app");
     reject_output_inside_frontend_dist(&frontend_dist, &app_dir)?;
+    reject_output_input_overlap(&app_dir, &entry)?;
     let asset_files = collect_asset_files(&frontend_dist)?;
 
     if app_dir.exists() {
@@ -202,8 +208,51 @@ pub fn stage_bundle_from_web_assets_with_metadata(
     bundle_plan: BundlePlan,
     metadata: &BundleMetadata,
 ) -> Result<BundleArtifact, PackagerError> {
-    let frontend_dist = frontend_dist.into();
-    let entry = entry.into();
+    stage_bundle_impl(
+        frontend_dist.into(),
+        entry.into(),
+        bundle_plan,
+        metadata,
+        None,
+    )
+}
+
+pub fn stage_bundle_from_web_assets_with_deployment_manifest(
+    frontend_dist: impl Into<PathBuf>,
+    entry: impl Into<PathBuf>,
+    bundle_plan: BundlePlan,
+    metadata: &BundleMetadata,
+    manifest_path: &Path,
+    manifest_source: &str,
+) -> Result<BundleArtifact, PackagerError> {
+    stage_bundle_impl(
+        frontend_dist.into(),
+        entry.into(),
+        bundle_plan,
+        metadata,
+        Some((manifest_path, manifest_source)),
+    )
+}
+
+fn stage_bundle_impl(
+    frontend_dist: PathBuf,
+    entry: PathBuf,
+    bundle_plan: BundlePlan,
+    metadata: &BundleMetadata,
+    deployment_manifest: Option<(&Path, &str)>,
+) -> Result<BundleArtifact, PackagerError> {
+    let app_name_path = Path::new(&metadata.app_name);
+    if metadata.app_name.contains(['/', '\\'])
+        || app_name_path.components().count() != 1
+        || !matches!(
+            app_name_path.components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+    {
+        return Err(PackagerError::InvalidAppName {
+            value: metadata.app_name.clone(),
+        });
+    }
     let validation = validate_web_assets(&frontend_dist, &entry)?;
     let executable_path = validate_bundle_executable(bundle_plan.executable_path.as_deref())?;
     let icon_path = validate_bundle_icon(metadata.icon.as_deref())?;
@@ -214,7 +263,19 @@ pub fn stage_bundle_from_web_assets_with_metadata(
         &metadata.app_name,
     );
     let resources_app_dir = bundle_resources_dir(&bundle_dir, bundle_plan.target);
-    reject_output_inside_frontend_dist(&frontend_dist, &resources_app_dir)?;
+    reject_output_inside_frontend_dist(&frontend_dist, &bundle_dir)?;
+    reject_output_input_overlap(&bundle_dir, &entry)?;
+    for input in executable_path.iter().chain(icon_path.iter()) {
+        reject_output_input_overlap(&bundle_dir, input)?;
+    }
+    if let Some((manifest_path, _)) = deployment_manifest {
+        reject_output_input_overlap(&bundle_dir, manifest_path)?;
+    }
+    if let Some(icon) = &icon_path {
+        if icon.file_name() == Some(std::ffi::OsStr::new(AXION_DEPLOYMENT_MANIFEST_FILE_NAME)) {
+            return Err(PackagerError::ReservedAssetPath { path: icon.clone() });
+        }
+    }
     let asset_files = collect_asset_files(&frontend_dist)?;
 
     if bundle_dir.exists() {
@@ -238,6 +299,16 @@ pub fn stage_bundle_from_web_assets_with_metadata(
         copied_executable_path.as_deref(),
         copied_icon_path.as_deref(),
     )?;
+    let deployment_manifest_path = deployment_manifest
+        .map(|(_, source)| {
+            let path = resources_app_dir
+                .parent()
+                .expect("bundle resources have a parent")
+                .join(AXION_DEPLOYMENT_MANIFEST_FILE_NAME);
+            fs::write(&path, source)?;
+            Ok::<_, PackagerError>(path)
+        })
+        .transpose()?;
     let entry_path = resources_app_dir.join(validation.relative_entry);
     let bundle_manifest_path = write_bundle_manifest(BundleManifestInput {
         bundle_dir: &bundle_dir,
@@ -249,6 +320,7 @@ pub fn stage_bundle_from_web_assets_with_metadata(
         metadata_path: &metadata_files.metadata_path,
         executable_path: copied_executable_path.as_deref(),
         icon_path: copied_icon_path.as_deref(),
+        deployment_manifest_path: deployment_manifest_path.as_deref(),
     })?;
 
     Ok(BundleArtifact {
@@ -413,6 +485,22 @@ fn verify_bundle_manifest_references(artifact: &BundleArtifact) -> Result<(), Pa
             &bundle_relative_path(&artifact.bundle_dir, path),
         )?,
         None => require_bundle_manifest_null_field(artifact, &manifest, "icon")?,
+    }
+
+    let deployment_manifest_path = artifact
+        .resources_app_dir
+        .parent()
+        .expect("bundle resources have a parent")
+        .join(AXION_DEPLOYMENT_MANIFEST_FILE_NAME);
+    if deployment_manifest_path.is_file() {
+        require_bundle_manifest_field(
+            artifact,
+            &manifest,
+            "deployment_manifest",
+            &bundle_relative_path(&artifact.bundle_dir, &deployment_manifest_path),
+        )?;
+    } else {
+        require_bundle_manifest_null_field(artifact, &manifest, "deployment_manifest")?;
     }
 
     let files = collect_bundle_manifest_files(&artifact.bundle_dir)?;
@@ -762,6 +850,7 @@ struct BundleManifestInput<'a> {
     metadata_path: &'a Path,
     executable_path: Option<&'a Path>,
     icon_path: Option<&'a Path>,
+    deployment_manifest_path: Option<&'a Path>,
 }
 
 fn write_bundle_manifest(input: BundleManifestInput<'_>) -> Result<PathBuf, PackagerError> {
@@ -779,7 +868,7 @@ fn write_bundle_manifest(input: BundleManifestInput<'_>) -> Result<PathBuf, Pack
         .collect::<Vec<_>>()
         .join(",\n");
     let source = format!(
-        "{{\n  \"version\": 1,\n  \"target\": {},\n  \"app\": {},\n  \"identifier\": {},\n  \"app_version\": {},\n  \"resources\": {},\n  \"entry\": {},\n  \"asset_manifest\": {},\n  \"metadata\": {},\n  \"executable\": {},\n  \"icon\": {},\n  \"files\": [\n{}\n  ]\n}}\n",
+        "{{\n  \"version\": 1,\n  \"target\": {},\n  \"app\": {},\n  \"identifier\": {},\n  \"app_version\": {},\n  \"resources\": {},\n  \"entry\": {},\n  \"asset_manifest\": {},\n  \"metadata\": {},\n  \"executable\": {},\n  \"icon\": {},\n  \"deployment_manifest\": {},\n  \"files\": [\n{}\n  ]\n}}\n",
         json_string_literal(bundle_target_name(input.target)),
         json_string_literal(&input.metadata.app_name),
         json_optional_string_literal(input.metadata.identifier.as_deref()),
@@ -805,6 +894,12 @@ fn write_bundle_manifest(input: BundleManifestInput<'_>) -> Result<PathBuf, Pack
                 .icon_path
                 .map(|path| bundle_relative_path(input.bundle_dir, path))
                 .as_deref(),
+        ),
+        json_optional_string_literal(
+            input
+                .deployment_manifest_path
+                .map(|path| bundle_relative_path(input.bundle_dir, path))
+                .as_deref()
         ),
         files
     );
@@ -900,8 +995,10 @@ pub fn validate_web_assets(
     reject_symlinks(frontend_dist)?;
     reject_reserved_asset_paths(frontend_dist)?;
 
-    let relative_entry = entry
-        .strip_prefix(frontend_dist)
+    let frontend_dist_compare = frontend_dist.canonicalize()?;
+    let entry_compare = comparable_path(entry)?;
+    let relative_entry = entry_compare
+        .strip_prefix(&frontend_dist_compare)
         .map(Path::to_path_buf)
         .map_err(|_| PackagerError::EntryOutsideFrontendDist {
             entry: entry.to_path_buf(),
@@ -942,45 +1039,55 @@ fn reject_output_inside_frontend_dist(
         });
     }
 
+    reject_output_input_overlap(output_dir, frontend_dist)
+}
+
+fn reject_output_input_overlap(output_dir: &Path, input: &Path) -> Result<(), PackagerError> {
+    let output = comparable_path(output_dir)?;
+    let input_compare = comparable_path(input)?;
+    let mut overlaps = output.starts_with(&input_compare) || input_compare.starts_with(&output);
+    // Cleanup must also preserve aliases needed to reach an input outside the output.
+    for ancestor in input.ancestors() {
+        if let (Some(parent), Some(name)) = (ancestor.parent(), ancestor.file_name()) {
+            if comparable_path(parent)?.join(name).starts_with(&output) {
+                overlaps = true;
+                break;
+            }
+        }
+    }
+    if overlaps {
+        return Err(PackagerError::OutputOverlapsInput {
+            output_dir: output_dir.to_path_buf(),
+            input: input.to_path_buf(),
+        });
+    }
     Ok(())
 }
 
 fn comparable_path(path: &Path) -> Result<PathBuf, std::io::Error> {
-    if path.exists() {
-        return path.canonicalize();
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut resolved = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            component => {
+                resolved.push(component.as_os_str());
+                match fs::symlink_metadata(&resolved) {
+                    Ok(_) => resolved = resolved.canonicalize()?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
     }
-
-    let mut missing_components = Vec::new();
-    let mut current = path;
-    while !current.exists() {
-        let Some(file_name) = current.file_name() else {
-            let base = if current.is_absolute() {
-                PathBuf::from(current)
-            } else {
-                std::env::current_dir()?.join(current)
-            };
-            return Ok(missing_components
-                .into_iter()
-                .rev()
-                .fold(base, |base, component| base.join(component)));
-        };
-        missing_components.push(file_name.to_owned());
-
-        let Some(parent) = current.parent() else {
-            let base = std::env::current_dir()?;
-            return Ok(missing_components
-                .into_iter()
-                .rev()
-                .fold(base, |base, component| base.join(component)));
-        };
-        current = parent;
-    }
-
-    let base = current.canonicalize()?;
-    Ok(missing_components
-        .into_iter()
-        .rev()
-        .fold(base, |base, component| base.join(component)))
+    Ok(resolved)
 }
 
 fn reject_symlinks(path: &Path) -> Result<(), PackagerError> {
@@ -1731,5 +1838,281 @@ mod tests {
         assert_eq!(target, BundleTarget::WindowsDir);
         #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
         assert_eq!(target, BundleTarget::LinuxDir);
+    }
+    #[test]
+    fn stage_web_assets_rejects_frontend_inside_deleted_app_dir() {
+        let root = temp_dir("ancestor-output");
+        let source = root.join("app/frontend");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("index.html"), "keep entry").unwrap();
+        fs::write(root.join("app/sentinel"), "keep sentinel").unwrap();
+        let error = stage_web_assets(&source, source.join("index.html"), &root).unwrap_err();
+        assert!(matches!(error, PackagerError::OutputOverlapsInput { .. }));
+        assert_eq!(
+            fs::read_to_string(source.join("index.html")).unwrap(),
+            "keep entry"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("app/sentinel")).unwrap(),
+            "keep sentinel"
+        );
+    }
+
+    #[test]
+    fn bundle_cleanup_rejects_each_input_before_removing_files() {
+        for input in ["frontend", "executable", "icon", "manifest"] {
+            let root = temp_dir(input);
+            let output = root.join("output");
+            let bundle = output.join("demo");
+            let source = if input == "frontend" {
+                bundle.join("input/frontend")
+            } else {
+                root.join("frontend")
+            };
+            fs::create_dir_all(&source).unwrap();
+            fs::create_dir_all(&bundle).unwrap();
+            fs::write(source.join("index.html"), "entry").unwrap();
+            fs::write(bundle.join("sentinel"), "keep").unwrap();
+            let input_path = bundle.join("input-file");
+            fs::write(&input_path, "keep input").unwrap();
+            let plan = BundlePlan {
+                target: BundleTarget::LinuxDir,
+                output_dir: output,
+                executable_path: (input == "executable").then(|| input_path.clone()),
+            };
+            let mut metadata = BundleMetadata::new("demo");
+            metadata.icon = (input == "icon").then(|| input_path.clone());
+            let result = if input == "manifest" {
+                super::stage_bundle_from_web_assets_with_deployment_manifest(
+                    &source,
+                    source.join("index.html"),
+                    plan,
+                    &metadata,
+                    &input_path,
+                    "[app]\nname = 'demo'\n",
+                )
+            } else {
+                stage_bundle_from_web_assets_with_metadata(
+                    &source,
+                    source.join("index.html"),
+                    plan,
+                    &metadata,
+                )
+            };
+            assert!(
+                matches!(result, Err(PackagerError::OutputOverlapsInput { .. })),
+                "{input}: {result:?}"
+            );
+            assert_eq!(fs::read_to_string(bundle.join("sentinel")).unwrap(), "keep");
+            assert_eq!(fs::read_to_string(&input_path).unwrap(), "keep input");
+            assert_eq!(
+                fs::read_to_string(source.join("index.html")).unwrap(),
+                "entry"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_checks_follow_output_aliases_and_normalize_missing_components() {
+        use std::os::unix::fs::symlink;
+        let root = temp_dir("output-alias");
+        let source = root.join("app/frontend");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("index.html"), "keep").unwrap();
+        let alias = root.with_extension("alias");
+        symlink(&root, &alias).unwrap();
+        assert!(stage_web_assets(&source, source.join("index.html"), &alias).is_err());
+        assert_eq!(
+            fs::read_to_string(source.join("index.html")).unwrap(),
+            "keep"
+        );
+        let real = root.join("real/child");
+        fs::create_dir_all(&real).unwrap();
+        let nested_alias = root.join("nested-alias");
+        symlink(&real, &nested_alias).unwrap();
+        assert_eq!(
+            super::comparable_path(&nested_alias.join("../missing/child/../output")).unwrap(),
+            root.canonicalize().unwrap().join("real/missing/output")
+        );
+    }
+
+    #[test]
+    fn entry_validation_uses_normalized_file_identity() {
+        let root = temp_dir("entry-identity");
+        let source = root.join("frontend");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("index.html"), "inside").unwrap();
+        fs::write(root.join("outside.html"), "outside").unwrap();
+        let output = root.join("output");
+        let error = stage_web_assets(&source, source.join("../outside.html"), &output).unwrap_err();
+        assert!(matches!(
+            error,
+            PackagerError::EntryOutsideFrontendDist { .. }
+        ));
+        assert!(!output.exists());
+        assert_eq!(
+            fs::read_to_string(root.join("outside.html")).unwrap(),
+            "outside"
+        );
+        let artifact =
+            stage_web_assets(&source, source.join("nested/../index.html"), &output).unwrap();
+        assert_eq!(artifact.entry_path, artifact.app_dir.join("index.html"));
+        assert_eq!(fs::read_to_string(&artifact.entry_path).unwrap(), "inside");
+    }
+
+    #[test]
+    fn bundle_names_cannot_redirect_cleanup_outside_output() {
+        let source = temp_dir("invalid-name-source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("index.html"), "keep").unwrap();
+        for name in ["", "..", "../other", "/absolute", "a/b", "a\\b"] {
+            let result = stage_bundle_from_web_assets(
+                &source,
+                source.join("index.html"),
+                BundlePlan {
+                    target: BundleTarget::LinuxDir,
+                    output_dir: source.join("output"),
+                    executable_path: None,
+                },
+                name,
+            );
+            assert!(
+                matches!(result, Err(PackagerError::InvalidAppName { .. })),
+                "{name}: {result:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(source.join("index.html")).unwrap(),
+                "keep"
+            );
+        }
+    }
+
+    #[test]
+    fn deployment_configuration_is_fingerprinted_and_required_on_each_platform() {
+        for target in [
+            BundleTarget::MacOsApp,
+            BundleTarget::LinuxDir,
+            BundleTarget::WindowsDir,
+        ] {
+            let root = temp_dir("deployment-config");
+            let source = root.join("frontend");
+            fs::create_dir_all(&source).unwrap();
+            fs::write(source.join("index.html"), "page").unwrap();
+            let manifest_path = root.join("axion.toml");
+            fs::write(&manifest_path, "original configuration").unwrap();
+            let deployment_source =
+                "[app]\nname = 'demo'\n[build]\nfrontend_dist = 'app'\nentry = 'app/index.html'\n";
+            let artifact = super::stage_bundle_from_web_assets_with_deployment_manifest(
+                &source,
+                source.join("index.html"),
+                BundlePlan {
+                    target,
+                    output_dir: root.join("output"),
+                    executable_path: None,
+                },
+                &BundleMetadata::new("demo"),
+                &manifest_path,
+                deployment_source,
+            )
+            .unwrap();
+            let deployed = artifact
+                .resources_app_dir
+                .parent()
+                .unwrap()
+                .join(super::AXION_DEPLOYMENT_MANIFEST_FILE_NAME);
+            assert_eq!(fs::read_to_string(&deployed).unwrap(), deployment_source);
+            assert!(!artifact.resources_app_dir.join("axion.toml").exists());
+            let inventory = fs::read_to_string(&artifact.bundle_manifest_path).unwrap();
+            assert!(
+                inventory.contains(&super::json_string_literal(&super::bundle_relative_path(
+                    &artifact.bundle_dir,
+                    &deployed
+                )))
+            );
+            assert!(inventory.contains(&super::fnv1a64_file_hex(&deployed).unwrap()));
+            verify_bundle_artifact(&artifact).unwrap();
+            fs::remove_file(&deployed).unwrap();
+            assert!(matches!(
+                verify_bundle_artifact(&artifact),
+                Err(PackagerError::InvalidBundleManifest { .. })
+            ));
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_preserves_input_symlink_located_inside_output() {
+        use std::os::unix::fs::symlink;
+        let root = temp_dir("input-symlink-location");
+        let source = root.join("frontend");
+        let output = root.join("output");
+        let bundle = output.join("demo");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&bundle).unwrap();
+        fs::write(source.join("index.html"), "entry").unwrap();
+        let external = root.join("external-input");
+        fs::write(&external, "keep target").unwrap();
+        let input = bundle.join("input-link");
+        symlink(&external, &input).unwrap();
+        let result = stage_bundle_from_web_assets(
+            &source,
+            source.join("index.html"),
+            BundlePlan {
+                target: BundleTarget::LinuxDir,
+                output_dir: output,
+                executable_path: Some(input.clone()),
+            },
+            "demo",
+        );
+        assert!(matches!(
+            result,
+            Err(PackagerError::OutputOverlapsInput { .. })
+        ));
+        assert!(input.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&external).unwrap(), "keep target");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_preserves_input_directory_alias_located_inside_output() {
+        use std::os::unix::fs::symlink;
+        let root = temp_dir("input-directory-alias");
+        let source = root.join("frontend");
+        let output = root.join("output");
+        let bundle = output.join("demo");
+        let external = root.join("external-inputs");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&bundle).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        fs::write(source.join("index.html"), "entry").unwrap();
+        fs::write(bundle.join("sentinel"), "keep output").unwrap();
+        fs::write(external.join("native"), "keep input").unwrap();
+        let alias = bundle.join("input-alias");
+        symlink(&external, &alias).unwrap();
+        let input = alias.join("native");
+        let result = stage_bundle_from_web_assets(
+            &source,
+            source.join("index.html"),
+            BundlePlan {
+                target: BundleTarget::LinuxDir,
+                output_dir: output,
+                executable_path: Some(input.clone()),
+            },
+            "demo",
+        );
+        assert!(matches!(
+            result,
+            Err(PackagerError::OutputOverlapsInput { .. })
+        ));
+        assert!(alias.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(input).unwrap(), "keep input");
+        assert_eq!(
+            fs::read_to_string(bundle.join("sentinel")).unwrap(),
+            "keep output"
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("index.html")).unwrap(),
+            "entry"
+        );
     }
 }

@@ -8,9 +8,9 @@ Axion can generate a small Rust desktop app with a frontend page and an `axion.t
 - A GUI-capable desktop session for `servo-runtime` window launches.
 - This repository checked out with the vendored `servo/` directory present.
 
-The repository pins Rust `1.97.1` in `rust-toolchain.toml`. Before building with `servo-runtime`, copy `.cargo/config.macos.example.toml` on macOS, or `.cargo/config.example.toml` on other platforms, to `.cargo/config.toml`; merge the `[env]` entries instead if a local config already exists. Cargo does not load `servo/.cargo/config.toml` for a path dependency. Install the native build dependencies listed in the [Servo build guide](https://book.servo.org/building/building.html); on macOS, LLVM and Python must be available to the build tools.
+The repository pins Rust `1.97.1` in `rust-toolchain.toml`. Before building with `servo-runtime`, copy `.cargo/config.macos.example.toml` on macOS, or `.cargo/config.example.toml` on other platforms, to `.cargo/config.toml`; merge the environment and profile sections instead if a local config already exists. Cargo does not load `servo/.cargo/config.toml` for a path dependency. Install the native build dependencies listed in the [Servo build guide](https://book.servo.org/building/building.html); on macOS, LLVM and Python must be available to the build tools.
 
-The macOS config requires Clang 19 or newer, uses the SDK-provided linker to avoid LLVM lld parsing failures with newer SDKs, and explicitly disables Rust symbol stripping to avoid the [macOS 27 dynamic-library alignment issue](https://github.com/rust-lang/rust/issues/157750) in Rust 1.97.1. This can increase release artifact size. If the system Clang is too old, put a newer LLVM Clang on PATH or set `CC`, `CXX`, `HOST_CC`, and `HOST_CXX` to its full paths while retaining the linker arguments.
+The macOS config selects Clang from PATH and uses the SDK-provided linker to avoid LLVM lld parsing failures with newer SDKs, and explicitly disables Rust symbol stripping to avoid the [macOS 27 dynamic-library alignment issue](https://github.com/rust-lang/rust/issues/157750) in Rust 1.97.1. The `strip = "none"` settings belong in `[profile.dev]` and `[profile.release]`; putting `CARGO_PROFILE_*` keys under `[env]` does not configure Cargo itself. This can increase release artifact size. If the system Clang is unsupported by the Servo native build, put a newer LLVM Clang on PATH or set `CC`, `CXX`, `HOST_CC`, and `HOST_CXX` to its full paths while retaining the linker arguments.
 
 ## Run the Example
 
@@ -58,7 +58,7 @@ To inspect controlled filesystem and dialog capabilities:
 cargo run -p file-access-demo --features servo-runtime
 ```
 
-This example writes and reads `target/axion-data/file-access-demo/notes/demo.txt`, emits `app.log`, and shows the preview `dialog.open` / `dialog.save` responses configured by `[native.dialog]`.
+This example writes and reads `notes/demo.txt` inside its operating system user-data directory, emits `app.log`, and shows the preview `dialog.open` / `dialog.save` responses configured by `[native.dialog]`.
 The page also includes editable file inputs, action buttons, a rejected-path probe, and a live host-event log so you can inspect the bridge behavior without opening developer tools.
 
 To inspect bridge snapshots, frontend self-checks, and unified compat diagnostics:
@@ -120,7 +120,7 @@ Generated projects contain:
 - `rust-toolchain.toml`: Servo-compatible Rust toolchain
 - `.cargo/config.toml`: Servo build environment for the platform where the project was generated
 - `Cargo.toml`: path dependencies back to this Axion checkout
-- `.gitignore`: ignores `target/` build output, runtime data, bundles, and crash reports
+- `.gitignore`: ignores `target/` build output, local validation artifacts and bundles
 - `README.md`: generated app usage notes
 - `axion.toml`: app, window, build, and capability configuration
 - `icons/app.icns`: default bundle icon referenced by `[bundle]`
@@ -137,7 +137,7 @@ Generated manifests include commented `[dev]` lines. Uncomment them when you att
 
 Generated frontends now include a small text-input compatibility panel wired to `window.__AXION__.compat.installTextInputSelectionPatch`. Use it as the starting pattern when a Servo-backed page needs more stable caret placement or drag selection in `input` and `textarea` controls.
 
-Generated apps install Axion panic reporting by default. Crash reports are written under `target/axion/crash-reports/`, which is ignored by the generated `.gitignore`.
+Generated apps install Axion panic reporting by default. Production crash reports are written to the `crash-reports/` subdirectory of the operating system user-data directory, using the application identifier. Tests can set `[native.fs] app_data_dir` to an isolated temporary directory.
 
 ## Validate a Generated App
 
@@ -177,3 +177,7 @@ To customize an application icon in bundle scaffolds, update `[bundle] icon = "i
 
 `build` and `bundle` produce staging output, not signed production installers. To include an app executable, build it first or pass `--build-executable` to `bundle`.
 `release` runs the preview artifact workflow and can create an unsigned `.tar` archive with `--archive`.
+
+## Vendored Servo Source
+
+`SERVO_PROVENANCE.toml` records the Servo v0.6.0 tag, pinned commit, downloaded archive SHA-256, source comparison and Axion build feature/toolchain policy. Servo remains vendored in `servo/`; local virtual environments and build outputs are excluded from that source record. The archive hash identifies the downloaded bytes and is not a release signature. Update the record, workspace metadata and build configuration together when changing the engine.

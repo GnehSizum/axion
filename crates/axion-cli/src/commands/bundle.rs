@@ -1,11 +1,12 @@
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use axion_core::{Builder, RunMode};
 use axion_packager::{
     BundleArtifact, BundleMetadata, BundlePlan, BundleVerificationReport, current_bundle_target,
-    stage_bundle_from_web_assets_with_metadata, verify_bundle_artifact,
+    stage_bundle_from_web_assets_with_deployment_manifest, verify_bundle_artifact,
 };
 use axion_runtime::json_string_literal;
 
@@ -52,10 +53,12 @@ pub(crate) fn bundle_report(args: &BundleArgs) -> Result<BundleReport, AxionCliE
         &launch_config.app_name,
         args.executable.clone(),
         args.build_executable,
+        args.bin.as_deref(),
         args.json,
     )?;
 
-    let artifact = stage_bundle_from_web_assets_with_metadata(
+    let deployment_manifest = axion_manifest::deployment_manifest_source(&args.manifest_path)?;
+    let artifact = stage_bundle_from_web_assets_with_deployment_manifest(
         launch_config.frontend_dist,
         launch_config.packaged_entry,
         BundlePlan {
@@ -72,6 +75,8 @@ pub(crate) fn bundle_report(args: &BundleArgs) -> Result<BundleReport, AxionCliE
             homepage: launch_config.homepage.clone(),
             icon: app.config().bundle.icon.clone(),
         },
+        &args.manifest_path,
+        &deployment_manifest,
     )?;
     let verification = verify_bundle_artifact(&artifact)?;
     let report = BundleReport::success(BundleReportSuccessInput {
@@ -93,67 +98,143 @@ fn resolve_executable_path(
     app_name: &str,
     explicit_executable: Option<PathBuf>,
     build_executable: bool,
+    bin: Option<&str>,
     quiet: bool,
 ) -> Result<Option<PathBuf>, AxionCliError> {
     if let Some(executable) = explicit_executable {
         return Ok(Some(executable));
     }
-
     if build_executable {
-        build_release_executable(manifest_path, quiet)?;
+        return build_release_executable(manifest_path, bin, quiet).map(Some);
     }
-
     Ok(default_executable_path(manifest_path, app_name))
 }
 
-fn build_release_executable(manifest_path: &Path, quiet: bool) -> Result<(), AxionCliError> {
+fn build_release_executable(
+    manifest_path: &Path,
+    bin: Option<&str>,
+    quiet: bool,
+) -> Result<PathBuf, AxionCliError> {
     let cargo_manifest_path = manifest_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join("Cargo.toml");
-    if !cargo_manifest_path.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!(
-                "cannot build executable because Cargo.toml was not found next to manifest '{}'",
-                manifest_path.display()
-            ),
-        )
-        .into());
-    }
-
+        .join("Cargo.toml")
+        .canonicalize()?;
+    let cargo_project_dir = cargo_manifest_path
+        .parent()
+        .expect("Cargo manifest has a parent");
     if !quiet {
         println!(
-            "building executable: cargo build --release --manifest-path {}",
+            "building executable: cargo build --release --features servo-runtime --manifest-path {}",
             cargo_manifest_path.display()
         );
     }
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
-        .arg("build")
-        .arg("--release")
-        .arg("--manifest-path")
+    let mut command = Command::new(cargo);
+    command
+        .current_dir(cargo_project_dir)
+        .args([
+            "build",
+            "--release",
+            "--features",
+            "servo-runtime",
+            "--message-format=json-render-diagnostics",
+            "--manifest-path",
+        ])
         .arg(&cargo_manifest_path)
-        .stdout(if quiet {
-            Stdio::null()
-        } else {
-            Stdio::inherit()
-        })
-        .stderr(if quiet {
-            Stdio::null()
-        } else {
-            Stdio::inherit()
-        })
-        .status()?;
-
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    if let Some(bin) = bin {
+        command.args(["--bin", bin]);
+    }
+    let mut child = command.spawn()?;
+    let mut executables = Vec::new();
+    let mut read_error = None;
+    for line in BufReader::new(child.stdout.take().expect("Cargo stdout is piped")).lines() {
+        match line {
+            Ok(line) => match serde_json::from_str::<CargoMessage>(&line) {
+                Ok(message) => {
+                    if message.reason == "compiler-artifact"
+                        && message.target.as_ref().is_some_and(|target| {
+                            target.kind.iter().any(|kind| kind == "bin")
+                                && bin.is_none_or(|bin| target.name == bin)
+                        })
+                    {
+                        if let Some(executable) = message.executable {
+                            if !executables.contains(&executable) {
+                                executables.push(executable);
+                            }
+                        }
+                    }
+                    if let Some(rendered) = message.message.and_then(|message| message.rendered) {
+                        eprint!("{rendered}");
+                    }
+                }
+                Err(error) => {
+                    read_error.get_or_insert_with(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("invalid Cargo JSON message: {error}"),
+                        )
+                    });
+                }
+            },
+            Err(error) => {
+                read_error.get_or_insert(error);
+            }
+        }
+    }
+    let status = child.wait()?;
     if !status.success() {
         return Err(std::io::Error::other(format!(
-            "cargo build --release failed with status {status}"
+            "cargo build --release --features servo-runtime failed with status {status}"
         ))
         .into());
     }
+    if let Some(error) = read_error {
+        return Err(error.into());
+    }
+    select_cargo_executable(executables).map_err(Into::into)
+}
 
-    Ok(())
+#[derive(serde::Deserialize)]
+struct CargoMessage {
+    reason: String,
+    #[serde(default)]
+    target: Option<CargoTarget>,
+    #[serde(default)]
+    executable: Option<PathBuf>,
+    #[serde(default)]
+    message: Option<CargoDiagnostic>,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoTarget {
+    name: String,
+    kind: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoDiagnostic {
+    rendered: Option<String>,
+}
+
+fn select_cargo_executable(executables: Vec<PathBuf>) -> Result<PathBuf, std::io::Error> {
+    match executables.as_slice() {
+        [path] if path.is_file() => Ok(path.clone()),
+        [_] => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Cargo executable artifact does not exist",
+        )),
+        [] => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Cargo succeeded without an executable binary artifact",
+        )),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Cargo produced several executable binaries; select one with --bin <name>",
+        )),
+    }
 }
 
 pub(crate) fn write_report_if_requested(
@@ -690,6 +771,7 @@ mod tests {
                 manifest_path: PathBuf::from("axion.toml"),
                 output_dir: None,
                 executable: None,
+                bin: None,
                 report_path: None,
                 build_executable: false,
                 json: true,
@@ -718,6 +800,7 @@ mod tests {
                 manifest_path: PathBuf::from("axion.toml"),
                 output_dir: None,
                 executable: None,
+                bin: None,
                 report_path: Some(report_path.clone()),
                 build_executable: false,
                 json: true,
@@ -733,5 +816,31 @@ mod tests {
             "\"report_path\":{}",
             axion_runtime::json_string_literal(&report_path.display().to_string())
         )));
+    }
+    #[test]
+    fn cargo_artifacts_select_custom_paths_and_reject_missing_or_ambiguous_binaries() {
+        let root = std::env::temp_dir().join(format!(
+            "axion-cargo-artifacts-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("shared-target/aarch64/release")).unwrap();
+        let current = root.join("shared-target/aarch64/release/different-bin");
+        fs::write(&current, "binary").unwrap();
+        let message: super::CargoMessage = serde_json::from_str(&serde_json::json!({"reason":"compiler-artifact", "target":{"name":"different-bin","kind":["bin"]}, "executable":current}).to_string()).unwrap();
+        assert_eq!(
+            super::select_cargo_executable(vec![message.executable.unwrap()]).unwrap(),
+            current
+        );
+        assert!(super::select_cargo_executable(vec![]).is_err());
+        assert!(
+            super::select_cargo_executable(vec![current.clone(), root.join("other")])
+                .unwrap_err()
+                .to_string()
+                .contains("--bin")
+        );
+        assert!(super::select_cargo_executable(vec![root.join("old-debug-missing")]).is_err());
     }
 }

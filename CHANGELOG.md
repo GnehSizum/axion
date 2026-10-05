@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.6.1 - Preview
+
+- Hardened filesystem and packaging path checks, resource URL encoding, per-WebView bridge identity and CSP binding.
+- Used structured JSON parsing and shared configuration/capability validation across the framework and CLI.
+- Made release builds select the actual Cargo executable, stage relocatable deployment configuration and verify archive contents and executable permissions.
+- Separated bounded native I/O and window-control pools, fixed window ownership and application-exit lifecycle handling, and reaped shell opener processes.
+- Updated DPI and wheel input handling, production app-data locations, bridge assets, templates, public documentation and native/GUI/release CI gates.
+- Recorded the unchanged Servo v0.6.0 source provenance; retained Axion feature milestone 33 and advanced the bugfix milestone to 1.
+
 ## v0.6.0 - Preview
 
 - Replaced the vendored Servo engine with the official `v0.6.0` source at `c78d2c206f80a1c8b67eefa97f773bba513205d3`.

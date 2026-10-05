@@ -1,3 +1,9 @@
+mod blocking;
+mod error;
+pub mod lifecycle;
+pub use blocking::{run_blocking, run_blocking_control};
+pub use error::BridgeError;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::future::Future;
@@ -7,7 +13,8 @@ use std::sync::{Arc, Mutex};
 pub const BRIDGE_MAX_NAME_BYTES: usize = 128;
 pub const BRIDGE_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const BRIDGE_MAX_REQUEST_ID_BYTES: usize = 128;
-const AXION_RELEASE_VERSION: &str = "v0.6.0";
+pub const BRIDGE_MAX_JSON_DEPTH: usize = 64;
+const AXION_RELEASE_VERSION: &str = "v0.6.1";
 const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -667,7 +674,26 @@ fn normalize_event_name(event: String) -> Result<String, BridgeEventError> {
 }
 
 pub fn is_valid_json_value(value: &str) -> bool {
-    JsonValueParser::new(value).parse()
+    serde_json::from_str::<serde_json::Value>(value)
+        .is_ok_and(|value| json_depth_is_allowed(&value, BRIDGE_MAX_JSON_DEPTH))
+}
+
+fn json_depth_is_allowed(value: &serde_json::Value, remaining: usize) -> bool {
+    match value {
+        serde_json::Value::Array(values) => {
+            remaining > 0
+                && values
+                    .iter()
+                    .all(|value| json_depth_is_allowed(value, remaining - 1))
+        }
+        serde_json::Value::Object(values) => {
+            remaining > 0
+                && values
+                    .values()
+                    .all(|value| json_depth_is_allowed(value, remaining - 1))
+        }
+        _ => true,
+    }
 }
 
 fn normalize_json_payload(payload: String) -> Result<String, BridgePayloadError> {
@@ -699,212 +725,6 @@ fn normalize_request_id(id: String) -> Result<String, BridgeRequestIdError> {
         Ok(id)
     } else {
         Err(BridgeRequestIdError::InvalidRequestId { id })
-    }
-}
-
-struct JsonValueParser<'a> {
-    bytes: &'a [u8],
-    cursor: usize,
-}
-
-impl<'a> JsonValueParser<'a> {
-    const MAX_DEPTH: usize = 64;
-
-    fn new(value: &'a str) -> Self {
-        Self {
-            bytes: value.as_bytes(),
-            cursor: 0,
-        }
-    }
-
-    fn parse(mut self) -> bool {
-        self.skip_whitespace();
-        if self.cursor == self.bytes.len() || !self.parse_value(0) {
-            return false;
-        }
-        self.skip_whitespace();
-        self.cursor == self.bytes.len()
-    }
-
-    fn parse_value(&mut self, depth: usize) -> bool {
-        if depth > Self::MAX_DEPTH {
-            return false;
-        }
-        self.skip_whitespace();
-        match self.peek() {
-            Some(b'n') => self.consume_literal(b"null"),
-            Some(b't') => self.consume_literal(b"true"),
-            Some(b'f') => self.consume_literal(b"false"),
-            Some(b'"') => self.parse_string(),
-            Some(b'[') => self.parse_array(depth + 1),
-            Some(b'{') => self.parse_object(depth + 1),
-            Some(b'-' | b'0'..=b'9') => self.parse_number(),
-            _ => false,
-        }
-    }
-
-    fn parse_array(&mut self, depth: usize) -> bool {
-        if !self.consume_byte(b'[') {
-            return false;
-        }
-        self.skip_whitespace();
-        if self.consume_byte(b']') {
-            return true;
-        }
-        loop {
-            if !self.parse_value(depth) {
-                return false;
-            }
-            self.skip_whitespace();
-            if self.consume_byte(b']') {
-                return true;
-            }
-            if !self.consume_byte(b',') {
-                return false;
-            }
-        }
-    }
-
-    fn parse_object(&mut self, depth: usize) -> bool {
-        if !self.consume_byte(b'{') {
-            return false;
-        }
-        self.skip_whitespace();
-        if self.consume_byte(b'}') {
-            return true;
-        }
-        loop {
-            self.skip_whitespace();
-            if !self.parse_string() {
-                return false;
-            }
-            self.skip_whitespace();
-            if !self.consume_byte(b':') {
-                return false;
-            }
-            if !self.parse_value(depth) {
-                return false;
-            }
-            self.skip_whitespace();
-            if self.consume_byte(b'}') {
-                return true;
-            }
-            if !self.consume_byte(b',') {
-                return false;
-            }
-        }
-    }
-
-    fn parse_string(&mut self) -> bool {
-        if !self.consume_byte(b'"') {
-            return false;
-        }
-        while let Some(byte) = self.next() {
-            match byte {
-                b'"' => return true,
-                b'\\' => {
-                    let Some(escaped) = self.next() else {
-                        return false;
-                    };
-                    match escaped {
-                        b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {}
-                        b'u' => {
-                            for _ in 0..4 {
-                                if !self.next().is_some_and(|byte| byte.is_ascii_hexdigit()) {
-                                    return false;
-                                }
-                            }
-                        }
-                        _ => return false,
-                    }
-                }
-                0x00..=0x1f => return false,
-                _ => {}
-            }
-        }
-        false
-    }
-
-    fn parse_number(&mut self) -> bool {
-        let start = self.cursor;
-        let _ = self.consume_byte(b'-');
-
-        match self.peek() {
-            Some(b'0') => {
-                self.cursor += 1;
-                if self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                    return false;
-                }
-            }
-            Some(b'1'..=b'9') => {
-                self.cursor += 1;
-                while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                    self.cursor += 1;
-                }
-            }
-            _ => return false,
-        }
-
-        if self.consume_byte(b'.') {
-            if !self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                return false;
-            }
-            while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                self.cursor += 1;
-            }
-        }
-
-        if self.peek().is_some_and(|byte| matches!(byte, b'e' | b'E')) {
-            self.cursor += 1;
-            if self.peek().is_some_and(|byte| matches!(byte, b'+' | b'-')) {
-                self.cursor += 1;
-            }
-            if !self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                return false;
-            }
-            while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-                self.cursor += 1;
-            }
-        }
-
-        self.cursor > start
-    }
-
-    fn consume_literal(&mut self, literal: &[u8]) -> bool {
-        if self.bytes[self.cursor..].starts_with(literal) {
-            self.cursor += literal.len();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn consume_byte(&mut self, expected: u8) -> bool {
-        if self.peek() == Some(expected) {
-            self.cursor += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn next(&mut self) -> Option<u8> {
-        let byte = self.peek()?;
-        self.cursor += 1;
-        Some(byte)
-    }
-
-    fn peek(&self) -> Option<u8> {
-        self.bytes.get(self.cursor).copied()
-    }
-
-    fn skip_whitespace(&mut self) {
-        while self
-            .peek()
-            .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
-        {
-            self.cursor += 1;
-        }
     }
 }
 
@@ -1259,534 +1079,30 @@ impl BootstrapConfig {
     }
 
     pub fn script_source(&self) -> String {
-        let app_name = javascript_string_literal(&self.app_name);
-        let bridge_token = javascript_string_literal(&self.bridge_token);
-        let commands = self
-            .commands
-            .iter()
-            .map(|command| javascript_string_literal(command))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let events = self
-            .events
-            .iter()
-            .map(|event| javascript_string_literal(event))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let host_events = self
-            .host_events
-            .iter()
-            .map(|event| javascript_string_literal(event))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let trusted_origins = self
-            .trusted_origins
-            .iter()
-            .map(|origin| javascript_string_literal(origin))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let bridge_version =
-            javascript_string_literal(&format!("{AXION_RELEASE_VERSION}-bootstrap"));
-        let diagnostics_report_schema = javascript_string_literal(AXION_DIAGNOSTICS_REPORT_SCHEMA);
-        let compat_helpers = bootstrap_compat_helpers();
-        let diagnostics_helpers = bootstrap_diagnostics_helpers();
-
-        format!(
-            "(function() {{\n  if (window.__AXION__) return;\n  const state = Object.freeze({{\n    appName: {app_name},\n    bridgeToken: {bridge_token},\n    commands: Object.freeze([{commands}]),\n    events: Object.freeze([{events}]),\n    hostEvents: Object.freeze([{host_events}]),\n    trustedOrigins: Object.freeze([{trusted_origins}]),\n    protocol: 'axion',\n    version: {bridge_version},\n    diagnosticsReportSchema: {diagnostics_report_schema}\n  }});\n  const listeners = new Map();\n  const lastEvents = new Map();\n\n  function currentOrigin() {{\n    const url = new URL(window.location.href);\n    return `${{url.protocol}}//${{url.host}}`;\n  }}\n\n  if (!state.trustedOrigins.includes(currentOrigin())) return;\n\n  function isListenableEvent(event) {{\n    return state.events.includes(event) || state.hostEvents.includes(event);\n  }}\n\n  function dispatch(event, payload) {{\n    if (!isListenableEvent(event)) return false;\n    lastEvents.set(event, payload);\n    const handlers = listeners.get(event);\n    if (handlers) {{\n      for (const handler of handlers) {{\n        try {{ handler(payload); }} catch (error) {{ console.error('Axion listener error', error); }}\n      }}\n    }}\n    window.dispatchEvent(new CustomEvent(`axion:${{event}}`, {{ detail: payload }}));\n    return true;\n  }}\n\n  function nextRequestId() {{\n    return `axion_${{Date.now().toString(36)}}_${{Math.random().toString(16).slice(2)}}`;\n  }}\n\n  function bridgeUrl(kind, name, payload, requestId) {{\n    const encodedName = encodeURIComponent(name);\n    const payloadJson = encodeURIComponent(JSON.stringify(payload ?? null));\n    const encodedId = encodeURIComponent(requestId);\n    return `${{state.protocol}}://app/__axion__/${{kind}}/${{encodedName}}?payload=${{payloadJson}}&id=${{encodedId}}`;\n  }}\n\n  function createBridgeError(errorLike, fallbackMessage) {{\n    const normalized = normalizeError(errorLike, fallbackMessage);\n    const error = new Error(normalized.message);\n    error.code = normalized.code;\n    error.details = normalized;\n    return error;\n  }}\n\n  async function bridgeFetch(kind, name, payload) {{\n    const requestId = nextRequestId();\n    const response = await fetch(bridgeUrl(kind, name, payload, requestId), {{\n      headers: {{ 'X-Axion-Bridge-Token': state.bridgeToken }}\n    }});\n    const envelope = await response.json();\n    if (envelope.id && envelope.id !== requestId) {{\n      throw createBridgeError({{ code: 'bridge.request-id-mismatch', message: `Axion bridge returned an unexpected request id for ${{name}}` }});\n    }}\n    if (!response.ok || envelope.ok === false) {{\n      throw createBridgeError(envelope.error, `Axion bridge request failed: ${{name}}`);\n    }}\n    return envelope.payload;\n  }}\n\n  async function invoke(command, payload) {{\n    if (!state.commands.includes(command)) {{\n      throw createBridgeError({{ code: 'bridge.command-not-allowed', message: `Axion command is not allowed: ${{command}}` }});\n    }}\n\n    return bridgeFetch('invoke', command, payload);\n  }}\n\n  async function emit(event, payload) {{\n    if (!state.events.includes(event)) {{\n      throw createBridgeError({{ code: 'bridge.event-not-allowed', message: `Axion event is not allowed: ${{event}}` }});\n    }}\n\n    await bridgeFetch('emit', event, payload);\n    dispatch(event, payload);\n    return true;\n  }}\n\n  function listen(event, handler) {{\n    if (!isListenableEvent(event)) {{\n      throw createBridgeError({{ code: 'bridge.event-not-listenable', message: `Axion event is not listenable: ${{event}}` }});\n    }}\n    if (typeof handler !== 'function') {{\n      throw createBridgeError({{ code: 'bridge.invalid-listener', message: 'Axion listen() requires a function handler' }});\n    }}\n    const handlers = listeners.get(event) || new Set();\n    handlers.add(handler);\n    listeners.set(event, handlers);\n    if (lastEvents.has(event)) {{\n      handler(lastEvents.get(event));\n    }}\n    return () => {{\n      const current = listeners.get(event);\n      if (!current) return;\n      current.delete(handler);\n      if (current.size === 0) listeners.delete(event);\n    }};\n  }}\n\n{compat_helpers}\n{diagnostics_helpers}\n  window.__AXION__ = Object.freeze({{\n    ready: true,\n    appName: state.appName,\n    commands: state.commands,\n    events: state.events,\n    hostEvents: state.hostEvents,\n    trustedOrigins: state.trustedOrigins,\n    protocol: state.protocol,\n    version: state.version,\n    compat: Object.freeze({{\n      installTextInputSelectionPatch\n    }}),\n    diagnostics: Object.freeze({{\n      reportSchema: state.diagnosticsReportSchema,\n      currentOrigin,\n      describeBridge,\n      snapshotTextControl,\n      normalizeError,\n      toPrettyJson\n    }}),\n    invoke,\n    emit,\n    listen,\n    __dispatchFromHost(token, event, payload) {{\n      if (token !== state.bridgeToken || !state.hostEvents.includes(event)) return false;\n      return dispatch(event, payload);\n    }}\n  }});\n}})();\n"
-        )
-    }
-}
-
-fn javascript_string_literal(value: &str) -> String {
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
-        .replace('"', "\\\"");
-    format!("\"{escaped}\"")
-}
-
-fn bootstrap_compat_helpers() -> &'static str {
-    r#"  function isTextControl(element) {
-    return element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
-  }
-
-  function resolveLineHeight(style) {
-    const raw = style.lineHeight;
-    if (!raw || raw === 'normal') {
-      const fontSize = Number.parseFloat(style.fontSize);
-      return Number.isFinite(fontSize) ? fontSize * 1.4 : 18;
-    }
-
-    if (raw.endsWith('px')) {
-      const value = Number.parseFloat(raw);
-      return Number.isFinite(value) ? value : 18;
-    }
-
-    const unitless = Number.parseFloat(raw);
-    if (!Number.isFinite(unitless)) {
-      return 18;
-    }
-
-    const fontSize = Number.parseFloat(style.fontSize);
-    return Number.isFinite(fontSize) ? unitless * fontSize : unitless;
-  }
-
-  function textMetrics(element) {
-    const style = window.getComputedStyle(element);
-    const canvas = document.createElement('canvas');
-    const context = canvas.getContext('2d');
-    const font = [
-      style.fontStyle,
-      style.fontVariant,
-      style.fontWeight,
-      style.fontSize,
-      style.fontFamily
-    ].filter(Boolean).join(' ');
-
-    if (context && font) {
-      context.font = font;
-    }
-
-    return {
-      charWidth: context?.measureText('M').width || 8,
-      lineHeight: resolveLineHeight(style),
-      paddingLeft: Number.parseFloat(style.paddingLeft) || 0,
-      paddingTop: Number.parseFloat(style.paddingTop) || 0,
-      borderLeft: Number.parseFloat(style.borderLeftWidth) || 0,
-      borderTop: Number.parseFloat(style.borderTopWidth) || 0
-    };
-  }
-
-  function clamp(value, min, max) {
-    return Math.max(min, Math.min(max, value));
-  }
-
-  function caretIndexFromPoint(element, point) {
-    if (!isTextControl(element) || typeof point?.clientX !== 'number' || typeof point?.clientY !== 'number') {
-      return null;
-    }
-
-    const rect = element.getBoundingClientRect();
-    const {
-      charWidth,
-      lineHeight,
-      paddingLeft,
-      paddingTop,
-      borderLeft,
-      borderTop
-    } = textMetrics(element);
-    const relativeX = point.clientX - rect.left - borderLeft - paddingLeft + element.scrollLeft;
-    const relativeY = point.clientY - rect.top - borderTop - paddingTop + element.scrollTop;
-
-    if (element instanceof HTMLInputElement) {
-      const index = clamp(Math.round(relativeX / charWidth), 0, element.value.length);
-      return {
-        index,
-        detail: {
-          kind: 'input',
-          relativeX,
-          charWidth,
-          paddingLeft,
-          borderLeft,
-          scrollLeft: element.scrollLeft,
-          correctedIndex: index
-        }
-      };
-    }
-
-    const lines = element.value.split('\n');
-    const lineIndex = clamp(Math.floor(relativeY / lineHeight), 0, Math.max(lines.length - 1, 0));
-    const line = lines[lineIndex] ?? '';
-    const column = clamp(Math.round(relativeX / charWidth), 0, line.length);
-    let absoluteIndex = column;
-    for (let index = 0; index < lineIndex; index += 1) {
-      absoluteIndex += lines[index].length + 1;
-    }
-
-    return {
-      index: absoluteIndex,
-      detail: {
-        kind: 'textarea',
-        relativeX,
-        relativeY,
-        charWidth,
-        lineHeight,
-        paddingLeft,
-        paddingTop,
-        borderLeft,
-        borderTop,
-        scrollLeft: element.scrollLeft,
-        scrollTop: element.scrollTop,
-        lineIndex,
-        column,
-        correctedIndex: absoluteIndex
-      }
-    };
-  }
-
-  function normalizeCompatOptions(options) {
-    return {
-      manualPointerSelection: options?.manualPointerSelection === true,
-      onUpdate: typeof options?.onUpdate === 'function' ? options.onUpdate : null,
-      onStatus: typeof options?.onStatus === 'function' ? options.onStatus : null
-    };
-  }
-
-  function reportCompatUpdate(options, element, detail) {
-    if (!options.onUpdate) {
-      return;
-    }
-
-    options.onUpdate({
-      targetId: element.id || null,
-      selectionStart: typeof element.selectionStart === 'number' ? element.selectionStart : null,
-      selectionEnd: typeof element.selectionEnd === 'number' ? element.selectionEnd : null,
-      valueLength: typeof element.value === 'string' ? element.value.length : null,
-      scrollLeft: typeof element.scrollLeft === 'number' ? element.scrollLeft : null,
-      scrollTop: typeof element.scrollTop === 'number' ? element.scrollTop : null,
-      detail
-    });
-  }
-
-  function reportCompatStatus(options, message) {
-    if (options.onStatus) {
-      options.onStatus(message);
-    }
-  }
-
-  function setCaretFromPoint(element, point, options, source) {
-    const result = caretIndexFromPoint(element, point);
-    if (!result) {
-      return null;
-    }
-
-    element.setSelectionRange(result.index, result.index);
-    reportCompatUpdate(options, element, {
-      ...result.detail,
-      source
-    });
-    return result.index;
-  }
-
-  function setSelectionFromPoint(element, anchorIndex, point, options, source) {
-    const result = caretIndexFromPoint(element, point);
-    if (!result) {
-      return null;
-    }
-
-    const currentIndex = result.index;
-    const start = Math.min(anchorIndex, currentIndex);
-    const end = Math.max(anchorIndex, currentIndex);
-    element.setSelectionRange(start, end);
-    reportCompatUpdate(options, element, {
-      ...result.detail,
-      source,
-      anchorIndex,
-      currentIndex,
-      selectionStart: start,
-      selectionEnd: end
-    });
-    return currentIndex;
-  }
-
-  function installTextInputSelectionPatch(element, rawOptions) {
-    if (!isTextControl(element)) {
-      throw new Error('Axion compat patch requires an input or textarea element');
-    }
-
-    const options = normalizeCompatOptions(rawOptions);
-    const listeners = [];
-    const drag = {
-      pointerId: null,
-      anchorIndex: null,
-      pendingPoint: null,
-      rafId: null
-    };
-
-    function addListener(type, handler) {
-      element.addEventListener(type, handler);
-      listeners.push(() => element.removeEventListener(type, handler));
-    }
-
-    function clearDrag(pointerId = null) {
-      if (pointerId !== null && drag.pointerId !== pointerId) {
-        return;
-      }
-
-      if (drag.rafId !== null) {
-        window.cancelAnimationFrame(drag.rafId);
-      }
-
-      drag.pointerId = null;
-      drag.anchorIndex = null;
-      drag.pendingPoint = null;
-      drag.rafId = null;
-    }
-
-    function queueManualDragSelection(event) {
-      drag.pendingPoint = {
-        clientX: event.clientX,
-        clientY: event.clientY
-      };
-
-      if (drag.rafId !== null) {
-        return;
-      }
-
-      drag.rafId = window.requestAnimationFrame(() => {
-        drag.rafId = null;
-        if (drag.anchorIndex === null || !drag.pendingPoint) {
-          return;
-        }
-
-        const currentIndex = setSelectionFromPoint(
-          element,
-          drag.anchorIndex,
-          drag.pendingPoint,
-          options,
-          'drag-selection-correction'
-        );
-        if (currentIndex !== null) {
-          reportCompatStatus(
-            options,
-            `Selection corrected: ${element.id || element.tagName}@${drag.anchorIndex}→${currentIndex}`
-          );
-        }
-      });
-    }
-
-    if (!options.manualPointerSelection) {
-      addListener('click', (event) => {
-        window.setTimeout(() => {
-          const correctedIndex = setCaretFromPoint(element, event, options, 'caret-correction');
-          if (correctedIndex !== null) {
-            reportCompatStatus(
-              options,
-              `Caret corrected after click: ${element.id || element.tagName}@${correctedIndex}`
+        let configuration = serde_json::json!({
+            "appName": self.app_name,
+            "bridgeToken": self.bridge_token,
+            "commands": self.commands,
+            "events": self.events,
+            "hostEvents": self.host_events,
+            "trustedOrigins": self.trusted_origins,
+            "protocol": "axion",
+            "version": format!("{AXION_RELEASE_VERSION}-bootstrap"),
+            "diagnosticsReportSchema": AXION_DIAGNOSTICS_REPORT_SCHEMA,
+        });
+        // Assemble trusted static code first. Insert configuration only once, so
+        // marker-like text in app names or tokens is never interpreted as code.
+        let template = include_str!("assets/bootstrap.js")
+            .replace(
+                "/* AXION_COMPAT_HELPERS */",
+                include_str!("assets/compat.js"),
+            )
+            .replace(
+                "/* AXION_DIAGNOSTICS_HELPERS */",
+                include_str!("assets/diagnostics.js"),
             );
-          }
-        }, 0);
-      });
-      addListener('pointerdown', (event) => {
-        window.setTimeout(() => {
-          const anchorIndex = setCaretFromPoint(
-            element,
-            event,
-            options,
-            'caret-correction'
-          );
-          if (anchorIndex !== null) {
-            drag.pointerId = event.pointerId;
-            drag.anchorIndex = anchorIndex;
-            reportCompatStatus(
-              options,
-              `Selection anchor set: ${element.id || element.tagName}@${anchorIndex}`
-            );
-          }
-        }, 0);
-      });
-      addListener('pointermove', (event) => {
-        if (drag.anchorIndex === null || drag.pointerId !== event.pointerId || event.buttons === 0) {
-          return;
-        }
-
-        window.setTimeout(() => {
-          const currentIndex = setSelectionFromPoint(
-            element,
-            drag.anchorIndex,
-            event,
-            options,
-            'drag-selection-correction'
-          );
-          if (currentIndex !== null) {
-            reportCompatStatus(
-              options,
-              `Selection corrected: ${element.id || element.tagName}@${drag.anchorIndex}→${currentIndex}`
-            );
-          }
-        }, 0);
-      });
-      addListener('pointerup', () => clearDrag());
-      addListener('pointercancel', () => clearDrag());
-
-      return () => {
-        clearDrag();
-        for (const dispose of listeners.splice(0)) {
-          dispose();
-        }
-      };
+        template.replacen("/* AXION_CONFIG */ null", &configuration.to_string(), 1)
     }
-
-    addListener('pointerdown', (event) => {
-      if (event.button !== 0) {
-        return;
-      }
-
-      event.preventDefault();
-      element.focus();
-
-      const anchorIndex = setCaretFromPoint(element, event, options, 'caret-correction');
-      if (anchorIndex === null) {
-        return;
-      }
-
-      drag.pointerId = event.pointerId;
-      drag.anchorIndex = anchorIndex;
-
-      if (typeof element.setPointerCapture === 'function') {
-        try {
-          element.setPointerCapture(event.pointerId);
-        } catch (_error) {
-        }
-      }
-
-      reportCompatStatus(
-        options,
-        `Manual selection anchor set: ${element.id || element.tagName}@${anchorIndex}`
-      );
-    });
-
-    addListener('mousedown', (event) => {
-      event.preventDefault();
-    });
-
-    addListener('mouseup', (event) => {
-      event.preventDefault();
-    });
-
-    addListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-
-      queueMicrotask(() => {
-        const correctedIndex = setCaretFromPoint(element, event, options, 'caret-correction');
-        if (correctedIndex !== null) {
-          reportCompatStatus(
-            options,
-            `Caret corrected after click: ${element.id || element.tagName}@${correctedIndex}`
-          );
-        }
-      });
-    });
-
-    addListener('pointermove', (event) => {
-      if (drag.anchorIndex === null || drag.pointerId !== event.pointerId || event.buttons === 0) {
-        return;
-      }
-
-      event.preventDefault();
-      queueManualDragSelection(event);
-    });
-
-    addListener('pointerup', (event) => {
-      if (drag.anchorIndex === null || drag.pointerId !== event.pointerId) {
-        return;
-      }
-
-      event.preventDefault();
-      const currentIndex = setSelectionFromPoint(
-        element,
-        drag.anchorIndex,
-        event,
-        options,
-        'drag-selection-correction'
-      );
-      if (currentIndex !== null) {
-        reportCompatStatus(
-          options,
-          `Selection corrected: ${element.id || element.tagName}@${drag.anchorIndex}→${currentIndex}`
-        );
-      }
-
-      if (typeof element.releasePointerCapture === 'function') {
-        try {
-          element.releasePointerCapture(event.pointerId);
-        } catch (_error) {
-        }
-      }
-
-      clearDrag(event.pointerId);
-    });
-
-    addListener('pointercancel', (event) => {
-      clearDrag(event.pointerId);
-    });
-
-    return () => {
-      clearDrag();
-      for (const dispose of listeners.splice(0)) {
-        dispose();
-      }
-    };
-  }
-"#
-}
-
-fn bootstrap_diagnostics_helpers() -> &'static str {
-    r#"  function toPrettyJson(value) {
-    return JSON.stringify(value, null, 2);
-  }
-
-  function errorCodeFromMessage(message) {
-    const match = String(message ?? '').match(/^([a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+):\s/);
-    return match ? match[1] : null;
-  }
-
-  function normalizeError(error, fallbackMessage = 'Axion bridge request failed') {
-    if (error && typeof error === 'object') {
-      const message = typeof error.message === 'string' && error.message.length > 0
-        ? error.message
-        : fallbackMessage;
-      return {
-        code: typeof error.code === 'string' && error.code.length > 0
-          ? error.code
-          : errorCodeFromMessage(message) ?? 'bridge.error',
-        message,
-        cause: error
-      };
-    }
-
-    const message = typeof error === 'string' && error.length > 0 ? error : fallbackMessage;
-    return {
-      code: errorCodeFromMessage(message) ?? 'bridge.error',
-      message,
-      cause: error ?? null
-    };
-  }
-
-  function snapshotTextControl(element, detail = null) {
-    const active = document.activeElement;
-    return {
-      targetId: element?.id ?? null,
-      activeElementId: active instanceof HTMLElement ? active.id || active.tagName : null,
-      selectionStart: typeof element?.selectionStart === 'number' ? element.selectionStart : null,
-      selectionEnd: typeof element?.selectionEnd === 'number' ? element.selectionEnd : null,
-      valueLength: typeof element?.value === 'string' ? element.value.length : null,
-      scrollLeft: typeof element?.scrollLeft === 'number' ? element.scrollLeft : null,
-      scrollTop: typeof element?.scrollTop === 'number' ? element.scrollTop : null,
-      detail,
-      devicePixelRatio: window.devicePixelRatio ?? null
-    };
-  }
-
-  function describeBridge() {
-    return {
-      ready: true,
-      appName: state.appName,
-      commands: [...state.commands],
-      events: [...state.events],
-      hostEvents: [...state.hostEvents],
-      trustedOrigins: [...state.trustedOrigins],
-      protocol: state.protocol,
-      version: state.version,
-      diagnosticsReportSchema: state.diagnosticsReportSchema,
-      currentOrigin: currentOrigin(),
-      locationHref: window.location.href
-    };
-  }
-"#
 }
 
 #[cfg(test)]
@@ -1966,6 +1282,18 @@ mod tests {
                 "payload should be invalid: {payload}"
             );
         }
+    }
+
+    #[test]
+    fn json_payload_validation_enforces_the_public_container_depth_limit() {
+        let depth = super::BRIDGE_MAX_JSON_DEPTH;
+        let allowed = format!("{}null{}", "[".repeat(depth), "]".repeat(depth));
+        let rejected = format!("{}null{}", "[".repeat(depth + 1), "]".repeat(depth + 1));
+        assert!(is_valid_json_value(&allowed));
+        assert!(!is_valid_json_value(&rejected));
+        assert!(BridgeRequest::try_new("app.ping", rejected).is_err());
+        let empty = format!("{}{}", "[".repeat(depth + 1), "]".repeat(depth + 1));
+        assert!(!is_valid_json_value(&empty));
     }
 
     #[test]
@@ -2329,6 +1657,31 @@ mod tests {
         assert!(script.contains("__dispatchFromHost(token, event, payload)"));
         assert!(script.contains("token !== state.bridgeToken"));
         assert!(script.contains("!state.hostEvents.includes(event)"));
+    }
+
+    #[test]
+    fn bootstrap_configuration_is_serialized_once_without_replacing_data_markers() {
+        let app_name = "quoted \"name\"; /* AXION_COMPAT_HELPERS */\n\0\u{2028}中文";
+        let token = "/* AXION_CONFIG */ null /* AXION_DIAGNOSTICS_HELPERS */";
+        let script = BootstrapConfig::new(app_name, token)
+            .with_commands(["app.ping"])
+            .with_trusted_origins(["axion://app"])
+            .script_source();
+        let configuration_line = script
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("const configuration = "))
+            .unwrap();
+        let configuration: serde_json::Value =
+            serde_json::from_str(configuration_line.strip_suffix(';').unwrap()).unwrap();
+        assert_eq!(configuration["appName"], app_name);
+        assert_eq!(configuration["bridgeToken"], token);
+        assert_eq!(script.matches("function normalizeError(").count(), 1);
+        assert_eq!(
+            script
+                .matches("function installTextInputSelectionPatch(")
+                .count(),
+            1
+        );
     }
 
     #[test]

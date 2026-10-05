@@ -4,6 +4,8 @@ use thiserror::Error;
 pub enum AxionError {
     #[error("app name must not be empty")]
     MissingAppName,
+    #[error("app name must be a single non-empty path component")]
+    InvalidAppName,
     #[error("build configuration is required")]
     MissingBuildConfig,
     #[error("at least one window must be configured")]
@@ -22,4 +24,10 @@ pub enum AxionError {
     MissingFrontendDist,
     #[error("build entry must not be empty")]
     MissingBuildEntry,
+    #[error("native lifecycle close_timeout_ms must be greater than zero")]
+    InvalidCloseTimeout,
+    #[error("native fs app_data_dir must not be empty")]
+    InvalidAppDataDirectory,
+    #[error("invalid capabilities for window '{window_id}': {message}")]
+    InvalidCapability { window_id: String, message: String },
 }

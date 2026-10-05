@@ -1,5 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::collections::BTreeMap;
 
 use crate::{
     App, AppConfig, AppIdentity, AxionError, BuildConfig, BundleConfig, CapabilityConfig,
@@ -95,52 +94,8 @@ impl Builder {
 
     pub fn build(self) -> Result<App, AxionError> {
         let identity = self.identity.ok_or(AxionError::MissingAppName)?;
-        if identity.name.trim().is_empty() {
-            return Err(AxionError::MissingAppName);
-        }
-
-        if self.windows.is_empty() {
-            return Err(AxionError::MissingWindow);
-        }
-
-        let mut window_ids = BTreeSet::new();
-        for window in &self.windows {
-            if window.id.as_str().trim().is_empty() {
-                return Err(AxionError::InvalidWindowId);
-            }
-            if !window_ids.insert(window.id.as_str().to_owned()) {
-                return Err(AxionError::DuplicateWindowId {
-                    window_id: window.id.as_str().to_owned(),
-                });
-            }
-            if window.title.trim().is_empty() {
-                return Err(AxionError::InvalidWindowTitle {
-                    window_id: window.id.as_str().to_owned(),
-                });
-            }
-            if window.width == 0 || window.height == 0 {
-                return Err(AxionError::InvalidWindowSize {
-                    window_id: window.id.as_str().to_owned(),
-                });
-            }
-        }
-        for window_id in self.capabilities.keys() {
-            if !window_ids.contains(window_id) {
-                return Err(AxionError::UnknownCapabilityWindow {
-                    window_id: window_id.clone(),
-                });
-            }
-        }
-
         let build = self.build.ok_or(AxionError::MissingBuildConfig)?;
-        if is_path_empty(&build.frontend_dist) {
-            return Err(AxionError::MissingFrontendDist);
-        }
-        if is_path_empty(&build.entry) {
-            return Err(AxionError::MissingBuildEntry);
-        }
-
-        Ok(App::new(AppConfig {
+        let mut config = AppConfig {
             identity,
             windows: self.windows,
             dev: self.dev,
@@ -148,12 +103,11 @@ impl Builder {
             bundle: self.bundle,
             native: self.native,
             capabilities: self.capabilities,
-        }))
+        };
+        config.resolve_capabilities()?;
+        config.validate()?;
+        Ok(App::new(config))
     }
-}
-
-fn is_path_empty(path: &Path) -> bool {
-    path.as_os_str().is_empty()
 }
 
 #[cfg(test)]
@@ -210,6 +164,77 @@ mod tests {
             .expect_err("unknown capability window should fail");
 
         assert!(matches!(error, AxionError::UnknownCapabilityWindow { .. }));
+    }
+
+    #[test]
+    fn builder_rejects_path_like_app_names() {
+        for name in [".", "..", "../outside", "one/two", "one\\two", "nul\0name"] {
+            assert!(matches!(
+                valid_builder()
+                    .with_name(name)
+                    .with_window(WindowConfig::main("Test"))
+                    .build(),
+                Err(AxionError::InvalidAppName)
+            ));
+        }
+    }
+
+    #[test]
+    fn builder_and_direct_config_reject_zero_close_timeout() {
+        let error = valid_builder()
+            .with_window(WindowConfig::main("Test"))
+            .with_native(
+                NativeConfig::new().with_lifecycle(LifecycleConfig::new().with_close_timeout_ms(0)),
+            )
+            .build()
+            .expect_err("zero timeout must fail");
+        assert!(matches!(error, AxionError::InvalidCloseTimeout));
+        let mut config = valid_builder()
+            .with_window(WindowConfig::main("Test"))
+            .build()
+            .unwrap()
+            .config()
+            .clone();
+        config.native.lifecycle.close_timeout_ms = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(AxionError::InvalidCloseTimeout)
+        ));
+    }
+
+    #[test]
+    fn builder_resolves_profiles_and_rejects_tampered_cached_permissions() {
+        let mut config = valid_builder()
+            .with_window(WindowConfig::main("Test"))
+            .with_capability(
+                "main",
+                crate::CapabilityConfig {
+                    profiles: vec!["app-info".to_owned()],
+                    ..Default::default()
+                },
+            )
+            .build()
+            .unwrap()
+            .config()
+            .clone();
+        assert!(
+            config.capabilities["main"]
+                .commands
+                .iter()
+                .any(|command| command == "app.ping")
+        );
+        assert_eq!(config.capabilities["main"].protocols, vec!["axion"]);
+        config
+            .capabilities
+            .get_mut("main")
+            .unwrap()
+            .commands
+            .push("fs.remove".to_owned());
+        assert!(matches!(
+            config.validate(),
+            Err(AxionError::InvalidCapability { .. })
+        ));
+        assert!(Builder::new().apply_config(config).build().is_err());
     }
 
     #[test]

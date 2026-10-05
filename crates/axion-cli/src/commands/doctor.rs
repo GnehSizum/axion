@@ -579,83 +579,19 @@ fn profiles_providing_value(
 fn suggested_profiles_for_explicit_capabilities(
     capability: &axion_core::CapabilityConfig,
 ) -> Vec<String> {
-    let candidates = [
-        (
-            "app-info",
-            &["app.echo", "app.info", "app.ping", "app.version"][..],
-            &[][..],
-            &["axion"][..],
-        ),
-        ("app-control", &["app.exit"][..], &[][..], &["axion"][..]),
-        ("app-events", &[][..], &["app.log"][..], &["axion"][..]),
-        (
-            "window-control",
-            &[
-                "window.close",
-                "window.confirm_close",
-                "window.focus",
-                "window.hide",
-                "window.info",
-                "window.prevent_close",
-                "window.reload",
-                "window.set_size",
-                "window.set_title",
-                "window.show",
-            ][..],
-            &[][..],
-            &["axion"][..],
-        ),
-        (
-            "multi-window",
-            &[
-                "window.close",
-                "window.confirm_close",
-                "window.focus",
-                "window.info",
-                "window.list",
-                "window.prevent_close",
-                "window.reload",
-                "window.set_title",
-            ][..],
-            &[][..],
-            &["axion"][..],
-        ),
-        (
-            "file-access",
-            &[
-                "fs.create_dir",
-                "fs.exists",
-                "fs.list_dir",
-                "fs.read_text",
-                "fs.remove",
-                "fs.write_text",
-            ][..],
-            &[][..],
-            &["axion"][..],
-        ),
-        (
-            "clipboard-access",
-            &["clipboard.read_text", "clipboard.write_text"][..],
-            &[][..],
-            &["axion"][..],
-        ),
-        ("shell-access", &["shell.open"][..], &[][..], &["axion"][..]),
-        (
-            "dialog-access",
-            &["dialog.open", "dialog.save"][..],
-            &[][..],
-            &["axion"][..],
-        ),
-    ];
-
-    candidates
+    use axion_core::capabilities::{
+        CAPABILITY_PROFILES, profile_commands, profile_events, profile_protocols,
+    };
+    CAPABILITY_PROFILES
         .iter()
-        .filter(|(_, commands, events, protocols)| {
-            contains_all(&capability.explicit_commands, commands)
-                && contains_all(&capability.explicit_events, events)
-                && contains_all(&capability.explicit_protocols, protocols)
+        .copied()
+        .filter(|profile| *profile != "minimal")
+        .filter(|profile| {
+            contains_all(&capability.explicit_commands, profile_commands(profile))
+                && contains_all(&capability.explicit_events, profile_events(profile))
+                && contains_all(&capability.explicit_protocols, profile_protocols(profile))
         })
-        .map(|(profile, _, _, _)| (*profile).to_owned())
+        .map(str::to_owned)
         .collect()
 }
 
@@ -1457,13 +1393,32 @@ fn servo_path_for_manifest(manifest_path: &Path) -> Option<PathBuf> {
     None
 }
 
+fn manifest_security_diagnostics(
+    config: &AppConfig,
+    manifest_path: &Path,
+) -> Result<SecurityDiagnostics, AxionCliError> {
+    let mut security = security_diagnostics(config);
+    for warning in axion_manifest::manifest_warnings(manifest_path)? {
+        security.findings.push(SecurityFinding::warning(
+            "manifest",
+            "manifest.unknown-field",
+            warning,
+            Some("correct the field name or remove unsupported configuration".to_owned()),
+        ));
+    }
+    Ok(security)
+}
+
 pub(crate) fn doctor_gate_for_manifest(args: &DoctorArgs) -> Result<DoctorGate, AxionCliError> {
     if !args.manifest_path.exists() {
         return Ok(DoctorGate::passed());
     }
 
     let config = axion_manifest::load_app_config_from_path(&args.manifest_path)?;
-    Ok(DoctorGate::evaluate(&security_diagnostics(&config), args))
+    Ok(DoctorGate::evaluate(
+        &manifest_security_diagnostics(&config, &args.manifest_path)?,
+        args,
+    ))
 }
 
 pub(crate) fn doctor_readiness_for_manifest(
@@ -1475,7 +1430,7 @@ pub(crate) fn doctor_readiness_for_manifest(
 
     let config = axion_manifest::load_app_config_from_path(manifest_path)?;
     let runtime = runtime_diagnostic_report(&config)?;
-    let security = security_diagnostics(&config);
+    let security = manifest_security_diagnostics(&config, manifest_path)?;
     Ok(readiness_diagnostics(
         &config,
         &security,
@@ -1539,7 +1494,7 @@ fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> 
     let config = axion_manifest::load_app_config_from_path(manifest_path)?;
     let app = Builder::new().apply_config(config.clone()).build()?;
     let runtime = axion_runtime::diagnostic_report(&app, RunMode::Production);
-    let security = security_diagnostics(&config);
+    let security = manifest_security_diagnostics(&config, manifest_path)?;
     let gate = DoctorGate::evaluate(&security, args);
     let readiness =
         readiness_diagnostics(&config, &security, Some(&runtime), servo_path.as_deref());
@@ -1793,7 +1748,7 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.6.0"));
+        assert!(line.contains("release=v0.6.1"));
         assert!(line.contains("msrv="));
     }
 
@@ -2687,6 +2642,40 @@ protocols = ["axion"]
         assert_eq!(
             dev_server_diagnostic_line_with(&config, |_| false),
             "dev_server: unreachable (http://127.0.0.1:3000/)"
+        );
+    }
+    #[test]
+    fn unknown_manifest_fields_are_warnings_and_deny_warnings_rejects_them() {
+        let root = temp_dir();
+        fs::create_dir_all(root.join("frontend")).unwrap();
+        fs::write(root.join("frontend/index.html"), "hello").unwrap();
+        let manifest = root.join("axion.toml");
+        fs::write(&manifest, "[app]\nname = \"unknown-field\"\n[window]\nid = \"main\"\ntitle = \"Unknown\"\nvisibile = false\n[build]\nfrontend_dist = \"frontend\"\nentry = \"frontend/index.html\"\n").unwrap();
+        let config = axion_manifest::load_app_config_from_path(&manifest).unwrap();
+        let security = super::manifest_security_diagnostics(&config, &manifest).unwrap();
+        assert!(
+            security
+                .findings
+                .iter()
+                .any(|finding| finding.code == "manifest.unknown-field"
+                    && finding.message.contains("visibile"))
+        );
+        let mut args = DoctorArgs {
+            manifest_path: manifest,
+            json: false,
+            deny_warnings: false,
+            max_risk: None,
+        };
+        assert!(
+            super::doctor_gate_for_manifest(&args)
+                .unwrap()
+                .passed_status()
+        );
+        args.deny_warnings = true;
+        assert!(
+            !super::doctor_gate_for_manifest(&args)
+                .unwrap()
+                .passed_status()
         );
     }
 }

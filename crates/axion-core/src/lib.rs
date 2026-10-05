@@ -1,5 +1,6 @@
 mod app;
 mod builder;
+pub mod capabilities;
 mod config;
 mod error;
 mod window;

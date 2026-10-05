@@ -120,6 +120,16 @@ fn check_report(args: &CheckArgs) -> CheckReport {
         report.dev_preflight = Some(dev_preflight(&args.manifest_path));
     }
 
+    if report.doctor_passed && report.self_test_passed {
+        let current_identity =
+            super::check_identity::check_identity(&args.manifest_path, args.max_risk.as_str()).ok();
+        if current_identity.is_none() || current_identity != report.check_identity {
+            report.self_test_passed = false;
+            report.self_test_error = Some(
+                "check inputs changed during validation or could not be fingerprinted".to_owned(),
+            );
+        }
+    }
     report.finalize();
     report
 }
@@ -181,6 +191,7 @@ fn check_artifact(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CheckReport {
     manifest_path: String,
+    check_identity: Option<String>,
     max_risk: String,
     bundle_requested: bool,
     report_path: Option<String>,
@@ -216,7 +227,17 @@ struct CheckArtifact {
 impl CheckReport {
     fn new(args: &CheckArgs) -> Self {
         Self {
-            manifest_path: args.manifest_path.display().to_string(),
+            manifest_path: args
+                .manifest_path
+                .canonicalize()
+                .unwrap_or_else(|_| args.manifest_path.clone())
+                .display()
+                .to_string(),
+            check_identity: super::check_identity::check_identity(
+                &args.manifest_path,
+                args.max_risk.as_str(),
+            )
+            .ok(),
             max_risk: args.max_risk.as_str().to_owned(),
             bundle_requested: args.bundle,
             report_path: args
@@ -458,8 +479,9 @@ impl CheckReport {
 
     fn to_json(&self) -> String {
         format!(
-            "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"max_risk\":{},\"bundle_requested\":{},\"dev_requested\":{},\"report_path\":{},\"doctor\":{{\"passed\":{},\"failed_reasons\":{}}},\"capabilities\":{},\"readiness\":{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}},\"self_test\":{{\"passed\":{},\"error\":{}}},\"artifacts\":{},\"bundle_preflight\":{{\"checked\":{},\"passed\":{},\"error\":{}}},\"dev_preflight\":{},\"failure_phase\":{},\"next_step\":{},\"next_steps\":{},\"next_actions\":{},\"result\":{}}}",
+            "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"check_identity\":{},\"max_risk\":{},\"bundle_requested\":{},\"dev_requested\":{},\"report_path\":{},\"doctor\":{{\"passed\":{},\"failed_reasons\":{}}},\"capabilities\":{},\"readiness\":{{\"ready_for_dev\":{},\"ready_for_bundle\":{},\"ready_for_gui_smoke\":{},\"blockers\":{},\"warnings\":{}}},\"self_test\":{{\"passed\":{},\"error\":{}}},\"artifacts\":{},\"bundle_preflight\":{{\"checked\":{},\"passed\":{},\"error\":{}}},\"dev_preflight\":{},\"failure_phase\":{},\"next_step\":{},\"next_steps\":{},\"next_actions\":{},\"result\":{}}}",
             json_string_literal(&self.manifest_path),
+            optional_json_string_literal(self.check_identity.as_deref()),
             json_string_literal(&self.max_risk),
             self.bundle_requested,
             self.dev_preflight.is_some(),

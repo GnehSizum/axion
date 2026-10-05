@@ -17,3 +17,5 @@ axion-window-winit.workspace = true
 thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true

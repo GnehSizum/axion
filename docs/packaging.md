@@ -1,6 +1,6 @@
 # Packaging
 
-Axion v0.6.0 provides bundle scaffolds and preview release artifacts for local validation and early distribution experiments. These bundles are not signed installers yet.
+Axion v0.6.1 provides bundle scaffolds and preview release artifacts for local validation and early distribution experiments. These bundles are not signed installers yet.
 
 ## Bundle Command
 
@@ -12,7 +12,7 @@ cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- bundle --manifest-path examples/hello-axion/axion.toml --report-path target/axion/reports/hello-bundle.json
 ```
 
-The command copies `[build].frontend_dist` into a platform bundle, writes metadata from `[app]`, copies `[bundle].icon` when configured, writes `axion-bundle-manifest.json`, and verifies the generated files.
+The command copies `[build].frontend_dist` into a platform bundle, writes a deployment `axion.toml`, writes metadata from `[app]`, copies `[bundle].icon` when configured, writes `axion-bundle-manifest.json`, and verifies the generated files. Before removing an existing output, it rejects overlap in either direction with the frontend, entry, source manifest, executable, or icon. Rejected input/output layouts leave the source files intact.
 
 Use `--build-executable` for generated or standalone apps:
 
@@ -20,11 +20,19 @@ Use `--build-executable` for generated or standalone apps:
 cargo run -p axion-cli -- bundle --manifest-path /tmp/demo-app/axion.toml --build-executable
 ```
 
+The build path invokes Cargo from the application's directory with `--release --features servo-runtime` and reads `compiler-artifact.executable` from Cargo JSON messages. It supports a custom `CARGO_TARGET_DIR` and binary names that differ from `[app].name`; use `--bin <name>` when Cargo emits multiple binaries. A requested executable build fails if it produces no usable executable. Applications using a different runtime feature contract can supply a prebuilt `--executable` instead.
+
 ## Bundle Layouts
 
 - `macos-app`: `<app>.app/Contents/MacOS/`, `Contents/Resources/app/`, `Contents/Info.plist`, `Contents/PkgInfo`.
 - `linux-dir`: `<app>/bin/`, `<app>/resources/app/`, `<app>/axion-bundle.txt`, `<app>/<app>.desktop`.
 - `windows-dir`: `<app>/bin/<app>.exe`, `<app>/resources/app/`, `<app>/axion-bundle.txt`, `<app>/axion-windows-metadata.txt`.
+
+The deployment configuration lives beside the frontend directory: `Contents/Resources/axion.toml` on macOS and `resources/axion.toml` in directory bundles. Its `[build]` paths are relative to that configuration (`frontend_dist = "app"`, `entry = "app/<entry>"`). App identity, windows, native settings, and capabilities are retained; development-server and packaging-only settings are omitted. The configuration is included in the bundle file inventory and fingerprints.
+
+Generated applications locate this configuration relative to their executable when deployed, so the original source directory and the current working directory are not needed. The lower-level packager APIs that stage only web assets remain available for scaffolds; callers supplying their own executable must also provide a deployment-aware application entry point.
+
+Frontend filenames may contain Unicode, spaces, and URL-reserved characters such as `#`, `?`, and `%`. Axion encodes filesystem path segments when constructing resource URLs and decodes incoming URL segments once. Decoded parent-directory traversal, path separators, NUL, and symlink assets are rejected. Do not pre-encode filesystem filenames.
 
 `axion bundle` prints `target`, `layout`, `bundle_dir`, `resources_app_dir`, `entry_path`, `metadata`, `platform_metadata`, `bundle_manifest`, and verification counters. `--json` emits the stable `axion.bundle-report.v1` schema for CI and release automation.
 
@@ -59,7 +67,7 @@ cargo run -p axion-cli -- release --manifest-path path/to/axion.toml --check-rep
 cargo run -p axion-cli -- report target/axion/reports/app-release.json --output target/axion/reports/app-release-summary.json
 ```
 
-`axion.release-report.v1` embeds the bundle report, records optional `check_report` reuse, `failure_phase`, and `failed_reasons`, inventories generated artifacts, includes a compact artifact `summary`, and records archive path, bytes, `fnv1a64`, and verification status when `--archive` is passed. Reused check reports must match the manifest and have successful result, doctor, self-test, bundle preflight, and release readiness. The archive is an unsigned `.tar` preview artifact.
+`axion.release-report.v1` embeds the bundle report, records optional `check_report` reuse, `failure_phase`, and `failed_reasons`, inventories generated artifacts, includes a compact artifact `summary`, and records archive path, bytes, `fnv1a64`, and verification status when `--archive` is passed. Release always reruns the current doctor gate and readiness checks. A reused report must have successful self-test and bundle preflight, match the canonical manifest location and risk threshold, and carry a SHA-256 content identity covering the manifest, frontend tree, icon, framework version and check parameters. Changed inputs or reports without this identity require a new `check --bundle`. The archive is an unsigned `.tar` preview artifact. Entries have deterministic timestamps and owner fields; files use mode `0755` when executable and `0644` otherwise. Verification reads back every member and checks its path, type, normalized mode, size and content against the bundle, in addition to the archive fingerprint. Archive output must stay outside the bundle.
 
 ## Icons And Metadata
 

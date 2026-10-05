@@ -94,6 +94,7 @@ impl BundleConfig {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NativeConfig {
+    pub app_data_dir: Option<PathBuf>,
     pub dialog: DialogConfig,
     pub clipboard: ClipboardConfig,
     pub lifecycle: LifecycleConfig,
@@ -102,6 +103,11 @@ pub struct NativeConfig {
 impl NativeConfig {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_app_data_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.app_data_dir = Some(path.into());
+        self
     }
 
     pub fn with_dialog(mut self, dialog: DialogConfig) -> Self {
@@ -258,6 +264,85 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    /// Validate shared invariants for manifest and programmatic configuration.
+    pub fn validate(&self) -> Result<(), crate::AxionError> {
+        use crate::AxionError;
+        if self.identity.name.trim().is_empty() {
+            return Err(AxionError::MissingAppName);
+        }
+        let name = self.identity.name.trim();
+        if matches!(name, "." | "..") || name.contains(['/', '\\', '\0']) {
+            return Err(AxionError::InvalidAppName);
+        }
+        if self.windows.is_empty() {
+            return Err(AxionError::MissingWindow);
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for window in &self.windows {
+            if window.id.as_str().trim().is_empty() {
+                return Err(AxionError::InvalidWindowId);
+            }
+            if !ids.insert(window.id.as_str()) {
+                return Err(AxionError::DuplicateWindowId {
+                    window_id: window.id.as_str().to_owned(),
+                });
+            }
+            if window.title.trim().is_empty() {
+                return Err(AxionError::InvalidWindowTitle {
+                    window_id: window.id.as_str().to_owned(),
+                });
+            }
+            if window.width == 0 || window.height == 0 {
+                return Err(AxionError::InvalidWindowSize {
+                    window_id: window.id.as_str().to_owned(),
+                });
+            }
+        }
+        if self.build.frontend_dist.as_os_str().is_empty() {
+            return Err(AxionError::MissingFrontendDist);
+        }
+        if self.build.entry.as_os_str().is_empty() {
+            return Err(AxionError::MissingBuildEntry);
+        }
+        if self
+            .native
+            .app_data_dir
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(AxionError::InvalidAppDataDirectory);
+        }
+        if self.native.lifecycle.close_timeout_ms == 0 {
+            return Err(AxionError::InvalidCloseTimeout);
+        }
+        for (window_id, capability) in &self.capabilities {
+            if !ids.contains(window_id.as_str()) {
+                return Err(AxionError::UnknownCapabilityWindow {
+                    window_id: window_id.clone(),
+                });
+            }
+            crate::capabilities::resolve_capability(capability).map_err(|message| {
+                AxionError::InvalidCapability {
+                    window_id: window_id.clone(),
+                    message,
+                }
+            })?;
+        }
+        Ok(())
+    }
+    pub fn resolve_capabilities(&mut self) -> Result<(), crate::AxionError> {
+        for (window_id, capability) in &mut self.capabilities {
+            *capability =
+                crate::capabilities::resolve_capability(capability).map_err(|message| {
+                    crate::AxionError::InvalidCapability {
+                        window_id: window_id.clone(),
+                        message,
+                    }
+                })?;
+        }
+        Ok(())
+    }
+
     pub fn primary_window(&self) -> Option<&WindowConfig> {
         self.windows.first()
     }

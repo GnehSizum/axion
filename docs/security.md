@@ -43,7 +43,7 @@ Profiles reduce repetitive manifest entries but do not bypass the deny-by-defaul
 - `app-info`: app metadata, version, ping, and echo commands.
 - `app-control`: application shutdown command.
 - `app-events`: frontend `app.log` events.
-- `window-control`: current-window control commands, including close confirmation.
+- `window-control`: window control commands (current window by default; explicit `target` may address another window), including close confirmation.
 - `multi-window`: multi-window coordination commands, including targeted close confirmation.
 - `clipboard-access`: clipboard read/write commands.
 - `shell-access`: validated URL opening through the platform opener.
@@ -74,7 +74,11 @@ Frontend code invokes Rust-side commands through the injected bridge:
 const response = await window.__AXION__.invoke("app.ping", { from: "frontend" });
 ```
 
-Bridge payloads must be valid JSON values. Request ids, command names, event names, and payload sizes are validated before dispatch.
+Bridge payloads must be valid JSON values, with at most 64 KiB of UTF-8 data and 64 nested array/object containers. Request ids, command names, event names, and payload sizes are validated before dispatch.
+
+The bridge uses a per-window bearer token, additionally bound to Servo's native `target_webview_id`. An invoke or emit request must carry the exact token registered for its originating WebView; a missing or unknown native context, an invalid token, or another window's token is rejected. The initiating window's capabilities authorize the command, including an explicitly supplied `target` window. Cross-window control does not change the caller's identity.
+
+`Origin` and `Referer` are request metadata, not authentication gates. This preserves custom-scheme requests with opaque or `null` origins. Bootstrap installation is restricted to the packaged app origin and the configured trusted development origin; permission to navigate to a remote origin does not grant bridge installation. Tokens live for the WebView's lifetime and are removed from the native binding when it closes; they are not rotated on navigation. A token leaked to content in the same WebView remains a bearer credential, so keep native capabilities on trusted UI and do not expose tokens in logs or frontend messages.
 
 File commands are restricted to Axion's app-data directory. Absolute paths, `..` components, root components, and symlink targets are rejected. Directory removal requires `recursive: true` for non-empty directories.
 
@@ -82,7 +86,9 @@ This app-data sandbox is a framework-level path sandbox, not an operating-system
 
 Dialog, clipboard, and shell commands are also capability-gated. Keep `[native.dialog] backend = "headless"` and `[native.clipboard] backend = "memory"` for CI and non-interactive environments. Use shell-opening only for trusted packaged UI, because opener calls can hand control to external apps or browsers.
 
-Close confirmation is intentionally timeout-bound. Keep `[native.lifecycle] close_timeout_ms` long enough for trusted UI prompts, but do not rely on it as a security boundary; it is a lifecycle safety net for unsaved-state flows.
+Close confirmation is intentionally timeout-bound. Keep `[native.lifecycle] close_timeout_ms` long enough for trusted UI prompts, but do not rely on it as a security boundary; it is a lifecycle safety net for unsaved-state flows. Close deadlines run on the native event loop, and confirmation or prevention cancels the pending deadline. Repeated `app.exit` calls while an exit is pending return the same request id. Any prevention ends that exit request and cancels its remaining close requests.
+
+Window-control calls wait at most five seconds for a native response after a control worker submits the request to the event loop; time queued in the control pool is not included. Calls from the event-loop thread fail immediately rather than waiting on themselves; requests that expire in the event-loop queue before execution have no effect. A timeout does not undo an operation that already began.
 
 If a window can call `app.exit`, at least one trusted packaged window should also be able to call both `window.confirm_close` and `window.prevent_close`. Otherwise application exit can request window closes but frontend code has no authorized close-decision path for guarded shutdown flows.
 
@@ -113,7 +119,9 @@ Set `allow_remote_navigation = true` only for a window that intentionally behave
 
 ## Content Security Policy
 
-Axion derives a strict CSP for packaged app content. The default policy restricts script, style, image, font, and connection sources to the app origin plus explicitly trusted origins.
+Axion derives CSP separately for each manifest window and selects it using Servo's native `target_webview_id` on packaged resource requests. The WebView binding is registered before its initial fetch can observe the policy map. Unknown or absent native contexts fail resource loading; request headers, bearer tokens, and window ordering cannot select a different window's CSP.
+
+The policy restricts scripts and styles to the app origin, images to self and data URLs, and fonts to self. Connection sources include the app origin, configured trusted origins, and that window's explicit navigation-origin allowlist. Different windows may therefore have different connection policies while sharing the same frontend files. Navigation permission alone does not install the bridge in the destination page.
 
 ## Doctor Diagnostics
 

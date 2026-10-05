@@ -3,10 +3,11 @@ use std::path::Path;
 use axion_runtime::json_string_literal;
 
 use crate::cli::ReportArgs;
+use serde::Deserialize;
+use serde_json::Value;
+
 use crate::commands::report_util::{
-    json_array_section, json_bool_field, json_string_array_literal, json_string_field,
-    json_string_fields, matching_json_delimiter, next_json_object, optional_json_string_field,
-    optional_json_string_literal,
+    json_string_array_literal, json_string_fields, optional_json_string_literal,
 };
 use crate::error::AxionCliError;
 
@@ -48,7 +49,7 @@ struct ReportSummary {
     artifacts: Vec<ReportArtifact>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct ReportArtifact {
     kind: String,
     path: String,
@@ -57,16 +58,13 @@ struct ReportArtifact {
 
 impl ReportSummary {
     fn from_json(path: &Path, body: &str) -> Result<Self, AxionCliError> {
-        validate_report_shape(body)?;
-        let schema = top_level_json_string_field(body, "schema").ok_or_else(|| {
+        let source: SourceReport = serde_json::from_str(body).map_err(|error| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!(
-                    "report is missing schema; expected one of: {}",
-                    supported_report_schemas().join(", ")
-                ),
+                format!("invalid report JSON: {error}"),
             )
         })?;
+        let schema = source.schema;
         let kind = report_kind(&schema)
             .ok_or_else(|| {
                 std::io::Error::new(
@@ -78,24 +76,29 @@ impl ReportSummary {
                 )
             })?
             .to_owned();
-        let manifest_path = top_level_json_string_field(body, "manifest_path")
-            .or_else(|| top_level_json_string_field(body, "manifestPath"));
-        let result = top_level_json_string_field(body, "result").ok_or_else(|| {
-            std::io::Error::new(
+        if !matches!(source.result.as_str(), "ok" | "failed") {
+            return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "report is missing string result field",
+                "report result must be ok or failed",
             )
-        })?;
-        let failure_phase = optional_json_string_field(body, "failure_phase");
-        let next_step =
-            json_string_field(body, "next_step").or_else(|| json_string_field(body, "nextStep"));
-        let next_action_kinds = json_array_section(body, "\"next_actions\"")
-            .map(|section| json_string_fields(section, "kind"))
-            .unwrap_or_default();
-        let smoke_summary = smoke_check_summary(body);
-        let artifacts = json_array_section(body, "\"artifacts\"")
-            .map(report_artifacts)
-            .unwrap_or_default();
+            .into());
+        }
+        let manifest_path = source.manifest_path;
+        let result = source.result;
+        let diagnostics = source.diagnostics.unwrap_or_default();
+        let failure_phase = source.failure_phase.or(diagnostics.failure_phase);
+        let next_step = source.next_step.or(diagnostics.next_step);
+        let next_action_kinds = source
+            .next_actions
+            .into_iter()
+            .map(|action| action.kind)
+            .collect();
+        let smoke_summary = source
+            .smoke_checks
+            .as_deref()
+            .or(diagnostics.smoke_checks.as_deref())
+            .map(smoke_check_summary);
+        let artifacts = source.artifacts;
 
         Ok(Self {
             path: path.display().to_string(),
@@ -187,31 +190,48 @@ struct SmokeSummary {
     error_codes: Vec<String>,
 }
 
-fn validate_report_shape(body: &str) -> Result<(), AxionCliError> {
-    let body = body.trim();
-    if !body.starts_with('{') {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "report must be a JSON object",
-        )
-        .into());
-    }
+#[derive(Deserialize)]
+struct SourceReport {
+    schema: String,
+    result: String,
+    #[serde(default, alias = "manifestPath")]
+    manifest_path: Option<String>,
+    #[serde(default)]
+    failure_phase: Option<String>,
+    #[serde(default, alias = "nextStep")]
+    next_step: Option<String>,
+    #[serde(default)]
+    next_actions: Vec<SourceAction>,
+    #[serde(default)]
+    artifacts: Vec<ReportArtifact>,
+    #[serde(default)]
+    smoke_checks: Option<Vec<SourceSmokeCheck>>,
+    #[serde(default)]
+    diagnostics: Option<SourceDiagnostics>,
+}
 
-    let object_end = matching_json_delimiter(body, 0, '{', '}').ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "report is not a complete JSON object",
-        )
-    })?;
-    if object_end != body.len() - 1 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "report contains trailing data after the top-level JSON object",
-        )
-        .into());
-    }
+#[derive(Default, Deserialize)]
+struct SourceDiagnostics {
+    #[serde(default)]
+    failure_phase: Option<String>,
+    #[serde(default)]
+    next_step: Option<String>,
+    #[serde(default)]
+    smoke_checks: Option<Vec<SourceSmokeCheck>>,
+}
 
-    Ok(())
+#[derive(Deserialize)]
+struct SourceAction {
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct SourceSmokeCheck {
+    #[serde(default)]
+    id: Option<String>,
+    status: String,
+    #[serde(default)]
+    detail: Value,
 }
 
 fn supported_report_schemas() -> Vec<&'static str> {
@@ -235,98 +255,6 @@ fn report_kind(schema: &str) -> Option<&'static str> {
     }
 }
 
-fn top_level_json_string_field(source: &str, field: &str) -> Option<String> {
-    let source = source.trim();
-    let key = format!("\"{field}\"");
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for (index, character) in source.char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match character {
-            '"' => {
-                if depth == 1 && source[index..].starts_with(&key) {
-                    let mut cursor = index + key.len();
-                    cursor = skip_json_whitespace(source, cursor);
-                    if source.get(cursor..=cursor)? != ":" {
-                        in_string = true;
-                        continue;
-                    }
-                    cursor = skip_json_whitespace(source, cursor + 1);
-                    return parse_json_string(source, cursor).map(|(value, _)| value);
-                }
-                in_string = true;
-            }
-            '{' | '[' => depth += 1,
-            '}' | ']' => depth = depth.checked_sub(1)?,
-            _ => {}
-        }
-    }
-
-    None
-}
-
-fn skip_json_whitespace(source: &str, mut cursor: usize) -> usize {
-    while source
-        .get(cursor..)
-        .and_then(|tail| tail.chars().next())
-        .is_some_and(char::is_whitespace)
-    {
-        cursor += source[cursor..]
-            .chars()
-            .next()
-            .map(char::len_utf8)
-            .unwrap_or(0);
-    }
-    cursor
-}
-
-fn parse_json_string(source: &str, start: usize) -> Option<(String, usize)> {
-    if source.get(start..=start)? != "\"" {
-        return None;
-    }
-
-    let mut value = String::new();
-    let mut escaped = false;
-    let content_start = start + 1;
-    for (offset, character) in source[content_start..].char_indices() {
-        let end = content_start + offset + character.len_utf8();
-        if escaped {
-            value.push(match character {
-                '"' => '"',
-                '\\' => '\\',
-                '/' => '/',
-                'b' => '\u{0008}',
-                'f' => '\u{000c}',
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                other => other,
-            });
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else if character == '"' {
-            return Some((value, end));
-        } else {
-            value.push(character);
-        }
-    }
-
-    None
-}
-
 fn write_summary_json(path: &Path, summary_json: &str) -> Result<(), AxionCliError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -338,50 +266,29 @@ fn write_summary_json(path: &Path, summary_json: &str) -> Result<(), AxionCliErr
     Ok(())
 }
 
-fn report_artifacts(section: &str) -> Vec<ReportArtifact> {
-    let mut artifacts = Vec::new();
-    let mut cursor = 0;
-    while let Some((object, next_cursor)) = next_json_object(section, cursor) {
-        if let (Some(kind), Some(path)) = (
-            json_string_field(object, "kind"),
-            json_string_field(object, "path"),
-        ) {
-            artifacts.push(ReportArtifact {
-                kind,
-                path,
-                exists: json_bool_field(object, "exists"),
-            });
-        }
-        cursor = next_cursor;
-    }
-    artifacts
-}
-
-fn smoke_check_summary(source: &str) -> Option<SmokeSummary> {
-    let checks = json_array_section(source, "\"smoke_checks\"")?;
-    let mut total = 0usize;
+fn smoke_check_summary(checks: &[SourceSmokeCheck]) -> SmokeSummary {
     let mut failed_ids = Vec::new();
     let mut error_codes = Vec::new();
-    let mut cursor = 0;
-    while let Some((object, next_cursor)) = next_json_object(checks, cursor) {
-        total += 1;
-        if json_string_field(object, "status").as_deref() == Some("fail") {
+    for (index, check) in checks.iter().enumerate() {
+        if check.status == "fail" {
             failed_ids.push(
-                json_string_field(object, "id").unwrap_or_else(|| format!("smoke-check-{total}")),
+                check
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| format!("smoke-check-{}", index + 1)),
             );
-            for code in json_string_fields(object, "code") {
+            for code in json_string_fields(&check.detail, "code") {
                 if !error_codes.contains(&code) {
                     error_codes.push(code);
                 }
             }
         }
-        cursor = next_cursor;
     }
-    Some(SmokeSummary {
-        total,
+    SmokeSummary {
+        total: checks.len(),
         failed_ids,
         error_codes,
-    })
+    }
 }
 
 fn smoke_summary_json(
@@ -425,7 +332,7 @@ mod tests {
 
     use crate::cli::ReportArgs;
 
-    use super::{ReportSummary, run, top_level_json_string_field};
+    use super::{ReportSummary, run};
 
     fn temp_report_path(name: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
@@ -486,14 +393,10 @@ mod tests {
             "\"result\":\"failed\"}"
         );
 
-        assert_eq!(
-            top_level_json_string_field(report, "schema").as_deref(),
-            Some("axion.diagnostics-report.v1")
-        );
-        assert_eq!(
-            top_level_json_string_field(report, "result").as_deref(),
-            Some("failed")
-        );
+        let summary =
+            ReportSummary::from_json(std::path::Path::new("report.json"), report).unwrap();
+        assert_eq!(summary.schema, "axion.diagnostics-report.v1");
+        assert_eq!(summary.result, "failed");
     }
 
     #[test]
@@ -532,7 +435,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("not a complete JSON object"));
+        assert!(error.to_string().contains("invalid report JSON"));
     }
 
     #[test]
@@ -543,7 +446,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("missing string result"));
+        assert!(error.to_string().contains("missing field `result`"));
     }
 
     #[test]
@@ -612,5 +515,32 @@ mod tests {
 
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(output);
+    }
+    #[test]
+    fn compact_and_pretty_reports_have_identical_semantics() {
+        let compact = r#"{"schema":"axion.diagnostics-report.v1","manifest_path":"/tmp/\u4f60/\ud83d\ude80.toml","result":"failed","artifacts":[{"kind":"report","path":"/tmp/报告.json","exists":true}],"diagnostics":{"smoke_checks":[{"id":"required.bridge","status":"fail","detail":{"error":{"code":"bridge.denied"}}}]}}"#;
+        let pretty = serde_json::to_string_pretty(
+            &serde_json::from_str::<serde_json::Value>(compact).unwrap(),
+        )
+        .unwrap();
+        let path = std::path::Path::new("report.json");
+        let summary = ReportSummary::from_json(path, compact).unwrap();
+        assert_eq!(summary, ReportSummary::from_json(path, &pretty).unwrap());
+        assert_eq!(summary.manifest_path.as_deref(), Some("/tmp/你/🚀.toml"));
+        assert_eq!(summary.failed_check_ids, ["required.bridge"]);
+        assert_eq!(summary.artifacts.len(), 1);
+    }
+
+    #[test]
+    fn invalid_types_syntax_and_duplicate_contract_fields_are_rejected() {
+        for source in [
+            r#"{"schema":"axion.check-report.v1" "result":"ok"}"#,
+            r#"{"schema":"axion.check-report.v1","result":true}"#,
+            r#"{"schema":"axion.check-report.v1","result":"unknown"}"#,
+            r#"{"schema":"axion.check-report.v1","result":"failed","result":"ok"}"#,
+            r#"{"schema":"axion.check-report.v1","result":"ok","artifacts":[{"kind":"x","path":3}]}"#,
+        ] {
+            assert!(ReportSummary::from_json(std::path::Path::new("report.json"), source).is_err());
+        }
     }
 }

@@ -1,0 +1,27 @@
+# Vendored upstream source. Updating Servo requires updating this record and Cargo metadata.
+format_version = 1
+repository = "https://github.com/servo/servo"
+tag = "v0.6.0"
+commit = "c78d2c206f80a1c8b67eefa97f773bba513205d3"
+source_directory = "servo"
+archive_url = "https://github.com/servo/servo/archive/refs/tags/v0.6.0.tar.gz"
+archive_sha256 = "9f4b0223d5d6f2f327a4628fc69dd53ffffe2d8928e7f9623d066d528980baf8"
+local_source_patches = []
+license_file = "servo/LICENSE"
+
+[verification]
+method = "Compare every upstream regular file and symlink with the extracted tag archive"
+regular_files = 195277
+symlinks = 3
+regular_file_bytes = 778970103
+ignored_local_artifacts = ["servo/.venv"]
+
+[build]
+rust_toolchain = "1.97.1"
+linux_clang_major = 19
+macos_compiler = "Apple Clang with the system linker; see the macOS configuration example"
+servo_default_features = false
+servo_features = ["bundled", "brotli-compression-stream", "webcrypto", "webgl"]
+js_jit = false
+media_backend = "dummy"
+configuration_examples = [".cargo/config.example.toml", ".cargo/config.macos.example.toml"]

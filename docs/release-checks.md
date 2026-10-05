@@ -29,7 +29,7 @@ Use `doctor --deny-warnings --max-risk medium` when you need the full human-read
 Use `--json` in CI and read `diagnostics.readiness.ready_for_dev`, `ready_for_bundle`, `ready_for_gui_smoke`, `blockers`, and `warnings`.
 Use `check --dev --bundle --json --report-path target/axion/reports/check.json` when CI only needs the aggregate workflow result, `failure_phase`, `next_step`, ordered `next_steps`, typed `next_actions`, dev preflight status, and bundle preflight status. Upload `target/axion/reports/check.json` as the lightweight readiness artifact, and read `artifacts[]` for the recommended dev, bundle, and release report paths to collect next.
 Use `bundle --json` when CI needs the generated bundle layout, platform metadata, copied icon/executable paths, verification counters, checked paths, and final `result`. Add `--report-path <path>` to upload the bundle report as an artifact.
-Use `release --json` when CI needs the full preview artifact workflow result in `axion.release-report.v1`. Pass `--check-report-path target/axion/reports/check.json` to reuse a matching successful check report for doctor, readiness, self-test, and bundle-preflight state. The report includes `check_report`, `failure_phase`, `failed_reasons`, an `artifacts[]` inventory, and archive verification details when `--archive` is used.
+Use `release --json` when CI needs the full preview artifact workflow result in `axion.release-report.v1`. Pass `--check-report-path target/axion/reports/check.json` to reuse matching successful self-test and bundle-preflight state. The current doctor gate and readiness always run; manifest/frontend/icon content, framework version and risk parameters must match the report identity. Old reports without an identity require a fresh check. The report includes `check_report`, `failure_phase`, `failed_reasons`, an `artifacts[]` inventory, and archive verification details when `--archive` is used.
 
 ## Full Local Gate
 
@@ -59,7 +59,7 @@ cargo run -p axion-cli -- report target/axion/reports/hello-gui-smoke.json --all
 
 ## Optional CI Preview
 
-The GitHub Actions workflow includes a manual `workflow_dispatch` input named `run_release_preview`. It is intentionally not a default pull request gate. When enabled, it runs the hello release preview, checks `axion.release-report.v1`, verifies `result = "ok"`, confirms archive verification passed, and uploads:
+The GitHub Actions workflow includes a manual `workflow_dispatch` input named `run_release_preview`. It is intentionally not a default pull request gate. When enabled, it generates an application, runs its release preview, unpacks the archive, hides the source directory, starts the deployed executable under xvfb, and checks `axion.release-report.v1`, verifies `result = "ok"`, confirms archive verification passed, and uploads:
 
 - `target/axion/reports/hello-release.json`
 - `target/axion/reports/hello-bundle.json`

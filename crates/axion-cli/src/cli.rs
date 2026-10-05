@@ -85,6 +85,10 @@ pub struct BundleArgs {
     #[arg(long)]
     pub executable: Option<PathBuf>,
 
+    /// Select the Cargo binary; required when the package produces several binaries.
+    #[arg(long, requires = "build_executable", conflicts_with = "executable")]
+    pub bin: Option<String>,
+
     #[arg(long)]
     pub report_path: Option<PathBuf>,
 
@@ -218,6 +222,10 @@ pub struct ReleaseArgs {
 
     #[arg(long)]
     pub executable: Option<PathBuf>,
+
+    /// Select the Cargo binary; required when the package produces several binaries.
+    #[arg(long, conflicts_with_all = ["executable", "skip_build_executable"])]
+    pub bin: Option<String>,
 
     #[arg(long)]
     pub report_path: Option<PathBuf>,

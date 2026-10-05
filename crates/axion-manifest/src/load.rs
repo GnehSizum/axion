@@ -2,6 +2,11 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use axion_core::capabilities::{
+    is_known_capability_profile, is_valid_capability_name as is_valid_command_name,
+    is_valid_capability_name as is_valid_event_name, is_valid_protocol_name,
+    profile_expansions as capability_profile_expansions,
+};
 use axion_core::{
     AppConfig, AppIdentity, BuildConfig, BundleConfig, CapabilityConfig, CapabilityProfileConfig,
     ClipboardBackendConfig, ClipboardConfig, DevServerConfig, DialogBackendConfig, DialogConfig,
@@ -104,6 +109,16 @@ pub enum ManifestError {
     InvalidNativeClipboardBackend { path: PathBuf, value: String },
     #[error("manifest at {path} defines invalid native.lifecycle.close_timeout_ms '{value}'")]
     InvalidNativeLifecycleCloseTimeout { path: PathBuf, value: u64 },
+    #[error("manifest at {path} has invalid application configuration: {source}")]
+    InvalidConfig {
+        path: PathBuf,
+        #[source]
+        source: axion_core::AxionError,
+    },
+    #[error("cannot prepare deployment manifest at {path}: {message}")]
+    Deployment { path: PathBuf, message: String },
+    #[error("failed to serialize deployment manifest")]
+    Serialize(#[from] toml::ser::Error),
 }
 
 pub fn load_from_path(path: impl AsRef<Path>) -> Result<ManifestDocument, ManifestError> {
@@ -166,6 +181,18 @@ pub fn load_app_config_from_path(path: impl AsRef<Path>) -> Result<AppConfig, Ma
         })
         .transpose()?;
 
+    if manifest.build.frontend_dist.as_os_str().is_empty() {
+        return Err(ManifestError::InvalidConfig {
+            path,
+            source: axion_core::AxionError::MissingFrontendDist,
+        });
+    }
+    if manifest.build.entry.as_os_str().is_empty() {
+        return Err(ManifestError::InvalidConfig {
+            path,
+            source: axion_core::AxionError::MissingBuildEntry,
+        });
+    }
     let build = BuildConfig::new(
         resolve_path(&manifest_dir, manifest.build.frontend_dist),
         resolve_path(&manifest_dir, manifest.build.entry),
@@ -191,7 +218,7 @@ pub fn load_app_config_from_path(path: impl AsRef<Path>) -> Result<AppConfig, Ma
         .collect::<Result<_, _>>()?;
     reject_unknown_capability_windows(&path, &windows, &capabilities)?;
 
-    Ok(AppConfig {
+    let mut config = AppConfig {
         identity,
         windows,
         dev,
@@ -199,7 +226,12 @@ pub fn load_app_config_from_path(path: impl AsRef<Path>) -> Result<AppConfig, Ma
         bundle,
         native,
         capabilities,
-    })
+    };
+    config
+        .resolve_capabilities()
+        .and_then(|()| config.validate())
+        .map_err(|source| ManifestError::InvalidConfig { path, source })?;
+    Ok(config)
 }
 
 fn native_config_from_manifest(
@@ -240,6 +272,19 @@ fn native_config_from_manifest(
                 }
             };
             config = config.with_clipboard(ClipboardConfig { backend });
+        }
+    }
+
+    if let Some(fs) = native.fs {
+        if let Some(dir) = fs.app_data_dir {
+            if dir.as_os_str().is_empty() {
+                return Err(ManifestError::InvalidConfig {
+                    path: path.to_path_buf(),
+                    source: axion_core::AxionError::InvalidAppDataDirectory,
+                });
+            }
+            config = config
+                .with_app_data_dir(resolve_path(path.parent().unwrap_or(Path::new(".")), dir));
         }
     }
 
@@ -490,112 +535,6 @@ fn merge_profile_expansions(profiles: &[CapabilityProfileConfig]) -> CapabilityP
     expansion
 }
 
-fn capability_profile_expansions(profiles: &[String]) -> Vec<CapabilityProfileConfig> {
-    profiles
-        .iter()
-        .map(|profile| {
-            let mut commands = profile_commands(profile)
-                .iter()
-                .map(|value| (*value).to_owned())
-                .collect::<Vec<_>>();
-            commands.sort();
-            commands.dedup();
-            let mut events = profile_events(profile)
-                .iter()
-                .map(|value| (*value).to_owned())
-                .collect::<Vec<_>>();
-            events.sort();
-            events.dedup();
-            let mut protocols = profile_protocols(profile)
-                .iter()
-                .map(|value| (*value).to_owned())
-                .collect::<Vec<_>>();
-            protocols.sort();
-            protocols.dedup();
-
-            CapabilityProfileConfig {
-                profile: profile.clone(),
-                commands,
-                events,
-                protocols,
-            }
-        })
-        .collect()
-}
-
-fn profile_commands(profile: &str) -> &'static [&'static str] {
-    match profile {
-        "app-info" => &["app.ping", "app.info", "app.version", "app.echo"],
-        "app-control" => &["app.exit"],
-        "window-control" => &[
-            "window.info",
-            "window.reload",
-            "window.focus",
-            "window.set_title",
-            "window.set_size",
-            "window.show",
-            "window.hide",
-            "window.close",
-            "window.confirm_close",
-            "window.prevent_close",
-        ],
-        "multi-window" => &[
-            "window.list",
-            "window.info",
-            "window.reload",
-            "window.focus",
-            "window.set_title",
-            "window.close",
-            "window.confirm_close",
-            "window.prevent_close",
-        ],
-        "clipboard-access" => &["clipboard.read_text", "clipboard.write_text"],
-        "shell-access" => &["shell.open"],
-        "file-access" => &[
-            "fs.create_dir",
-            "fs.exists",
-            "fs.list_dir",
-            "fs.read_text",
-            "fs.remove",
-            "fs.write_text",
-        ],
-        "dialog-access" => &["dialog.open", "dialog.save"],
-        _ => &[],
-    }
-}
-
-fn profile_events(profile: &str) -> &'static [&'static str] {
-    match profile {
-        "app-events" => &["app.log"],
-        _ => &[],
-    }
-}
-
-fn profile_protocols(profile: &str) -> &'static [&'static str] {
-    match profile {
-        "minimal" | "app-info" | "app-control" | "app-events" | "window-control"
-        | "multi-window" | "clipboard-access" | "shell-access" | "file-access"
-        | "dialog-access" => &["axion"],
-        _ => &[],
-    }
-}
-
-fn is_known_capability_profile(value: &str) -> bool {
-    matches!(
-        value,
-        "minimal"
-            | "app-info"
-            | "app-control"
-            | "app-events"
-            | "window-control"
-            | "multi-window"
-            | "clipboard-access"
-            | "shell-access"
-            | "file-access"
-            | "dialog-access"
-    )
-}
-
 fn merge_capability_values(mut first: Vec<String>, second: Vec<String>) -> Vec<String> {
     first.extend(second);
     first
@@ -684,31 +623,6 @@ fn normalize_capability_values(
     normalized.sort();
     normalized.dedup();
     Ok(normalized)
-}
-
-fn is_valid_command_name(value: &str) -> bool {
-    value.split('.').all(|segment| {
-        !segment.is_empty()
-            && segment.chars().all(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
-            })
-    })
-}
-
-fn is_valid_event_name(value: &str) -> bool {
-    is_valid_command_name(value)
-}
-
-fn is_valid_protocol_name(value: &str) -> bool {
-    let mut characters = value.chars();
-    let Some(first) = characters.next() else {
-        return false;
-    };
-
-    first.is_ascii_lowercase()
-        && characters.all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-        })
 }
 
 fn manifest_windows(
@@ -967,6 +881,48 @@ backend = "system"
             config.native.clipboard.backend,
             ClipboardBackendConfig::System
         );
+    }
+
+    #[test]
+    fn manifest_loader_rejects_empty_build_paths_before_resolution() {
+        for field in ["frontend_dist", "entry"] {
+            let value = "[app]\nname = \"hello\"\n[build]\nfrontend_dist = \"frontend\"\nentry = \"frontend/index.html\"\n";
+            let value = if field == "frontend_dist" {
+                value.replace("frontend_dist = \"frontend\"", "frontend_dist = \"\"")
+            } else {
+                value.replace("entry = \"frontend/index.html\"", "entry = \"\"")
+            };
+            assert!(matches!(
+                load_app_config_from_path(write_manifest(&value)),
+                Err(ManifestError::InvalidConfig {
+                    source: axion_core::AxionError::MissingFrontendDist
+                        | axion_core::AxionError::MissingBuildEntry,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn manifest_loader_rejects_empty_app_data_directory() {
+        let manifest_path = write_manifest(
+            r#"
+[app]
+name = "hello"
+[build]
+frontend_dist = "frontend"
+entry = "frontend/index.html"
+[native.fs]
+app_data_dir = ""
+"#,
+        );
+        assert!(matches!(
+            load_app_config_from_path(manifest_path),
+            Err(ManifestError::InvalidConfig {
+                source: axion_core::AxionError::InvalidAppDataDirectory,
+                ..
+            })
+        ));
     }
 
     #[test]

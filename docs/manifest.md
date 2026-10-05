@@ -145,7 +145,8 @@ Dialog and clipboard backends are configured independently:
 
 - `[native.dialog] backend = "headless" | "system"`.
 - `[native.clipboard] backend = "memory" | "system"`.
-- `[native.lifecycle] close_timeout_ms = 3000`: close-confirmation timeout before the preview backend applies its default allow action.
+- `[native.lifecycle] close_timeout_ms = 3000`: positive close-confirmation timeout before the preview backend applies its default allow action. Zero is rejected by both the TOML loader and Rust Builder.
+- `[native.fs] app_data_dir = "test-data"`: optional nonempty data root, resolved relative to the manifest. Use it for development or isolated tests. Without an override, production uses the OS user data directory under a stable application identifier; deployment manifests remove development overrides.
 
 The clipboard `memory` backend is the default and stores text inside the current runtime. The `system` backend uses macOS `pbcopy` / `pbpaste`; unsupported platforms fall back to `memory` and report the effective backend in diagnostics. `axion doctor` reports both configured and effective native backends before launch.
 
@@ -168,7 +169,7 @@ Built-in profiles:
 - `app-info`: enables `app.ping`, `app.info`, `app.version`, and `app.echo`.
 - `app-control`: enables `app.exit` for application shutdown.
 - `app-events`: enables frontend `app.log` events.
-- `window-control`: enables current-window control commands such as `window.info`, `window.close`, `window.confirm_close`, `window.prevent_close`, `window.reload`, `window.focus`, `window.set_title`, and `window.set_size`.
+- `window-control`: enables window control commands (the calling window is the default; an explicit `target` may name another existing window) such as `window.info`, `window.close`, `window.confirm_close`, `window.prevent_close`, `window.reload`, `window.focus`, `window.set_title`, and `window.set_size`.
 - `multi-window`: enables multi-window coordination commands including `window.list`, `window.info`, `window.close`, `window.confirm_close`, `window.prevent_close`, `window.reload`, `window.focus`, and `window.set_title`.
 - `clipboard-access`: enables `clipboard.read_text` and `clipboard.write_text` using the configured preview text clipboard backend.
 - `shell-access`: enables validated `shell.open` URL launch requests through the platform opener.
@@ -184,3 +185,9 @@ Avoid duplicating profile-provided permissions in explicit lists:
 profiles = ["app-info"]
 commands = ["demo.greet"] # app.ping/app.info/app.version/app.echo already come from app-info
 ```
+
+## Validation and unknown fields
+
+`AppConfig::validate` and `AppConfig::resolve_capabilities` share the invariants used by the Rust Builder and manifest loader. Profile expansion comes from the core catalog. Hand-written cached profile expansions or effective permission sets must match their declarations. Protocol capability names use a lowercase letter followed by lowercase letters, digits, or hyphens, matching the existing TOML contract in Rust configuration as well. Commands or events require the `axion` protocol, window ids must exist, sizes must be nonzero, and close timeouts must be positive.
+
+Unknown TOML fields remain loadable for forward compatibility. `axion doctor` reports their full field paths as warnings; `--deny-warnings` makes these warnings fail the gate. For example, `window.visibile` is reported instead of silently appearing to configure visibility. Deployed applications load `axion.toml` beside packaged resources relative to `current_exe`; malformed packaged configuration fails instead of falling back to the development checkout.

@@ -1,5 +1,6 @@
+use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use axion_runtime::json_string_literal;
@@ -7,11 +8,9 @@ use axion_runtime::json_string_literal;
 use crate::cli::{BundleArgs, DoctorArgs, ReleaseArgs, SelfTestArgs};
 use crate::commands::bundle::{bundle_report, write_report_if_requested};
 use crate::commands::doctor::{doctor_gate_for_manifest, doctor_readiness_for_manifest};
-use crate::commands::report_util::{
-    json_array_section, json_bool_field, json_object_section, json_string_array_literal,
-    json_string_array_values, json_string_field, optional_json_string_literal,
-};
+use crate::commands::report_util::{json_string_array_literal, optional_json_string_literal};
 use crate::error::AxionCliError;
+use serde::Deserialize;
 
 pub fn run(args: ReleaseArgs) -> Result<(), AxionCliError> {
     let mut report = release_report(&args);
@@ -35,59 +34,50 @@ pub fn run(args: ReleaseArgs) -> Result<(), AxionCliError> {
 fn release_report(args: &ReleaseArgs) -> ReleaseReport {
     let mut report = ReleaseReport::new(args);
 
-    if let Some(check_report_path) = &args.check_report_path {
-        match load_check_report_reuse(check_report_path, &args.manifest_path) {
-            Ok(check) => {
-                report.check_report_reused = true;
-                report.doctor_passed = true;
-                report.ready_for_dev = check.ready_for_dev;
-                report.ready_for_bundle = check.ready_for_bundle;
-                report.ready_for_gui_smoke = check.ready_for_gui_smoke;
-                report.readiness_warnings = check.readiness_warnings;
-                report.self_test_passed = true;
-            }
-            Err(error) => {
-                report.check_report_error = Some(error.to_string());
-                report.doctor_passed = false;
-                report.doctor_failures.push(error.to_string());
-            }
+    let doctor_args = DoctorArgs {
+        manifest_path: args.manifest_path.clone(),
+        json: false,
+        deny_warnings: true,
+        max_risk: Some(args.max_risk),
+    };
+    match doctor_gate_for_manifest(&doctor_args) {
+        Ok(gate) => {
+            report.doctor_passed = gate.passed_status();
+            report.doctor_failures = gate.failed_reasons().to_vec();
         }
-    } else {
-        let doctor_args = DoctorArgs {
-            manifest_path: args.manifest_path.clone(),
-            json: false,
-            deny_warnings: true,
-            max_risk: Some(args.max_risk),
-        };
-
-        match doctor_gate_for_manifest(&doctor_args) {
-            Ok(gate) => {
-                report.doctor_passed = gate.passed_status();
-                report.doctor_failures = gate.failed_reasons().to_vec();
-            }
-            Err(error) => {
-                report.doctor_passed = false;
-                report.doctor_failures.push(error.to_string());
-            }
+        Err(error) => {
+            report.doctor_failures.push(error.to_string());
         }
-
-        match doctor_readiness_for_manifest(&args.manifest_path) {
-            Ok(readiness) => {
-                report.ready_for_dev = readiness.ready_for_dev();
-                report.ready_for_bundle = readiness.ready_for_bundle();
-                report.ready_for_gui_smoke = readiness.ready_for_gui_smoke();
-                report.readiness_blockers = readiness.blockers().to_vec();
-                report.readiness_warnings = readiness.warnings().to_vec();
-            }
-            Err(error) => {
-                report.ready_for_dev = false;
-                report.ready_for_bundle = false;
-                report.ready_for_gui_smoke = false;
-                report.readiness_blockers.push(error.to_string());
-            }
+    }
+    match doctor_readiness_for_manifest(&args.manifest_path) {
+        Ok(readiness) => {
+            report.ready_for_dev = readiness.ready_for_dev();
+            report.ready_for_bundle = readiness.ready_for_bundle();
+            report.ready_for_gui_smoke = readiness.ready_for_gui_smoke();
+            report.readiness_blockers = readiness.blockers().to_vec();
+            report.readiness_warnings = readiness.warnings().to_vec();
         }
-
-        if report.doctor_passed && report.ready_for_dev {
+        Err(error) => {
+            report.readiness_blockers.push(error.to_string());
+        }
+    }
+    if report.doctor_passed && report.ready_for_dev {
+        if let Some(check_report_path) = &args.check_report_path {
+            match load_check_report_reuse(
+                check_report_path,
+                &args.manifest_path,
+                args.max_risk.as_str(),
+            ) {
+                Ok(()) => {
+                    report.check_report_reused = true;
+                    report.self_test_passed = true;
+                }
+                Err(error) => {
+                    report.check_report_error = Some(error.to_string());
+                    report.self_test_error = Some(error.to_string());
+                }
+            }
+        } else {
             match crate::commands::self_test::run(SelfTestArgs {
                 manifest_path: args.manifest_path.clone(),
                 output_dir: None,
@@ -107,6 +97,7 @@ fn release_report(args: &ReleaseArgs) -> ReleaseReport {
             manifest_path: args.manifest_path.clone(),
             output_dir: args.output_dir.clone(),
             executable: args.executable.clone(),
+            bin: args.bin.clone(),
             report_path: args.bundle_report_path.clone(),
             build_executable: !args.skip_build_executable,
             json: true,
@@ -628,103 +619,73 @@ impl ArtifactReport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CheckReportReuse {
+#[derive(Deserialize)]
+struct ReusableCheckReport {
+    schema: String,
+    manifest_path: PathBuf,
+    check_identity: Option<String>,
+    max_risk: String,
+    result: String,
+    doctor: PassedCheck,
+    self_test: PassedCheck,
+    bundle_preflight: PassedCheck,
+    readiness: CheckedReadiness,
+}
+
+#[derive(Deserialize)]
+struct PassedCheck {
+    passed: bool,
+}
+
+#[derive(Deserialize)]
+struct CheckedReadiness {
     ready_for_dev: bool,
     ready_for_bundle: bool,
-    ready_for_gui_smoke: bool,
-    readiness_warnings: Vec<String>,
 }
 
 fn load_check_report_reuse(
     check_report_path: &Path,
     manifest_path: &Path,
-) -> Result<CheckReportReuse, std::io::Error> {
+    max_risk: &str,
+) -> Result<(), std::io::Error> {
     let body = fs::read_to_string(check_report_path)?;
-    if json_string_field(&body, "schema").as_deref() != Some("axion.check-report.v1") {
-        return Err(std::io::Error::new(
+    let check: ReusableCheckReport = serde_json::from_str(&body).map_err(|error| {
+        std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "check report schema must be axion.check-report.v1",
-        ));
+            format!("invalid check report JSON: {error}"),
+        )
+    })?;
+    let invalid = |message| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
+    if check.schema != "axion.check-report.v1" {
+        return Err(invalid("check report schema must be axion.check-report.v1"));
     }
-    if json_string_field(&body, "manifest_path").as_deref()
-        != Some(&manifest_path.display().to_string())
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
+    if check.manifest_path.canonicalize()? != manifest_path.canonicalize()? {
+        return Err(invalid(
             "check report manifest_path does not match release manifest",
         ));
     }
-    if json_string_field(&body, "result").as_deref() != Some("ok") {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "check report result must be ok",
+    if check.result != "ok" || !check.doctor.passed || !check.self_test.passed {
+        return Err(invalid(
+            "check report result, doctor and self_test must pass",
         ));
     }
-
-    let doctor = json_object_section(&body, "\"doctor\"").ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "check report missing doctor",
-        )
-    })?;
-    let readiness = json_object_section(&body, "\"readiness\"").ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "check report missing readiness",
-        )
-    })?;
-    let self_test = json_object_section(&body, "\"self_test\"").ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "check report missing self_test",
-        )
-    })?;
-    let bundle_preflight = json_object_section(&body, "\"bundle_preflight\"").ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "check report missing bundle_preflight",
-        )
-    })?;
-
-    if json_bool_field(doctor, "passed") != Some(true) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "check report doctor gate must pass",
-        ));
+    if !check.bundle_preflight.passed {
+        return Err(invalid("check report bundle_preflight must pass"));
     }
-    if json_bool_field(self_test, "passed") != Some(true) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "check report self_test must pass",
-        ));
-    }
-    if json_bool_field(bundle_preflight, "passed") != Some(true) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "check report bundle_preflight must pass",
-        ));
-    }
-
-    let ready_for_dev = json_bool_field(readiness, "ready_for_dev").unwrap_or(false);
-    let ready_for_bundle = json_bool_field(readiness, "ready_for_bundle").unwrap_or(false);
-    let ready_for_gui_smoke = json_bool_field(readiness, "ready_for_gui_smoke").unwrap_or(false);
-    let readiness_warnings = json_array_section(readiness, "\"warnings\"")
-        .map(json_string_array_values)
-        .unwrap_or_default();
-    if !ready_for_dev || !ready_for_bundle {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
+    if !check.readiness.ready_for_dev || !check.readiness.ready_for_bundle {
+        return Err(invalid(
             "check report readiness must be ready for dev and bundle",
         ));
     }
-
-    Ok(CheckReportReuse {
-        ready_for_dev,
-        ready_for_bundle,
-        ready_for_gui_smoke,
-        readiness_warnings,
-    })
+    if check.max_risk != max_risk
+        || check.check_identity.as_deref()
+            != Some(super::check_identity::check_identity(manifest_path, max_risk)?.as_str())
+    {
+        return Err(invalid(
+            "check report content identity or check parameters changed; run check again",
+        ));
+    }
+    Ok(())
 }
 
 fn create_archive(
@@ -734,6 +695,13 @@ fn create_archive(
     let bundle_dir =
         bundle_dir.ok_or_else(|| std::io::Error::other("bundle_dir is unavailable"))?;
     let archive_path = archive_path.unwrap_or_else(|| default_archive_path(&bundle_dir));
+    if resolved_output_path(&archive_path)?.starts_with(&bundle_dir.canonicalize()?) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "archive output must be outside the bundle directory",
+        )
+        .into());
+    }
     if let Some(parent) = archive_path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -742,7 +710,7 @@ fn create_archive(
     write_tar_archive(&bundle_dir, &archive_path)?;
     let bytes = fs::metadata(&archive_path)?.len();
     let fingerprint = fnv1a64_file_hex(&archive_path)?;
-    let verification = verify_archive(&archive_path, bytes, &fingerprint);
+    let verification = verify_archive(&archive_path, &bundle_dir, bytes, &fingerprint);
     let passed = verification.passed;
     let error = verification.error.clone();
 
@@ -759,6 +727,7 @@ fn create_archive(
 
 fn verify_archive(
     path: &Path,
+    source_dir: &Path,
     expected_bytes: u64,
     expected_fingerprint: &str,
 ) -> ArchiveVerification {
@@ -777,11 +746,14 @@ fn verify_archive(
             )),
         },
         Ok(_) => match fnv1a64_file_hex(path) {
-            Ok(actual) if actual == expected_fingerprint => ArchiveVerification {
-                checked: true,
-                passed: true,
-                error: None,
-            },
+            Ok(actual) if actual == expected_fingerprint => {
+                let result = verify_archive_members(path, source_dir);
+                ArchiveVerification {
+                    checked: true,
+                    passed: result.is_ok(),
+                    error: result.err().map(|error| error.to_string()),
+                }
+            }
             Ok(actual) => ArchiveVerification {
                 checked: true,
                 passed: false,
@@ -841,106 +813,216 @@ fn default_archive_path(bundle_dir: &Path) -> PathBuf {
 
 fn write_tar_archive(source_dir: &Path, archive_path: &Path) -> Result<(), std::io::Error> {
     let source_dir = source_dir.canonicalize()?;
+    if resolved_output_path(archive_path)?.starts_with(&source_dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "archive output must be outside the bundle directory",
+        ));
+    }
     let root_name = source_dir
         .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "bundle".to_owned());
-    let mut output = fs::File::create(archive_path)?;
-    write_tar_entries(&mut output, &source_dir, &source_dir, &root_name)?;
-    output.write_all(&[0_u8; 1024])?;
-    Ok(())
+        .ok_or_else(|| std::io::Error::other("bundle has no directory name"))?;
+    let mut output = tar::Builder::new(fs::File::create(archive_path)?);
+    append_tar_entries(&mut output, &source_dir, &source_dir, Path::new(root_name))?;
+    output.finish()
 }
 
-fn write_tar_entries(
-    output: &mut fs::File,
+fn resolved_output_path(path: &Path) -> Result<PathBuf, std::io::Error> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut existing = absolute.as_path();
+    let mut suffix = Vec::new();
+    while !existing.exists() {
+        suffix.push(
+            existing
+                .file_name()
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "archive path cannot be resolved",
+                    )
+                })?
+                .to_owned(),
+        );
+        existing = existing
+            .parent()
+            .ok_or_else(|| std::io::Error::other("archive path has no existing ancestor"))?;
+    }
+    let mut resolved = existing.canonicalize()?;
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
+fn archive_mode(metadata: &fs::Metadata) -> u32 {
+    if metadata.is_dir() {
+        return 0o755;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 != 0 {
+            return 0o755;
+        }
+    }
+    0o644
+}
+
+fn append_tar_entries(
+    output: &mut tar::Builder<fs::File>,
     root: &Path,
     current: &Path,
-    root_name: &str,
+    root_name: &Path,
 ) -> Result<(), std::io::Error> {
     let relative = current.strip_prefix(root).map_err(std::io::Error::other)?;
-    let entry_name = if relative.as_os_str().is_empty() {
-        root_name.to_owned()
-    } else {
-        format!("{root_name}/{}", relative_path_string(relative))
-    };
-    let metadata = fs::metadata(current)?;
+    let name = root_name.join(relative);
+    let metadata = fs::symlink_metadata(current)?;
+    let mut header = tar::Header::new_gnu();
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_mode(archive_mode(&metadata));
     if metadata.is_dir() {
-        write_tar_header(output, &format!("{entry_name}/"), 0, b'5', 0o755)?;
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_size(0);
+        header.set_cksum();
+        output.append_data(&mut header, name, std::io::empty())?;
         let mut entries = fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(|entry| entry.path());
         for entry in entries {
-            write_tar_entries(output, root, &entry.path(), root_name)?;
+            append_tar_entries(output, root, &entry.path(), root_name)?;
         }
     } else if metadata.is_file() {
-        write_tar_header(output, &entry_name, metadata.len(), b'0', 0o644)?;
-        let mut file = fs::File::open(current)?;
-        std::io::copy(&mut file, output)?;
-        pad_tar_entry(output, metadata.len())?;
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(metadata.len());
+        header.set_cksum();
+        output.append_data(&mut header, name, fs::File::open(current)?)?;
+    } else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "bundle archive contains a symlink or unsupported file type",
+        ));
     }
     Ok(())
 }
 
-fn write_tar_header(
-    output: &mut fs::File,
-    name: &str,
-    size: u64,
-    entry_type: u8,
+#[derive(Debug)]
+struct ArchiveMember {
+    directory: bool,
     mode: u32,
+    bytes: u64,
+    fingerprint: Option<String>,
+}
+
+fn expected_archive_members(
+    root: &Path,
+    current: &Path,
+    root_name: &Path,
+    members: &mut BTreeMap<PathBuf, ArchiveMember>,
 ) -> Result<(), std::io::Error> {
-    if name.len() > 100 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("tar path is too long: {name}"),
+    let metadata = fs::symlink_metadata(current)?;
+    if !metadata.is_dir() && !metadata.is_file() {
+        return Err(std::io::Error::other(
+            "bundle contains an unsupported archive member",
         ));
     }
-
-    let mut header = [0_u8; 512];
-    write_tar_field(&mut header[0..100], name.as_bytes());
-    write_tar_octal(&mut header[100..108], u64::from(mode));
-    write_tar_octal(&mut header[108..116], 0);
-    write_tar_octal(&mut header[116..124], 0);
-    write_tar_octal(&mut header[124..136], size);
-    write_tar_octal(&mut header[136..148], 0);
-    header[148..156].fill(b' ');
-    header[156] = entry_type;
-    write_tar_field(&mut header[257..263], b"ustar\0");
-    write_tar_field(&mut header[263..265], b"00");
-
-    let checksum = header.iter().map(|byte| u64::from(*byte)).sum();
-    write_tar_octal(&mut header[148..156], checksum);
-    output.write_all(&header)
+    let name = root_name.join(current.strip_prefix(root).map_err(std::io::Error::other)?);
+    members.insert(
+        name,
+        ArchiveMember {
+            directory: metadata.is_dir(),
+            mode: archive_mode(&metadata),
+            bytes: if metadata.is_file() {
+                metadata.len()
+            } else {
+                0
+            },
+            fingerprint: if metadata.is_file() {
+                Some(fnv1a64_file_hex(current)?)
+            } else {
+                None
+            },
+        },
+    );
+    if metadata.is_dir() {
+        for entry in fs::read_dir(current)? {
+            expected_archive_members(root, &entry?.path(), root_name, members)?;
+        }
+    }
+    Ok(())
 }
 
-fn write_tar_field(field: &mut [u8], value: &[u8]) {
-    let length = value.len().min(field.len());
-    field[..length].copy_from_slice(&value[..length]);
-}
-
-fn write_tar_octal(field: &mut [u8], value: u64) {
-    let width = field.len();
-    let encoded = format!("{value:0width$o}\0", width = width - 1);
-    field.copy_from_slice(encoded.as_bytes());
-}
-
-fn pad_tar_entry(output: &mut fs::File, size: u64) -> Result<(), std::io::Error> {
-    let remainder = size % 512;
-    if remainder != 0 {
-        let padding = 512 - remainder;
-        output.write_all(&vec![0_u8; padding as usize])?;
+fn verify_archive_members(archive_path: &Path, source_dir: &Path) -> Result<(), std::io::Error> {
+    let source_dir = source_dir.canonicalize()?;
+    let root_name = source_dir
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("bundle has no directory name"))?;
+    let mut expected = BTreeMap::new();
+    expected_archive_members(
+        &source_dir,
+        &source_dir,
+        Path::new(root_name),
+        &mut expected,
+    )?;
+    let mut archive = tar::Archive::new(fs::File::open(archive_path)?);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        if path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(std::io::Error::other("archive member has an unsafe path"));
+        }
+        let member = expected.remove(&path).ok_or_else(|| {
+            std::io::Error::other(format!(
+                "unexpected or duplicate archive member: {}",
+                path.display()
+            ))
+        })?;
+        let kind = entry.header().entry_type();
+        if (member.directory && !kind.is_dir())
+            || (!member.directory && !kind.is_file())
+            || entry.header().mode()? != member.mode
+            || entry.header().size()? != member.bytes
+        {
+            return Err(std::io::Error::other(format!(
+                "archive member type, mode or size differs: {}",
+                path.display()
+            )));
+        }
+        if let Some(fingerprint) = member.fingerprint {
+            if fnv1a64_reader_hex(&mut entry)? != fingerprint {
+                return Err(std::io::Error::other(format!(
+                    "archive member content differs: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if !expected.is_empty() {
+        return Err(std::io::Error::other("archive is missing bundle members"));
     }
     Ok(())
 }
 
 fn fnv1a64_file_hex(path: &Path) -> Result<String, std::io::Error> {
+    fnv1a64_reader_hex(&mut fs::File::open(path)?)
+}
+
+fn fnv1a64_reader_hex(reader: &mut impl Read) -> Result<String, std::io::Error> {
     const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
 
-    let mut file = fs::File::open(path)?;
     let mut hash = FNV_OFFSET_BASIS;
     let mut buffer = [0_u8; 8192];
 
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = reader.read(&mut buffer)?;
         if read == 0 {
             break;
         }
@@ -951,16 +1033,6 @@ fn fnv1a64_file_hex(path: &Path) -> Result<String, std::io::Error> {
     }
 
     Ok(format!("{hash:016x}"))
-}
-
-fn relative_path_string(path: &Path) -> String {
-    path.components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 fn optional_json_u64(value: Option<u64>) -> String {
@@ -1004,6 +1076,7 @@ mod tests {
             manifest_path: manifest,
             output_dir: None,
             executable: None,
+            bin: None,
             report_path: Some(PathBuf::from("target/axion/reports/release.json")),
             bundle_report_path: Some(PathBuf::from("target/axion/reports/bundle.json")),
             check_report_path: None,
@@ -1053,50 +1126,160 @@ mod tests {
         assert!(report.verification.error.is_none());
     }
 
-    #[test]
-    fn check_report_reuse_validates_manifest_and_gates() {
+    fn check_fixture() -> (PathBuf, PathBuf) {
         let root = temp_dir("axion-release-check-report");
-        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(root.join("frontend")).unwrap();
+        fs::write(root.join("frontend/index.html"), "hello").unwrap();
         let manifest = root.join("axion.toml");
-        let check_report = root.join("check.json");
+        fs::write(&manifest, "[app]\nname = \"review-demo\"\n[window]\nid = \"main\"\ntitle = \"Review\"\n[build]\nfrontend_dist = \"frontend\"\nentry = \"frontend/index.html\"\n").unwrap();
+        let report = root.join("check.json");
+        let identity = super::super::check_identity::check_identity(&manifest, "medium").unwrap();
+        fs::write(&report, serde_json::to_string_pretty(&serde_json::json!({
+            "schema":"axion.check-report.v1", "manifest_path":manifest, "check_identity":identity, "max_risk":"medium", "result":"ok",
+            "doctor":{"passed":true}, "self_test":{"passed":true}, "bundle_preflight":{"passed":true}, "readiness":{"ready_for_dev":true,"ready_for_bundle":true}
+        })).unwrap()).unwrap();
+        (manifest, report)
+    }
+
+    #[test]
+    fn check_report_reuse_binds_resources_manifest_and_parameters() {
+        let (manifest, report) = check_fixture();
+        load_check_report_reuse(&report, &manifest, "medium").unwrap();
+        assert!(load_check_report_reuse(&report, &manifest, "low").is_err());
         fs::write(
-            &check_report,
-            format!(
-                "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"doctor\":{{\"passed\":true}},\"readiness\":{{\"ready_for_dev\":true,\"ready_for_bundle\":true,\"ready_for_gui_smoke\":false,\"warnings\":[\"dev server warning\"]}},\"self_test\":{{\"passed\":true}},\"bundle_preflight\":{{\"passed\":true}},\"result\":\"ok\"}}",
-                axion_runtime::json_string_literal(&manifest.display().to_string())
-            ),
+            manifest.parent().unwrap().join("frontend/index.html"),
+            "changed",
         )
         .unwrap();
+        assert!(
+            load_check_report_reuse(&report, &manifest, "medium")
+                .unwrap_err()
+                .to_string()
+                .contains("identity")
+        );
+        let (manifest, report) = check_fixture();
+        let mut source = fs::read_to_string(&manifest).unwrap();
+        source.push_str("\n# changed configuration\n");
+        fs::write(&manifest, source).unwrap();
+        assert!(load_check_report_reuse(&report, &manifest, "medium").is_err());
+    }
 
-        let reuse = load_check_report_reuse(&check_report, &manifest)
-            .expect("valid check report should be reusable");
-
-        assert!(reuse.ready_for_dev);
-        assert!(reuse.ready_for_bundle);
-        assert!(!reuse.ready_for_gui_smoke);
-        assert_eq!(
-            reuse.readiness_warnings,
-            vec!["dev server warning".to_owned()]
+    #[test]
+    fn check_report_reuse_rejects_failed_bundle_preflight_and_old_reports() {
+        let (manifest, report) = check_fixture();
+        let mut body: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&report).unwrap()).unwrap();
+        body["bundle_preflight"]["passed"] = false.into();
+        fs::write(&report, body.to_string()).unwrap();
+        assert!(
+            load_check_report_reuse(&report, &manifest, "medium")
+                .unwrap_err()
+                .to_string()
+                .contains("bundle_preflight must pass")
+        );
+        body["bundle_preflight"]["passed"] = true.into();
+        body.as_object_mut().unwrap().remove("check_identity");
+        fs::write(&report, body.to_string()).unwrap();
+        assert!(
+            load_check_report_reuse(&report, &manifest, "medium")
+                .unwrap_err()
+                .to_string()
+                .contains("identity")
         );
     }
 
     #[test]
-    fn check_report_reuse_rejects_failed_bundle_preflight() {
-        let root = temp_dir("axion-release-check-report-bundle");
+    fn archive_output_cannot_overwrite_bundle_input() {
+        let root = temp_dir("axion-release-overlap");
         fs::create_dir_all(&root).unwrap();
-        let manifest = root.join("axion.toml");
-        let check_report = root.join("check.json");
-        fs::write(
-            &check_report,
-            format!(
-                "{{\"schema\":\"axion.check-report.v1\",\"manifest_path\":{},\"doctor\":{{\"passed\":true}},\"readiness\":{{\"ready_for_dev\":true,\"ready_for_bundle\":true,\"ready_for_gui_smoke\":true,\"warnings\":[]}},\"self_test\":{{\"passed\":true}},\"bundle_preflight\":{{\"passed\":false}},\"result\":\"ok\"}}",
-                axion_runtime::json_string_literal(&manifest.display().to_string())
-            ),
-        )
-        .unwrap();
+        let file = root.join("keep.txt");
+        fs::write(&file, "keep").unwrap();
+        assert!(create_archive(Some(root), Some(file.clone())).is_err());
+        assert_eq!(fs::read_to_string(file).unwrap(), "keep");
+    }
 
-        let error = load_check_report_reuse(&check_report, &manifest).unwrap_err();
-
-        assert!(error.to_string().contains("bundle_preflight must pass"));
+    #[cfg(unix)]
+    #[test]
+    fn archive_preserves_executable_permissions_after_unpack() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_dir("axion-release-executable");
+        let bundle = root.join("demo.app");
+        fs::create_dir_all(&bundle).unwrap();
+        let executable = bundle.join("demo");
+        fs::write(&executable, "#!/bin/sh\nprintf working").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o751)).unwrap();
+        let archive = root.join("demo.tar");
+        create_archive(Some(bundle.clone()), Some(archive.clone())).unwrap();
+        let extracted = root.join("unpacked");
+        tar::Archive::new(fs::File::open(&archive).unwrap())
+            .unpack(&extracted)
+            .unwrap();
+        let result = std::process::Command::new(extracted.join("demo.app/demo"))
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(result.stdout, b"working");
+        // A syntactically valid archive with the wrong mode must fail semantic verification.
+        let mut writer = tar::Builder::new(fs::File::create(&archive).unwrap());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_cksum();
+        writer
+            .append_data(&mut header, "demo.app", std::io::empty())
+            .unwrap();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_size(fs::metadata(&executable).unwrap().len());
+        header.set_cksum();
+        writer
+            .append_data(
+                &mut header,
+                "demo.app/demo",
+                fs::File::open(&executable).unwrap(),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+        drop(writer);
+        let result = super::verify_archive(
+            &archive,
+            &bundle,
+            fs::metadata(&archive).unwrap().len(),
+            &super::fnv1a64_file_hex(&archive).unwrap(),
+        );
+        assert!(!result.passed);
+        assert!(result.error.unwrap().contains("mode"));
+    }
+    #[test]
+    fn cached_report_never_bypasses_the_current_doctor_gate() {
+        let (manifest, check_report) = check_fixture();
+        let mut source = fs::read_to_string(&manifest).unwrap();
+        source.push_str("\n[capabilities.main]\nprofiles = [\"file-access\"]\n");
+        fs::write(&manifest, source).unwrap();
+        let report = release_report(&ReleaseArgs {
+            manifest_path: manifest,
+            output_dir: None,
+            executable: None,
+            bin: None,
+            report_path: None,
+            bundle_report_path: None,
+            check_report_path: Some(check_report),
+            max_risk: DoctorRisk::Low,
+            skip_build_executable: true,
+            archive: false,
+            archive_path: None,
+            keep_artifacts: false,
+            json: true,
+        });
+        assert!(!report.doctor_passed);
+        assert!(!report.check_report_reused);
+        assert_eq!(report.result, "failed");
+        assert!(
+            report
+                .doctor_failures
+                .iter()
+                .any(|reason| reason.contains("risk"))
+        );
     }
 }
