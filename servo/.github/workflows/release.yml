@@ -36,11 +36,24 @@ jobs:
       name: publish
       deployment: false
     steps:
+      - name: Validate release tag
+        if: ${{ inputs.release_tag != '' && inputs.regular_release }}
+        run: |
+          # Check if the tag starts with a v and is cargo-semver compatible, i.e `vX.Y.Z` with
+          # an optional `-suffix`.
+          if [[ ! "${{ inputs.release_tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-.+)?$ ]]; then
+            echo "Error: release_tag '${{ inputs.release_tag }}' is not of the form vX.Y.Z or vX.Y.Z-<suffix>."
+            exit 1
+          fi
       - id: create-release
         run: |
           if [[ "${{ inputs.release_tag }}" != "" ]]; then
             RELEASE_TAG="${{ inputs.release_tag }}"
-            RELEASE_NOTES="Servo release ${{ inputs.release_tag }}"
+            if [[ "${{ inputs.regular_release }}" == "true" ]]; then
+              RELEASE_NOTES="Servo release ${{ inputs.release_tag }}"
+            else
+              RELEASE_NOTES="Servo release ${{ inputs.release_tag }} based on ${{ github.repository }}@${{ github.sha }}"          
+            fi
           else
             RELEASE_TAG=$(date "+%F")
             RELEASE_NOTES="Nightly build based on servo/servo@${{ github.sha }}"
@@ -53,7 +66,7 @@ jobs:
           TEMP_TAG=$(basename "$RELEASE_URL")
           RELEASE_ID=$( \
             gh api -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
             "/repos/${RELEASE_REPO}/releases/tags/${TEMP_TAG}" \
             | jq '.id' \
           )
@@ -75,24 +88,29 @@ jobs:
     runs-on: ubuntu-latest
     environment: *publish-environment
     steps:
-      - name: Publish as latest (success)
+      - name: Publish release (success)
         if: ${{ !contains(needs.*.result, 'failure') && (!contains(needs.*.result, 'cancelled') && !cancelled()) }}
+        env:
+          MAKE_LATEST: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
         run: |
           gh api \
             --method PATCH \
             -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
             /repos/${RELEASE_REPO}/releases/${RELEASE_ID} \
-            -F draft=false
-      - name: Publish as latest (failure)
+            -F draft=false \
+            -f make_latest="${MAKE_LATEST}"
+      - name: Publish release (failure)
         if: ${{ contains(needs.*.result, 'failure') || (contains(needs.*.result, 'cancelled') || cancelled()) }}
         run: |
           gh api \
             --method PATCH \
             -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
             /repos/${RELEASE_REPO}/releases/${RELEASE_ID} \
-            -F prerelease=true -F draft=false
+            -F prerelease=true \
+            -F draft=false \
+            -f make_latest=false
     env:
       GITHUB_TOKEN: ${{ inputs.regular_release && github.token || secrets.NIGHTLY_REPO_TOKEN }}
       RELEASE_ID: ${{ needs.create-draft-release.outputs.release-id }}
@@ -101,6 +119,15 @@ jobs:
       - upload-vendored-source
       - upload-artifacts-nightly
       - upload-artifacts-release
+      # Add all build-* jobs here, so that the we take the `Publish release (failure)` branch, if
+      # any of the build jobs failed.
+      - build-android
+      - build-linux
+      - build-linux-arm64
+      - build-mac
+      - build-mac-arm64
+      - build-ohos
+      - build-win
 
   publish-crates-io:
     name: 'Publish to crates.io'
@@ -111,6 +138,10 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       id-token: write
+    env:
+      SERVO_CRATES_IO_SLEEP_AFTER_PUBLISH_SECONDS: "30"
+      SERVO_CRATES_IO_VERIFY_PUBLISHED_TIMEOUT_SECONDS: "300"
+      SERVO_CRATES_IO_VERIFY_PUBLISHED_INTERVAL_SECONDS: "10"
     steps:
       - uses: actions/checkout@v6
       - uses: rust-lang/crates-io-auth-action@v1
@@ -118,14 +149,24 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-          SERVO_CRATES_IO_SLEEP_AFTER_PUBLISH_SECONDS: "30"
-          SERVO_CRATES_IO_VERIFY_PUBLISHED_TIMEOUT_SECONDS: "300"
-          SERVO_CRATES_IO_VERIFY_PUBLISHED_INTERVAL_SECONDS: "10"
         # Verification requires building, which is incredibly slow and also increases our attack surface.
         # If we decide for an extra verification, we should add a seperate job before this one, which
         # does a `dry-run` publish without any elevated permissions.
         run: |
           python3 etc/ci/publish_crates_io.py --no-verify
+      # For a whole workspace publish the above step will run into the token expiry,
+      # which the script handles by exiting (code 0) before the predicted expiry.
+      # Other failures, will still cause the workflow to fail
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth2
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth2.outputs.token }}
+        # Since we assume 2 tries (2*25 minutes) should be enough to publish our workspace,
+        # add `--fail-on-timeout` so the workflow fails if the assumption is violated
+        # Otherwise this does exactly the same as the above publish step.
+        run: |
+          python3 etc/ci/publish_crates_io.py --no-verify --fail-on-timeout
 
   build-win:
     # This job is only useful when run on upstream servo.
@@ -160,7 +201,7 @@ jobs:
         run: |
           python3 etc/vendor_servo.py --filename "${ARTIFACT_BASENAME}"
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ env.ARTIFACT_FILENAME }}
       - name: Upload vendored archive to release
@@ -173,8 +214,11 @@ jobs:
 
   upload-artifacts-nightly:
     # Only run scheduled nightly builds on upstream servo.
+    # Partial failures of the build jobs are accepted for nightly.
     if: |
-      (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch')
+      !cancelled() 
+        && needs.create-draft-release.result == 'success'
+        && (github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch')
         && (inputs.regular_release || false) == false
     runs-on: ubuntu-latest
     permissions:
@@ -187,6 +231,7 @@ jobs:
       - build-mac
       - build-mac-arm64
       - build-linux
+      - build-linux-arm64
       - build-android
       - build-ohos
     strategy: &upload-artifacts-strategy
@@ -201,6 +246,8 @@ jobs:
             artifact_platform: mac-arm64
           - artifact_ids: ${{ needs.build-linux.outputs.artifact_ids }}
             artifact_platform: linux
+          - artifact_ids: ${{ needs.build-linux-arm64.outputs.artifact_ids }}
+            artifact_platform: linux-arm64
           - artifact_ids: ${{ needs.build-android.outputs.artifact_ids }}
             artifact_platform: android
           - artifact_ids: ${{ needs.build-ohos.outputs.artifact_ids }}
@@ -236,7 +283,7 @@ jobs:
           merge-multiple: true
           path: release-artifacts
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: 'release-artifacts/*'
       - name: Upload release artifacts
@@ -294,13 +341,22 @@ jobs:
       profile: "production"
       force-github-hosted-runner: true  # <https://github.com/servo/servo/issues/33296>
 
+  build-linux-arm64:
+    # This job is only useful when run on upstream servo.
+    if: github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch'
+    name: Build production release (Linux Arm64)
+    uses: ./.github/workflows/linux-arm64.yml
+    with:
+      profile: "production"
+      force-github-hosted-runner: true  # <https://github.com/servo/servo/issues/33296>
+
   build-android:
     # This job is only useful when run on upstream servo.
     if: github.repository == 'servo/servo' || github.event_name == 'workflow_dispatch'
     name: Build release (Android)
     uses: ./.github/workflows/android.yml
     with:
-      profile: "release"
+      profile: "production"
     secrets: inherit
 
   build-ohos:

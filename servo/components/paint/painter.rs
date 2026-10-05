@@ -33,13 +33,15 @@ use servo_base::Epoch;
 use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_base::generic_channel::{GenericReceiver, GenericSharedMemory};
 use servo_base::id::{PainterId, PipelineId, WebViewId};
+use servo_base::threadboost::{BoostAffinity, ThreadPriority};
 use servo_config::{opts, pref};
 use servo_constellation_traits::{EmbedderToConstellationMessage, PaintMetricEvent};
 use servo_geometry::DeviceIndependentPixel;
 use smallvec::SmallVec;
 use style_traits::CSSPixel;
 use webrender::{
-    MemoryReport, ONE_TIME_USAGE_HINT, RenderApi, ShaderPrecacheFlags, Transaction, UploadMethod,
+    MemoryReport, ONE_TIME_USAGE_HINT, RenderApi, RenderBackendHooks, SceneBuilderHooks,
+    ShaderPrecacheFlags, Transaction, UploadMethod,
 };
 use webrender_api::units::{
     DevicePixel, DevicePoint, LayoutPoint, LayoutRect, LayoutSize, LayoutTransform, LayoutVector2D,
@@ -55,12 +57,12 @@ use webrender_api::{
 use wr_malloc_size_of::MallocSizeOfOps;
 
 use crate::Paint;
-use crate::largest_contentful_paint_calculator::LargestContentfulPaintCalculator;
 use crate::paint::{RepaintReason, WebRenderDebugOption};
 use crate::refresh_driver::{AnimationRefreshDriverObserver, BaseRefreshDriver};
 use crate::render_notifier::RenderNotifier;
 use crate::screenshot::ScreenshotTaker;
 use crate::web_content_animation::WebContentAnimator;
+#[cfg(feature = "webgl")]
 use crate::webrender_external_images::WebGLExternalImages;
 use crate::webview_renderer::{PinchZoomResult, ScrollResult, UnknownWebView, WebViewRenderer};
 
@@ -122,9 +124,6 @@ pub(crate) struct Painter {
     /// The channel on which messages can be sent to the constellation.
     embedder_to_constellation_sender: Sender<EmbedderToConstellationMessage>,
 
-    /// Calculater for largest-contentful-paint.
-    lcp_calculator: LargestContentfulPaintCalculator,
-
     /// A cache that stores data for all animating images uploaded to WebRender. This is used
     /// for animated images, which only need to update their offset in the data.
     animation_image_cache: FxHashMap<ImageKey, Arc<Vec<u8>>>,
@@ -163,13 +162,16 @@ impl Painter {
         let mut external_image_handlers = Box::new(WebRenderExternalImageHandlers::new(id_manager));
 
         // Set WebRender external image handler for WebGL textures.
-        let image_handler = Box::new(WebGLExternalImages::new(
-            paint.webgl_threads(),
-            rendering_context.clone(),
-            paint.swap_chains.clone(),
-            paint.busy_webgl_contexts_map.clone(),
-        ));
-        external_image_handlers.set_handler(image_handler, WebRenderImageHandlerType::WebGl);
+        #[cfg(feature = "webgl")]
+        {
+            let image_handler = Box::new(WebGLExternalImages::new(
+                paint.webgl_threads(),
+                rendering_context.clone(),
+                paint.webgl_paint.swap_chains.clone(),
+                paint.webgl_paint.busy_webgl_contexts_map.clone(),
+            ));
+            external_image_handlers.set_handler(image_handler, WebRenderImageHandlerType::WebGl);
+        }
 
         #[cfg(feature = "webgpu")]
         external_image_handlers.set_handler(
@@ -208,12 +210,18 @@ impl Painter {
         };
         let worker_threads = std::thread::available_parallelism()
             .map(|i| i.get())
-            .unwrap_or(pref!(threadpools_fallback_worker_num) as usize)
-            .min(pref!(threadpools_webrender_workers_max).max(1) as usize);
+            .unwrap_or(pref!(thread_pool_fallback_workers) as usize)
+            .min(pref!(thread_pool_webrender_workers_max).max(1) as usize);
         let workers = Some(Arc::new(
             rayon::ThreadPoolBuilder::new()
                 .num_threads(worker_threads)
                 .thread_name(|idx| format!("WRWorker#{}", idx))
+                .start_handler(|_| {
+                    servo_base::threadboost::boost_thread(
+                        ThreadPriority::Elevated,
+                        BoostAffinity::Boost,
+                    )
+                })
                 .build()
                 .expect("Unable to initialize WebRender worker pool."),
         ));
@@ -246,6 +254,8 @@ impl Painter {
                 // This ensures that we can use the `PainterId` as the `IdNamespace`, which allows mapping
                 // from `FontKey`, `FontInstanceKey`, and `ImageKey` back to `PainterId`.
                 namespace_alloc_by_client: true,
+                render_backend_hooks: Some(Box::new(BoostWebRenderThread)),
+                scene_builder_hooks: Some(Box::new(BoostWebRenderThread)),
                 shared_font_namespace: Some(painter_id.into()),
                 ..Default::default()
             },
@@ -278,7 +288,6 @@ impl Painter {
             webrender_gl,
             last_mouse_move_position: None,
             frame_delayer: Default::default(),
-            lcp_calculator: LargestContentfulPaintCalculator::new(),
             animation_image_cache: FxHashMap::default(),
             web_content_animator: WebContentAnimator::new(
                 paint.event_loop_waker.clone_box(),
@@ -291,11 +300,6 @@ impl Painter {
     }
 
     pub(crate) fn perform_updates(&mut self) {
-        // The WebXR thread may make a different context current
-        if let Err(err) = self.rendering_context.make_current() {
-            warn!("Failed to make the rendering context current: {:?}", err);
-        }
-
         let mut need_zoom = false;
         let scroll_offset_updates: Vec<_> = self
             .webview_renderers
@@ -463,8 +467,10 @@ impl Painter {
     /// the list.
     fn send_pending_paint_metrics_messages_after_composite(&mut self) {
         let paint_time = CrossProcessInstant::now();
-        for webview_renderer in self.webview_renderers.values() {
-            for (pipeline_id, pipeline) in webview_renderer.pipelines.iter() {
+        let mut paint_metric_events = Vec::new();
+
+        for webview_renderer in self.webview_renderers.values_mut() {
+            for (pipeline_id, pipeline) in webview_renderer.pipelines.iter_mut() {
                 let Some(current_epoch) = self
                     .webrender_renderer
                     .as_ref()
@@ -473,7 +479,7 @@ impl Painter {
                     continue;
                 };
 
-                match pipeline.first_paint_metric.get() {
+                match pipeline.first_paint_metric {
                     // We need to check whether the current epoch is later, because
                     // CrossProcessPaintMessage::SendInitialTransaction sends an
                     // empty display list to WebRender which can happen before we receive
@@ -489,17 +495,17 @@ impl Painter {
                             pipeline_id = ?pipeline_id,
                         );
 
-                        self.send_to_constellation(EmbedderToConstellationMessage::PaintMetric(
+                        paint_metric_events.push((
                             *pipeline_id,
                             PaintMetricEvent::FirstPaint(paint_time, first_reflow),
                         ));
 
-                        pipeline.first_paint_metric.set(PaintMetricState::Sent);
+                        pipeline.first_paint_metric = PaintMetricState::Sent;
                     },
                     _ => {},
                 }
 
-                match pipeline.first_contentful_paint_metric.get() {
+                match pipeline.first_contentful_paint_metric {
                     PaintMetricState::Seen(epoch, first_reflow) if epoch <= current_epoch => {
                         #[cfg(feature = "tracing")]
                         tracing::info!(
@@ -509,49 +515,47 @@ impl Painter {
                             paint_time = ?paint_time,
                             pipeline_id = ?pipeline_id,
                         );
-                        self.send_to_constellation(EmbedderToConstellationMessage::PaintMetric(
+                        paint_metric_events.push((
                             *pipeline_id,
                             PaintMetricEvent::FirstContentfulPaint(paint_time, first_reflow),
                         ));
-                        pipeline
-                            .first_contentful_paint_metric
-                            .set(PaintMetricState::Sent);
+                        pipeline.first_contentful_paint_metric = PaintMetricState::Sent;
                     },
                     _ => {},
                 }
 
-                match pipeline.largest_contentful_paint_metric.get() {
-                    PaintMetricState::Seen(epoch, _) if epoch <= current_epoch => {
-                        if let Some(lcp) = self
-                            .lcp_calculator
-                            .calculate_largest_contentful_paint(paint_time, pipeline_id.into())
-                        {
-                            #[cfg(feature = "tracing")]
-                            tracing::info!(
-                                name: "LargestContentfulPaint",
-                                servo_profiling = true,
-                                paint_time = ?paint_time,
-                                area = ?lcp.area,
-                                pipeline_id = ?pipeline_id,
-                            );
-                            self.send_to_constellation(
-                                EmbedderToConstellationMessage::PaintMetric(
-                                    *pipeline_id,
-                                    PaintMetricEvent::LargestContentfulPaint(
-                                        lcp.paint_time,
-                                        lcp.area,
-                                        lcp.url.clone(),
-                                    ),
-                                ),
-                            );
-                        }
-                        pipeline
-                            .largest_contentful_paint_metric
-                            .set(PaintMetricState::Sent);
-                    },
-                    _ => {},
+                let pending_lcp_candidates = &mut pipeline.lcp_candidates;
+                while let Some((epoch, candidate)) = pending_lcp_candidates.pop_front() {
+                    if epoch > current_epoch {
+                        pending_lcp_candidates.push_front((epoch, candidate));
+                        break;
+                    }
+                    #[cfg(feature = "tracing")]
+                    tracing::info!(
+                        name: "LargestContentfulPaint",
+                        servo_profiling = true,
+                        paint_time = ?paint_time,
+                        area = ?candidate.area,
+                        pipeline_id = ?pipeline_id,
+                    );
+                    paint_metric_events.push((
+                        *pipeline_id,
+                        PaintMetricEvent::LargestContentfulPaint(
+                            paint_time,
+                            candidate.area,
+                            candidate.url.clone(),
+                            candidate.id,
+                        ),
+                    ));
                 }
             }
+        }
+
+        for (pipeline_id, event) in paint_metric_events {
+            self.send_to_constellation(EmbedderToConstellationMessage::PaintMetric(
+                pipeline_id,
+                event,
+            ));
         }
     }
 
@@ -646,11 +650,10 @@ impl Painter {
                     should_snap: true,
                     paired_with_perspective: false,
                 },
-                webview_renderer.id.into(),
             );
 
-            let scaled_webview_rect = webview_renderer.rect
-                / webview_renderer.device_pixels_per_page_pixel_not_including_pinch_zoom();
+            let scaled_webview_rect = webview_renderer.rect /
+                webview_renderer.device_pixels_per_page_pixel_not_including_pinch_zoom();
             builder.push_iframe(
                 LayoutRect::from_untyped(&scaled_webview_rect.to_untyped()),
                 LayoutRect::from_untyped(&scaled_webview_rect.to_untyped()),
@@ -748,9 +751,9 @@ impl Painter {
         let mut flags = renderer.get_debug_flags();
         let flag = match option {
             WebRenderDebugOption::Profiler => {
-                webrender::DebugFlags::PROFILER_DBG
-                    | webrender::DebugFlags::GPU_TIME_QUERIES
-                    | webrender::DebugFlags::GPU_SAMPLE_QUERIES
+                webrender::DebugFlags::PROFILER_DBG |
+                    webrender::DebugFlags::GPU_TIME_QUERIES |
+                    webrender::DebugFlags::GPU_SAMPLE_QUERIES
             },
             WebRenderDebugOption::TextureCacheDebug => webrender::DebugFlags::TEXTURE_CACHE_DBG,
             WebRenderDebugOption::RenderTargetDebug => webrender::DebugFlags::RENDER_TARGET_DBG,
@@ -843,8 +846,6 @@ impl Painter {
         if let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) {
             webview_renderer.pipeline_exited(pipeline_id, pipeline_exit_source);
         }
-        self.lcp_calculator
-            .remove_lcp_candidates_for_pipeline(&pipeline_id.into());
     }
 
     pub(crate) fn send_initial_pipeline_transaction(
@@ -955,18 +956,16 @@ impl Painter {
         };
 
         let items_data = display_list_data.items_data;
-        let cache_data = display_list_data.cache_data;
         let spatial_tree = display_list_data.spatial_tree;
 
         let built_display_list = BuiltDisplayList::from_data(
             DisplayListPayload {
                 items_data,
-                cache_data,
                 spatial_tree,
             },
             display_list_descriptor,
         );
-        let _span = profile_traits::trace_span!("PaintMessage::SendDisplayList",).entered();
+        let _span = profile_traits::trace_span!("PaintMessage::SendDisplayList").entered();
         let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) else {
             return warn!("Could not find WebView for incoming display list");
         };
@@ -980,21 +979,16 @@ impl Painter {
 
         let epoch = display_list_info.epoch.into();
         let first_reflow = display_list_info.first_reflow;
-        if details.first_paint_metric.get() == PaintMetricState::Waiting
-            && display_list_info.is_paintable
+        if details.first_paint_metric == PaintMetricState::Waiting && display_list_info.is_paintable
         {
-            details
-                .first_paint_metric
-                .set(PaintMetricState::Seen(epoch, first_reflow));
+            details.first_paint_metric = PaintMetricState::Seen(epoch, first_reflow);
         }
 
-        if details.first_contentful_paint_metric.get() == PaintMetricState::Waiting
-            && display_list_info.is_paintable
-            && display_list_info.is_contentful
+        if details.first_contentful_paint_metric == PaintMetricState::Waiting &&
+            display_list_info.is_paintable &&
+            display_list_info.is_contentful
         {
-            details
-                .first_contentful_paint_metric
-                .set(PaintMetricState::Seen(epoch, first_reflow));
+            details.first_contentful_paint_metric = PaintMetricState::Seen(epoch, first_reflow);
         }
 
         details.animations.handle_new_display_list(
@@ -1046,7 +1040,7 @@ impl Painter {
     ) -> ImageData {
         match data {
             SerializableImageData::Raw(shared_memory) => {
-                let data = Arc::new(shared_memory.to_vec());
+                let data = shared_memory.into_arc_vec();
                 if is_animated_image {
                     self.animation_image_cache.insert(key, Arc::clone(&data));
                 }
@@ -1230,7 +1224,6 @@ impl Painter {
         };
 
         self.send_root_pipeline_display_list();
-        self.lcp_calculator.enable_for_webview(&webview_id);
     }
 
     pub(crate) fn is_empty(&mut self) -> bool {
@@ -1264,9 +1257,21 @@ impl Painter {
         if !webview_renderer.set_hidpi_scale_factor(new_scale_factor) {
             return;
         }
+        webview_renderer.webview.notify_viewport_updated();
 
         self.send_root_pipeline_display_list();
         self.set_needs_repaint(RepaintReason::Resize);
+    }
+
+    pub(crate) fn set_screen_size(
+        &mut self,
+        webview_id: WebViewId,
+        new_size: Size2D<f32, DevicePixel>,
+    ) {
+        let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) else {
+            return;
+        };
+        webview_renderer.set_screen_size(new_size);
     }
 
     pub(crate) fn resize_rendering_context(&mut self, new_size: PhysicalSize<u32>) {
@@ -1283,6 +1288,7 @@ impl Painter {
         let new_viewport_rect = Rect::from(new_size).to_box2d();
         for webview_renderer in self.webview_renderers.values_mut() {
             webview_renderer.set_rect(new_viewport_rect);
+            webview_renderer.webview.notify_viewport_updated();
         }
 
         let mut transaction = Transaction::new();
@@ -1294,8 +1300,10 @@ impl Painter {
     }
 
     pub(crate) fn set_page_zoom(&mut self, webview_id: WebViewId, new_zoom: f32) {
-        if let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) {
-            webview_renderer.set_page_zoom(Scale::new(new_zoom));
+        if let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) &&
+            webview_renderer.set_page_zoom(Scale::new(new_zoom))
+        {
+            webview_renderer.webview.notify_viewport_updated();
         }
     }
 
@@ -1327,10 +1335,7 @@ impl Painter {
                     InputEvent::MouseLeftViewport(_) => {
                         self.last_mouse_move_position = None;
                     },
-                    _ => {
-                        // Disable LCP calculation on any other input event except mouse moves.
-                        self.lcp_calculator.disable_for_webview(webview_id);
-                    },
+                    _ => {},
                 }
 
                 webview_renderer.notify_input_event(&self.webrender_api, &self.needs_repaint, event)
@@ -1346,16 +1351,6 @@ impl Painter {
         if let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) {
             webview_renderer.notify_scroll_event(scroll, point);
         }
-        // Disable LCP calculation on any scroll event.
-        self.lcp_calculator.disable_for_webview(webview_id);
-    }
-
-    pub(crate) fn enable_lcp_calculation(&mut self, webview_id: &WebViewId) {
-        self.lcp_calculator.enable_for_webview(webview_id);
-    }
-
-    pub(crate) fn lcp_calculation_enabled_for_webview(&self, webview_id: &WebViewId) -> bool {
-        self.lcp_calculator.enabled_for_webview(webview_id)
     }
 
     pub(crate) fn adjust_pinch_zoom(
@@ -1490,19 +1485,12 @@ impl Painter {
         pipeline_id: PipelineId,
         epoch: Epoch,
     ) {
-        if self.lcp_calculation_enabled_for_webview(&webview_id) {
-            self.lcp_calculator.append_lcp_candidate(
-                lcp_candidate,
-                pipeline_id.into(),
-                &webview_id,
-            );
-            if let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) {
-                webview_renderer
-                    .ensure_pipeline_details(pipeline_id)
-                    .largest_contentful_paint_metric
-                    .set(PaintMetricState::Seen(epoch.into(), false));
-            }
-        };
+        if let Some(webview_renderer) = self.webview_renderers.get_mut(&webview_id) {
+            webview_renderer
+                .ensure_pipeline_details(pipeline_id)
+                .lcp_candidates
+                .push_back((epoch.into(), lcp_candidate));
+        }
     }
 }
 
@@ -1593,4 +1581,39 @@ pub(crate) enum PaintMetricState {
     Seen(WebRenderEpoch, bool /* first_reflow */),
     /// The metric has been sent to the constellation and no more work needs to be done.
     Sent,
+}
+
+/// Hook implementation to boost webrender thread priority.
+struct BoostWebRenderThread;
+
+impl RenderBackendHooks for BoostWebRenderThread {
+    fn init_thread(&self) {
+        servo_base::threadboost::boost_thread(ThreadPriority::Elevated, BoostAffinity::Boost);
+    }
+}
+
+impl SceneBuilderHooks for BoostWebRenderThread {
+    fn register(&self) {
+        servo_base::threadboost::boost_thread(ThreadPriority::Elevated, BoostAffinity::Boost);
+    }
+
+    fn pre_scene_build(&self) {}
+
+    fn pre_scene_swap(&self) {}
+
+    fn post_scene_swap(
+        &self,
+        _document_id: &Vec<DocumentId>,
+        _info: webrender::PipelineInfo,
+        _schedule_frame: bool,
+    ) {
+    }
+
+    fn post_resource_update(&self, _document_ids: &Vec<DocumentId>) {}
+
+    fn post_empty_scene_build(&self) {}
+
+    fn poke(&self) {}
+
+    fn deregister(&self) {}
 }

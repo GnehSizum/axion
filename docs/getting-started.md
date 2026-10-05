@@ -4,9 +4,13 @@ Axion can generate a small Rust desktop app with a frontend page and an `axion.t
 
 ## Prerequisites
 
-- Rust toolchain compatible with this workspace (`rust-version = 1.86.0` or newer).
+- Rust toolchain compatible with this workspace (`rust-version = 1.88.0` or newer). Rust `1.97.1` is recommended to match the Servo `0.6.0` toolchain.
 - A GUI-capable desktop session for `servo-runtime` window launches.
 - This repository checked out with the vendored `servo/` directory present.
+
+The repository pins Rust `1.97.1` in `rust-toolchain.toml`. Before building with `servo-runtime`, copy `.cargo/config.macos.example.toml` on macOS, or `.cargo/config.example.toml` on other platforms, to `.cargo/config.toml`; merge the `[env]` entries instead if a local config already exists. Cargo does not load `servo/.cargo/config.toml` for a path dependency. Install the native build dependencies listed in the [Servo build guide](https://book.servo.org/building/building.html); on macOS, LLVM and Python must be available to the build tools.
+
+The macOS config requires Clang 19 or newer, uses the SDK-provided linker to avoid LLVM lld parsing failures with newer SDKs, and explicitly disables Rust symbol stripping to avoid the [macOS 27 dynamic-library alignment issue](https://github.com/rust-lang/rust/issues/157750) in Rust 1.97.1. This can increase release artifact size. If the system Clang is too old, put a newer LLVM Clang on PATH or set `CC`, `CXX`, `HOST_CC`, and `HOST_CXX` to its full paths while retaining the linker arguments.
 
 ## Run the Example
 
@@ -113,6 +117,8 @@ Use `--template native-api-demo` when you want generated UI and README guidance 
 
 Generated projects contain:
 
+- `rust-toolchain.toml`: Servo-compatible Rust toolchain
+- `.cargo/config.toml`: Servo build environment for the platform where the project was generated
 - `Cargo.toml`: path dependencies back to this Axion checkout
 - `.gitignore`: ignores `target/` build output, runtime data, bundles, and crash reports
 - `README.md`: generated app usage notes

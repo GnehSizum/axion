@@ -8,10 +8,11 @@ use std::ops::*;
 
 use byte_slice_cast::*;
 use euclid::default::Vector3D;
+use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
 
+use crate::audio_node::ChannelInterpretation;
 use crate::graph::{PortIndex, PortKind};
-use crate::node::ChannelInterpretation;
 
 // defined by spec
 // https://webaudio.github.io/web-audio-api/#render-quantum
@@ -114,7 +115,7 @@ impl Block {
     }
 
     pub fn for_vec(buffer: Vec<f32>) -> Self {
-        assert!(buffer.len() % FRAMES_PER_BLOCK_USIZE == 0);
+        assert!(buffer.len().is_multiple_of(FRAMES_PER_BLOCK_USIZE));
         Block {
             channels: (buffer.len() / FRAMES_PER_BLOCK_USIZE) as u8,
             repeat: false,
@@ -347,11 +348,11 @@ impl Block {
                     let mut v = Vec::with_capacity(FRAMES_PER_BLOCK_USIZE);
                     for frame in 0..FRAMES_PER_BLOCK_USIZE {
                         // output = 0.5 * (input.L + input.R + input.SL + input.SR);
-                        let o = 0.25
-                            * (self.data_chan_frame(frame, 0)
-                                + self.data_chan_frame(frame, 1)
-                                + self.data_chan_frame(frame, 2)
-                                + self.data_chan_frame(frame, 3));
+                        let o = 0.25 *
+                            (self.data_chan_frame(frame, 0) +
+                                self.data_chan_frame(frame, 1) +
+                                self.data_chan_frame(frame, 2) +
+                                self.data_chan_frame(frame, 3));
                         v.push(o);
                     }
                     self.buffer = v;
@@ -401,13 +402,15 @@ impl Block {
                     v.resize(2 * FRAMES_PER_BLOCK_USIZE, 0.);
                     for frame in 0..FRAMES_PER_BLOCK_USIZE {
                         // output.L = L + sqrt(0.5) * (input.C + input.SL)
-                        v[frame] = self.data_chan_frame(frame, 0)
-                            + SQRT_2
-                                * (self.data_chan_frame(frame, 2) + self.data_chan_frame(frame, 4));
+                        v[frame] = self.data_chan_frame(frame, 0) +
+                            SQRT_2 *
+                                (self.data_chan_frame(frame, 2) +
+                                    self.data_chan_frame(frame, 4));
                         // output.R = R + sqrt(0.5) * (input.C + input.SR)
-                        v[frame + FRAMES_PER_BLOCK_USIZE] = self.data_chan_frame(frame, 1)
-                            + SQRT_2
-                                * (self.data_chan_frame(frame, 2) + self.data_chan_frame(frame, 5));
+                        v[frame + FRAMES_PER_BLOCK_USIZE] = self.data_chan_frame(frame, 1) +
+                            SQRT_2 *
+                                (self.data_chan_frame(frame, 2) +
+                                    self.data_chan_frame(frame, 5));
                     }
                     self.buffer = v;
                     self.channels = 2;
@@ -420,11 +423,11 @@ impl Block {
                     v.resize(6 * FRAMES_PER_BLOCK_USIZE, 0.);
                     for frame in 0..FRAMES_PER_BLOCK_USIZE {
                         // output.L = L + sqrt(0.5) * input.C
-                        v[frame] = self.data_chan_frame(frame, 0)
-                            + SQRT_2 * self.data_chan_frame(frame, 2);
+                        v[frame] = self.data_chan_frame(frame, 0) +
+                            SQRT_2 * self.data_chan_frame(frame, 2);
                         // output.R = R + sqrt(0.5) * input.C
-                        v[frame + FRAMES_PER_BLOCK_USIZE] = self.data_chan_frame(frame, 1)
-                            + SQRT_2 * self.data_chan_frame(frame, 2);
+                        v[frame + FRAMES_PER_BLOCK_USIZE] = self.data_chan_frame(frame, 1) +
+                            SQRT_2 * self.data_chan_frame(frame, 2);
                         // output.SL = input.SL
                         v[frame + 2 * FRAMES_PER_BLOCK_USIZE] = self.data_chan_frame(frame, 4);
                         // output.SR = input.SR

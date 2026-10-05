@@ -6,19 +6,20 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use js::jsapi::{HandleValueArray, Heap, NewArrayObject, Value};
-use js::jsval::{ObjectValue, UndefinedValue};
+use js::jsval::ObjectValue;
 use js::rust::HandleValue as SafeHandleValue;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 
 use crate::dom::bindings::error::Error;
-use crate::dom::bindings::reflector::{DomGlobal, Reflector, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::dom::stream::defaultteereadrequest::DefaultTeeReadRequest;
 use crate::dom::stream::readablestreamdefaultreader::ReadRequest;
 use crate::dom::types::{ReadableStream, ReadableStreamDefaultReader};
-use crate::script_runtime::CanGc;
 
 #[derive(JSTraceable, MallocSizeOf)]
 pub(crate) enum DefaultTeeCancelAlgorithm {
@@ -45,11 +46,9 @@ pub(crate) struct DefaultTeeUnderlyingSource {
     #[conditional_malloc_size_of]
     clone_for_branch_2: Rc<Cell<bool>>,
     #[ignore_malloc_size_of = "mozjs"]
-    #[expect(clippy::redundant_allocation)]
-    reason_1: Rc<Box<Heap<Value>>>,
+    reason_1: Rc<Heap<Value>>,
     #[ignore_malloc_size_of = "mozjs"]
-    #[expect(clippy::redundant_allocation)]
-    reason_2: Rc<Box<Heap<Value>>>,
+    reason_2: Rc<Heap<Value>>,
     #[conditional_malloc_size_of]
     cancel_promise: Rc<Promise>,
     tee_cancel_algorithm: DefaultTeeCancelAlgorithm,
@@ -57,8 +56,9 @@ pub(crate) struct DefaultTeeUnderlyingSource {
 
 impl DefaultTeeUnderlyingSource {
     #[expect(clippy::too_many_arguments)]
-    #[expect(clippy::redundant_allocation)]
+    #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn new(
+        cx: &mut JSContext,
         reader: &ReadableStreamDefaultReader,
         stream: &ReadableStream,
         reading: Rc<Cell<bool>>,
@@ -66,13 +66,12 @@ impl DefaultTeeUnderlyingSource {
         canceled_1: Rc<Cell<bool>>,
         canceled_2: Rc<Cell<bool>>,
         clone_for_branch_2: Rc<Cell<bool>>,
-        reason_1: Rc<Box<Heap<Value>>>,
-        reason_2: Rc<Box<Heap<Value>>>,
+        reason_1: Rc<Heap<Value>>,
+        reason_2: Rc<Heap<Value>>,
         cancel_promise: Rc<Promise>,
         tee_cancel_algorithm: DefaultTeeCancelAlgorithm,
-        can_gc: CanGc,
     ) -> DomRoot<DefaultTeeUnderlyingSource> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(DefaultTeeUnderlyingSource {
                 reflector_: Reflector::new(),
                 reader: Dom::from_ref(reader),
@@ -90,7 +89,7 @@ impl DefaultTeeUnderlyingSource {
                 tee_cancel_algorithm,
             }),
             &*stream.global(),
-            can_gc,
+            cx,
         )
     }
 
@@ -104,15 +103,13 @@ impl DefaultTeeUnderlyingSource {
 
     /// <https://streams.spec.whatwg.org/#abstract-opdef-readablestreamdefaulttee>
     /// Let pullAlgorithm be the following steps:
-    pub(crate) fn pull_algorithm(&self, can_gc: CanGc) -> Rc<Promise> {
-        let cx = GlobalScope::get_cx();
+    pub(crate) fn pull_algorithm(&self, cx: &mut js::context::JSContext) -> Rc<Promise> {
         // If reading is true,
         if self.reading.get() {
             // Set readAgain to true.
             self.read_again.set(true);
             // Return a promise resolved with undefined.
-            rooted!(in(*cx) let mut rval = UndefinedValue());
-            return Promise::new_resolved(&self.stream.global(), cx, rval.handle(), can_gc);
+            return Promise::new_resolved(cx, &self.stream.global(), ());
         }
 
         // Set reading to true.
@@ -120,6 +117,7 @@ impl DefaultTeeUnderlyingSource {
 
         // Let readRequest be a read request with the following items:
         let tee_read_request = DefaultTeeReadRequest::new(
+            cx,
             &self.stream,
             &self.branch_1.get().expect("Branch 1 should be set."),
             &self.branch_2.get().expect("Branch 2 should be set."),
@@ -130,7 +128,6 @@ impl DefaultTeeUnderlyingSource {
             self.clone_for_branch_2.clone(),
             self.cancel_promise.clone(),
             self,
-            can_gc,
         );
 
         // Rooting: the tee read request is rooted above.
@@ -139,11 +136,10 @@ impl DefaultTeeUnderlyingSource {
         };
 
         // Perform ! ReadableStreamDefaultReaderRead(reader, readRequest).
-        self.reader.read(cx, &read_request, can_gc);
+        self.reader.read(cx, &read_request);
 
         // Return a promise resolved with undefined.
-        rooted!(in(*cx) let mut rval = UndefinedValue());
-        Promise::new_resolved(&self.stream.global(), cx, rval.handle(), can_gc)
+        Promise::new_resolved(cx, &self.stream.global(), ())
     }
 
     /// <https://streams.spec.whatwg.org/#abstract-opdef-readablestreamdefaulttee>
@@ -203,7 +199,6 @@ impl DefaultTeeUnderlyingSource {
         let cancel_result = self.stream.cancel(cx, global, reasons_value.handle());
 
         // Resolve cancelPromise with cancelResult.
-        self.cancel_promise
-            .resolve_native(&cancel_result, CanGc::from_cx(cx));
+        self.cancel_promise.resolve_native(cx, &cancel_result);
     }
 }

@@ -6,6 +6,8 @@
 use std::cell::Cell;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
+use script_bindings::reflector::reflect_dom_object_with_cx;
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
     GlType, InternalFormatIntVec, WebGLCommand, WebGLError, WebGLRenderbufferId, WebGLResult,
@@ -16,13 +18,12 @@ use crate::dom::bindings::codegen::Bindings::EXTColorBufferHalfFloatBinding::EXT
 use crate::dom::bindings::codegen::Bindings::WEBGLColorBufferFloatBinding::WEBGLColorBufferFloatConstants;
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{DomGlobal, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::webgl::webglframebuffer::WebGLFramebuffer;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
 use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
-use crate::script_runtime::CanGc;
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLRenderbuffer {
@@ -106,24 +107,27 @@ impl WebGLRenderbuffer {
         }
     }
 
-    pub(crate) fn maybe_new(context: &WebGLRenderingContext) -> Option<DomRoot<Self>> {
+    pub(crate) fn maybe_new(
+        cx: &mut JSContext,
+        context: &WebGLRenderingContext,
+    ) -> Option<DomRoot<Self>> {
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::CreateRenderbuffer(sender));
         receiver
             .recv()
             .unwrap()
-            .map(|id| WebGLRenderbuffer::new(context, id, CanGc::note()))
+            .map(|id| WebGLRenderbuffer::new(cx, context, id))
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         context: &WebGLRenderingContext,
         id: WebGLRenderbufferId,
-        can_gc: CanGc,
     ) -> DomRoot<Self> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(WebGLRenderbuffer::new_inherited(context, id)),
             &*context.global(),
-            can_gc,
+            cx,
         )
     }
 }
@@ -188,35 +192,35 @@ impl WebGLRenderbuffer {
             constants::RGBA4 | constants::DEPTH_COMPONENT16 | constants::STENCIL_INDEX8 => {
                 internal_format
             },
-            constants::R8
-            | constants::R8UI
-            | constants::R8I
-            | constants::R16UI
-            | constants::R16I
-            | constants::R32UI
-            | constants::R32I
-            | constants::RG8
-            | constants::RG8UI
-            | constants::RG8I
-            | constants::RG16UI
-            | constants::RG16I
-            | constants::RG32UI
-            | constants::RG32I
-            | constants::RGB8
-            | constants::RGBA8
-            | constants::SRGB8_ALPHA8
-            | constants::RGB10_A2
-            | constants::RGBA8UI
-            | constants::RGBA8I
-            | constants::RGB10_A2UI
-            | constants::RGBA16UI
-            | constants::RGBA16I
-            | constants::RGBA32I
-            | constants::RGBA32UI
-            | constants::DEPTH_COMPONENT24
-            | constants::DEPTH_COMPONENT32F
-            | constants::DEPTH24_STENCIL8
-            | constants::DEPTH32F_STENCIL8 => match webgl_version {
+            constants::R8 |
+            constants::R8UI |
+            constants::R8I |
+            constants::R16UI |
+            constants::R16I |
+            constants::R32UI |
+            constants::R32I |
+            constants::RG8 |
+            constants::RG8UI |
+            constants::RG8I |
+            constants::RG16UI |
+            constants::RG16I |
+            constants::RG32UI |
+            constants::RG32I |
+            constants::RGB8 |
+            constants::RGBA8 |
+            constants::SRGB8_ALPHA8 |
+            constants::RGB10_A2 |
+            constants::RGBA8UI |
+            constants::RGBA8I |
+            constants::RGB10_A2UI |
+            constants::RGBA16UI |
+            constants::RGBA16I |
+            constants::RGBA32I |
+            constants::RGBA32UI |
+            constants::DEPTH_COMPONENT24 |
+            constants::DEPTH_COMPONENT32F |
+            constants::DEPTH24_STENCIL8 |
+            constants::DEPTH32F_STENCIL8 => match webgl_version {
                 WebGLVersion::WebGL1 => return Err(WebGLError::InvalidEnum),
                 _ => internal_format,
             },
@@ -238,8 +242,8 @@ impl WebGLRenderbuffer {
                     constants::RGB8
                 }
             },
-            EXTColorBufferHalfFloatConstants::RGBA16F_EXT
-            | EXTColorBufferHalfFloatConstants::RGB16F_EXT => {
+            EXTColorBufferHalfFloatConstants::RGBA16F_EXT |
+            EXTColorBufferHalfFloatConstants::RGB16F_EXT => {
                 if !context
                     .extension_manager()
                     .is_half_float_buffer_renderable()

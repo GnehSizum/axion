@@ -7,12 +7,15 @@ use std::default::Default;
 use std::f64::consts::PI;
 
 use dom_struct::dom_struct;
+use embedder_traits::MouseButton;
 use euclid::Point2D;
+use js::context::JSContext;
 use js::rust::HandleObject;
 use keyboard_types::Modifiers;
 use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
 use script_bindings::match_domstring_ascii;
-use script_traits::ConstellationInputEvent;
+use script_bindings::reflector::reflect_dom_object_with_proto;
+use script_traits::{ConstellationInputEvent, MouseButtons};
 use style::Atom;
 use style_traits::CSSPixel;
 
@@ -22,7 +25,7 @@ use crate::dom::bindings::codegen::Bindings::MouseEventBinding::MouseEventMethod
 use crate::dom::bindings::codegen::Bindings::UIEventBinding::UIEventMethods;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{DomGlobal, reflect_dom_object_with_proto};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::document::FireMouseEventType;
@@ -33,7 +36,6 @@ use crate::dom::node::Node;
 use crate::dom::pointerevent::{PointerEvent, PointerId};
 use crate::dom::uievent::UIEvent;
 use crate::dom::window::Window;
-use crate::script_runtime::CanGc;
 
 /// <https://w3c.github.io/uievents/#interface-mouseevent>
 #[dom_struct]
@@ -72,10 +74,12 @@ pub(crate) struct MouseEvent {
     modifiers: Cell<Modifiers>,
 
     /// <https://w3c.github.io/uievents/#dom-mouseevent-button>
-    button: Cell<i16>,
+    #[no_trace]
+    button: Cell<MouseButton>,
 
     /// <https://w3c.github.io/uievents/#dom-mouseevent-buttons>
-    buttons: Cell<u16>,
+    #[no_trace]
+    buttons: Cell<MouseButtons>,
 
     #[no_trace]
     point_in_target: Cell<Option<Point2D<f32, CSSPixel>>>,
@@ -89,26 +93,27 @@ impl MouseEvent {
             client_point: Cell::new(Default::default()),
             page_point: Cell::new(Default::default()),
             modifiers: Cell::new(Modifiers::empty()),
-            button: Cell::new(0),
-            buttons: Cell::new(0),
+            button: Cell::new(MouseButton::Primary),
+            buttons: Cell::new(MouseButtons::empty()),
             point_in_target: Cell::new(None),
         }
     }
 
-    pub(crate) fn new_uninitialized(window: &Window, can_gc: CanGc) -> DomRoot<MouseEvent> {
-        Self::new_uninitialized_with_proto(window, None, can_gc)
+    pub(crate) fn new_uninitialized(cx: &mut JSContext, window: &Window) -> DomRoot<MouseEvent> {
+        Self::new_uninitialized_with_proto(cx, window, None)
     }
 
     fn new_uninitialized_with_proto(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
     ) -> DomRoot<MouseEvent> {
-        reflect_dom_object_with_proto(Box::new(MouseEvent::new_inherited()), window, proto, can_gc)
+        reflect_dom_object_with_proto(cx, Box::new(MouseEvent::new_inherited()), window, proto)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        cx: &mut JSContext,
         window: &Window,
         event_type: Atom,
         can_bubble: EventBubbles,
@@ -119,13 +124,13 @@ impl MouseEvent {
         client_point: Point2D<i32, CSSPixel>,
         page_point: Point2D<i32, CSSPixel>,
         modifiers: Modifiers,
-        button: i16,
-        buttons: u16,
+        button: MouseButton,
+        buttons: MouseButtons,
         related_target: Option<&EventTarget>,
         point_in_target: Option<Point2D<f32, CSSPixel>>,
-        can_gc: CanGc,
     ) -> DomRoot<MouseEvent> {
         Self::new_with_proto(
+            cx,
             window,
             None,
             event_type,
@@ -141,12 +146,12 @@ impl MouseEvent {
             buttons,
             related_target,
             point_in_target,
-            can_gc,
         )
     }
 
     #[allow(clippy::too_many_arguments)]
     fn new_with_proto(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
         event_type: Atom,
@@ -158,13 +163,12 @@ impl MouseEvent {
         client_point: Point2D<i32, CSSPixel>,
         page_point: Point2D<i32, CSSPixel>,
         modifiers: Modifiers,
-        button: i16,
-        buttons: u16,
+        button: MouseButton,
+        buttons: MouseButtons,
         related_target: Option<&EventTarget>,
         point_in_target: Option<Point2D<f32, CSSPixel>>,
-        can_gc: CanGc,
     ) -> DomRoot<MouseEvent> {
-        let ev = MouseEvent::new_uninitialized_with_proto(window, proto, can_gc);
+        let ev = MouseEvent::new_uninitialized_with_proto(cx, window, proto);
         ev.initialize_mouse_event(
             event_type,
             can_bubble,
@@ -183,7 +187,7 @@ impl MouseEvent {
         ev
     }
 
-    /// <https://w3c.github.io/uievents/#initialize-a-mouseevent>
+    /// <https://w3c.github.io/pointerevents/#initialize-a-mouseevent>
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn initialize_mouse_event(
         &self,
@@ -196,8 +200,8 @@ impl MouseEvent {
         client_point: Point2D<i32, CSSPixel>,
         page_point: Point2D<i32, CSSPixel>,
         modifiers: Modifiers,
-        button: i16,
-        buttons: u16,
+        button: MouseButton,
+        buttons: MouseButtons,
         related_target: Option<&EventTarget>,
         point_in_target: Option<Point2D<f32, CSSPixel>>,
     ) {
@@ -217,20 +221,21 @@ impl MouseEvent {
         self.buttons.set(buttons);
         self.upcast::<Event>().set_related_target(related_target);
         self.point_in_target.set(point_in_target);
-        // Legacy mapping per spec: left/middle/right => 1/2/3 (button + 1), else 0.
-        let w = if button >= 0 { (button as u32) + 1 } else { 0 };
-        self.uievent.set_which(w);
+
+        // From <https://w3c.github.io/uievents/#dom-uievent-which>:
+        // > For MouseEvents, this contains a value equal to the value stored in button+1.
+        self.uievent.set_which((i16::from(button) + 1) as u32);
     }
 
     pub(crate) fn new_for_platform_motion_event(
+        cx: &mut JSContext,
         window: &Window,
         event_name: FireMouseEventType,
         hit_test_result: &HitTestResult,
         input_event: &ConstellationInputEvent,
-        can_gc: CanGc,
     ) -> DomRoot<Self> {
         // These values come from the event tables in
-        // <https://w3c.github.io/uievents/#events-mouse-types>.
+        // <https://w3c.github.io/pointerevents/#mouse-event-types>.
         let (bubbles, cancelable, composed) = match event_name {
             FireMouseEventType::Move | FireMouseEventType::Over | FireMouseEventType::Out => {
                 (EventBubbles::Bubbles, EventCancelable::Cancelable, true)
@@ -243,6 +248,7 @@ impl MouseEvent {
         };
 
         let mouse_event = Self::new(
+            cx,
             window,
             Atom::from(event_name.as_str()),
             bubbles,
@@ -255,11 +261,10 @@ impl MouseEvent {
                 .point_relative_to_initial_containing_block
                 .to_i32(),
             input_event.active_keyboard_modifiers,
-            0i16,
+            MouseButton::Primary,
             input_event.pressed_mouse_buttons,
             None,
             None,
-            can_gc,
         );
 
         let event = mouse_event.upcast::<Event>();
@@ -269,18 +274,19 @@ impl MouseEvent {
         mouse_event
     }
 
-    /// Create a [MouseEvent] triggered by the embedder
-    /// <https://w3c.github.io/uievents/#create-a-cancelable-mouseevent-id>
+    /// Create a [MouseEvent] triggered by the embedder.
+    ///
+    /// <https://w3c.github.io/pointerevents/#create-a-cancelable-mouseevent>
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn for_platform_button_event(
+        cx: &mut JSContext,
         event_type: Atom,
         event: embedder_traits::MouseButtonEvent,
-        pressed_mouse_buttons: u16,
+        pressed_mouse_buttons: MouseButtons,
         window: &Window,
         hit_test_result: &HitTestResult,
         modifiers: Modifiers,
         click_count: usize,
-        can_gc: CanGc,
     ) -> DomRoot<Self> {
         let client_point = hit_test_result.point_in_frame.to_i32();
         let page_point = hit_test_result
@@ -288,6 +294,7 @@ impl MouseEvent {
             .to_i32();
 
         let mouse_event = Self::new(
+            cx,
             window,
             event_type,
             EventBubbles::Bubbles,
@@ -298,11 +305,10 @@ impl MouseEvent {
             client_point,
             page_point,
             modifiers,
-            event.button.into(),
+            event.button,
             pressed_mouse_buttons,
             None,
             Some(hit_test_result.point_in_node),
-            can_gc,
         );
 
         mouse_event.upcast::<Event>().set_trusted(true);
@@ -311,17 +317,13 @@ impl MouseEvent {
         mouse_event
     }
 
-    pub(crate) fn point_in_viewport(&self) -> Option<Point2D<f32, CSSPixel>> {
-        Some(self.client_point.get().to_f32())
-    }
-
     /// Create a PointerEvent from this MouseEvent.
     /// <https://w3c.github.io/pointerevents/#the-primary-pointer>
     /// For mouse, the pointer ID is always -1, and is_primary is always true.
     pub(crate) fn to_pointer_event(
         &self,
+        cx: &mut JSContext,
         event_type: Atom,
-        can_gc: CanGc,
     ) -> DomRoot<crate::dom::pointerevent::PointerEvent> {
         // TODO: This function should almost certainly accept an enumn for the event type.
         let is_pointer_down = &*event_type == "pointerdown";
@@ -329,22 +331,28 @@ impl MouseEvent {
         let is_pointer_up = &*event_type == "pointerup";
 
         // Pressure is 0.5 when button is down, 0.0 when up
-        let pressure = if is_pointer_down || (is_pointer_move && self.Buttons() != 0) {
+        let pressure = if is_pointer_down || (is_pointer_move && !self.buttons.get().is_empty()) {
             0.5
         } else {
             0.0
         };
 
         let button = if is_pointer_down || is_pointer_up {
-            self.Button()
+            self.button.get()
         } else {
-            -1
+            MouseButton::None
         };
+
+        // https://w3c.github.io/pointerevents/#dfn-attributes-and-default-actions
+        // For pointerenter and pointerleave events, the composed [DOM] attribute SHOULD be false;
+        // for all other pointer events in the table above, the attribute SHOULD be true.
+        let composed = !matches!(&*event_type, "pointerenter" | "pointerleave");
 
         let window = self.global();
         let window = window.as_window();
 
-        PointerEvent::new(
+        let pointer_event = PointerEvent::new(
+            cx,
             window,
             event_type,
             EventBubbles::from(self.upcast::<Event>().Bubbles()),
@@ -356,7 +364,7 @@ impl MouseEvent {
             Point2D::new(self.PageX(), self.PageY()),
             self.modifiers.get(),
             button,
-            self.Buttons(),
+            self.buttons.get(),
             self.GetRelatedTarget().as_deref(),
             self.point_in_target.get(),
             PointerId::Mouse as i32, // Mouse pointer ID is always -1
@@ -369,12 +377,15 @@ impl MouseEvent {
             0,        // twist
             PI / 2.0, // altitude_angle (perpendicular to surface)
             0.0,      // azimuth_angle
-            DOMString::from("mouse"),
+            DOMString::from_static("mouse"),
             true,   // is_primary (mouse is always primary)
             vec![], // coalesced_events
             vec![], // predicted_events
-            can_gc,
-        )
+        );
+
+        pointer_event.upcast::<Event>().set_composed(composed);
+
+        pointer_event
     }
 
     /// Create a PointerEvent for hover events (pointerover, pointerenter, pointerout, pointerleave).
@@ -382,8 +393,8 @@ impl MouseEvent {
     /// For mouse, the pointer ID is always -1, and is_primary is always true.
     pub(crate) fn to_pointer_hover_event(
         &self,
+        cx: &mut JSContext,
         event_type: &str,
-        can_gc: CanGc,
     ) -> DomRoot<crate::dom::pointerevent::PointerEvent> {
         // Determine bubbles and cancelable based on event type
         // pointerover/pointerout bubble and are cancelable
@@ -400,6 +411,7 @@ impl MouseEvent {
         let window = window.as_window();
 
         let pointer_event = PointerEvent::new(
+            cx,
             window,
             event_type.into(),
             bubbles,
@@ -410,8 +422,8 @@ impl MouseEvent {
             Point2D::new(self.ClientX(), self.ClientY()),
             Point2D::new(self.PageX(), self.PageY()),
             self.modifiers.get(),
-            -1, // button: -1 for hover events (no button pressed)
-            self.Buttons(),
+            MouseButton::None,
+            self.buttons.get(),
             self.GetRelatedTarget().as_deref(),
             self.point_in_target.get(),
             PointerId::Mouse as i32, // Mouse pointer ID is always -1
@@ -424,12 +436,17 @@ impl MouseEvent {
             0,                       // twist
             PI / 2.0,                // altitude_angle (perpendicular to surface)
             0.0,                     // azimuth_angle
-            DOMString::from("mouse"),
+            DOMString::from_static("mouse"),
             true,   // is_primary (mouse is always primary)
             vec![], // coalesced_events
             vec![], // predicted_events
-            can_gc,
         );
+
+        // https://w3c.github.io/pointerevents/#dfn-attributes-and-default-actions
+        // For pointerenter and pointerleave events, the composed [DOM] attribute SHOULD be false;
+        // for all other pointer events in the table above, the attribute SHOULD be true.
+        let composed = !matches!(event_type, "pointerenter" | "pointerleave");
+        pointer_event.upcast::<Event>().set_composed(composed);
 
         // Set trusted to match the source mouse event
         pointer_event
@@ -438,14 +455,22 @@ impl MouseEvent {
 
         pointer_event
     }
+
+    pub(crate) fn button(&self) -> MouseButton {
+        self.button.get()
+    }
+
+    pub(crate) fn buttons(&self) -> MouseButtons {
+        self.buttons.get()
+    }
 }
 
 impl MouseEventMethods<crate::DomTypeHolder> for MouseEvent {
-    /// <https://w3c.github.io/uievents/#dom-mouseevent-mouseevent>
+    /// <https://w3c.github.io/pointerevents/#dom-mouseevent-constructor>
     fn Constructor(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
         event_type: DOMString,
         init: &MouseEventBinding::MouseEventInit,
     ) -> Fallible<DomRoot<MouseEvent>> {
@@ -457,6 +482,7 @@ impl MouseEventMethods<crate::DomTypeHolder> for MouseEvent {
             scroll_offset.y as i32 + init.clientY,
         );
         let event = MouseEvent::new_with_proto(
+            cx,
             window,
             proto,
             event_type.into(),
@@ -468,11 +494,10 @@ impl MouseEventMethods<crate::DomTypeHolder> for MouseEvent {
             Point2D::new(init.clientX, init.clientY),
             page_point,
             init.parent.modifiers(),
-            init.button,
-            init.buttons,
+            init.button.into(),
+            MouseButtons::from_bits_retain(init.buttons),
             init.relatedTarget.as_deref(),
             None,
-            can_gc,
         );
         event
             .upcast::<Event>()
@@ -480,22 +505,22 @@ impl MouseEventMethods<crate::DomTypeHolder> for MouseEvent {
         Ok(event)
     }
 
-    /// <https://w3c.github.io/uievents/#widl-MouseEvent-screenX>
+    /// <https://w3c.github.io/pointerevents/#dom-mouseevent-screenx>
     fn ScreenX(&self) -> i32 {
         self.screen_point.get().x
     }
 
-    /// <https://w3c.github.io/uievents/#widl-MouseEvent-screenY>
+    /// <https://w3c.github.io/pointerevents/#dom-mouseevent-screeny>
     fn ScreenY(&self) -> i32 {
         self.screen_point.get().y
     }
 
-    /// <https://w3c.github.io/uievents/#widl-MouseEvent-clientX>
+    /// <https://w3c.github.io/pointerevents/#dom-mouseevent-clientx>
     fn ClientX(&self) -> i32 {
         self.client_point.get().x
     }
 
-    /// <https://w3c.github.io/uievents/#widl-MouseEvent-clientY>
+    /// <https://w3c.github.io/pointerevents/#dom-mouseevent-clienty>
     fn ClientY(&self) -> i32 {
         self.client_point.get().y
     }
@@ -586,42 +611,42 @@ impl MouseEventMethods<crate::DomTypeHolder> for MouseEvent {
         self.PageY()
     }
 
-    /// <https://w3c.github.io/uievents/#dom-mouseevent-ctrlkey>
+    /// <https://w3c.github.io/pointerevents/#dom-mouseevent-ctrlkey>
     fn CtrlKey(&self) -> bool {
         self.modifiers.get().contains(Modifiers::CONTROL)
     }
 
-    /// <https://w3c.github.io/uievents/#dom-mouseevent-shiftkey>
+    /// <https://w3c.github.io/pointerevents/#dom-mouseevent-shiftkey>
     fn ShiftKey(&self) -> bool {
         self.modifiers.get().contains(Modifiers::SHIFT)
     }
 
-    /// <https://w3c.github.io/uievents/#dom-mouseevent-altkey>
+    /// <https://w3c.github.io/pointerevents/#dom-mouseevent-altkey>
     fn AltKey(&self) -> bool {
         self.modifiers.get().contains(Modifiers::ALT)
     }
 
-    /// <https://w3c.github.io/uievents/#dom-mouseevent-metakey>
+    /// <https://w3c.github.io/pointerevents/#dom-mouseevent-metakey>
     fn MetaKey(&self) -> bool {
         self.modifiers.get().contains(Modifiers::META)
     }
 
-    /// <https://w3c.github.io/uievents/#dom-mouseevent-button>
+    /// <https://w3c.github.io/pointerevents/#dom-mouseevent-button>
     fn Button(&self) -> i16 {
-        self.button.get()
+        self.button.get().into()
     }
 
-    /// <https://w3c.github.io/uievents/#dom-mouseevent-buttons>
+    /// <https://w3c.github.io/pointerevents/#dom-mouseevent-buttons>
     fn Buttons(&self) -> u16 {
-        self.buttons.get()
+        self.buttons.get().bits()
     }
 
-    /// <https://w3c.github.io/uievents/#widl-MouseEvent-relatedTarget>
+    /// <https://w3c.github.io/pointerevents/#dom-mouseevent-relatedtarget>
     fn GetRelatedTarget(&self) -> Option<DomRoot<EventTarget>> {
         self.upcast::<Event>().related_target()
     }
 
-    /// <https://w3c.github.io/uievents/#widl-MouseEvent-initMouseEvent>
+    /// <https://w3c.github.io/pointerevents/#dom-mouseevent-initmouseevent>
     fn InitMouseEvent(
         &self,
         type_arg: DOMString,
@@ -678,7 +703,7 @@ impl MouseEventMethods<crate::DomTypeHolder> for MouseEvent {
         }
         self.modifiers.set(modifiers);
 
-        self.button.set(button_arg);
+        self.button.set(button_arg.into());
         self.upcast::<Event>()
             .set_related_target(related_target_arg);
 
@@ -696,7 +721,7 @@ impl MouseEventMethods<crate::DomTypeHolder> for MouseEvent {
         self.uievent.IsTrusted()
     }
 
-    /// <https://w3c.github.io/uievents/#dom-mouseevent-getmodifierstate>
+    /// <https://w3c.github.io/pointerevents/#dfn-getmodifierstate-keyarg>
     fn GetModifierState(&self, key_arg: DOMString) -> bool {
         self.modifiers
             .get()

@@ -53,6 +53,8 @@ pub(crate) enum TexImageValidationError {
     InvalidCompressionFormat,
     /// Invalid X/Y texture offset parameters.
     InvalidOffsets,
+    /// No base image has been defined for this texture target and level.
+    MissingBaseTexture,
 }
 
 impl std::error::Error for TexImageValidationError {}
@@ -80,6 +82,7 @@ impl fmt::Display for TexImageValidationError {
             NonPotTexture => "Expected a power of two texture",
             InvalidCompressionFormat => "Unrecognized texture compression format",
             InvalidOffsets => "Invalid X/Y texture offset parameters",
+            MissingBaseTexture => "No base image defined for this texture target and level",
         };
         write!(f, "TexImageValidationError({})", description)
     }
@@ -147,8 +150,8 @@ impl WebGLValidator for CommonTexImage2DValidator<'_> {
         // format.
         let internal_format = match TexFormat::from_gl_constant(self.internal_format) {
             Some(format)
-                if format.required_webgl_version() <= self.context.webgl_version()
-                    && format.usable_as_internal() =>
+                if format.required_webgl_version() <= self.context.webgl_version() &&
+                    format.usable_as_internal() =>
             {
                 format
             },
@@ -421,7 +424,7 @@ pub(crate) struct CommonCompressedTexImage2DValidatorResult {
 }
 
 fn valid_s3tc_dimension(level: u32, side_length: u32, block_size: u32) -> bool {
-    (side_length % block_size == 0) || (level > 0 && [0, 1, 2].contains(&side_length))
+    side_length.is_multiple_of(block_size) || (level > 0 && [0, 1, 2].contains(&side_length))
 }
 
 fn valid_compressed_data_len(
@@ -452,9 +455,9 @@ fn is_subimage_blockaligned(
     let block_width = compression.block_width as u32;
     let block_height = compression.block_height as u32;
 
-    (xoffset % block_width == 0 && yoffset % block_height == 0)
-        && (width % block_width == 0 || xoffset + width == tex_info.width())
-        && (height % block_height == 0 || yoffset + height == tex_info.height())
+    (xoffset.is_multiple_of(block_width) && yoffset.is_multiple_of(block_height)) &&
+        (width.is_multiple_of(block_width) || xoffset + width == tex_info.width()) &&
+        (height.is_multiple_of(block_height) || yoffset + height == tex_info.height())
 }
 
 impl WebGLValidator for CommonCompressedTexImage2DValidator<'_> {
@@ -630,16 +633,21 @@ impl WebGLValidator for CompressedTexSubImage2DValidator<'_> {
             compression,
         } = self.compression_validator.validate()?;
 
-        let tex_info = texture.image_info_for_target(&target, level).unwrap();
+        // GL_INVALID_OPERATION is generated if no base image has been defined
+        // for this texture target and level via compressedTexImage2D.
+        let Some(tex_info) = texture.image_info_for_target(&target, level) else {
+            context.webgl_error(InvalidOperation);
+            return Err(TexImageValidationError::MissingBaseTexture);
+        };
 
         // GL_INVALID_VALUE is generated if:
         //   - xoffset or yoffset is less than 0
         //   - x offset plus the width is greater than the texture width
         //   - y offset plus the height is greater than the texture height
-        if self.xoffset < 0
-            || (self.xoffset as u32 + width) > tex_info.width()
-            || self.yoffset < 0
-            || (self.yoffset as u32 + height) > tex_info.height()
+        if self.xoffset < 0 ||
+            (self.xoffset as u32 + width) > tex_info.width() ||
+            self.yoffset < 0 ||
+            (self.yoffset as u32 + height) > tex_info.height()
         {
             context.webgl_error(InvalidValue);
             return Err(TexImageValidationError::InvalidOffsets);

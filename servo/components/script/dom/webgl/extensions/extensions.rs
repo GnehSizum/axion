@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::ptr::NonNull;
 
+use js::context::JSContext;
 use js::jsapi::JSObject;
 use malloc_size_of::MallocSizeOf;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -13,9 +14,10 @@ use script_bindings::str::DOMString;
 use servo_canvas_traits::webgl::{GlType, TexFormat, WebGLSLVersion, WebGLVersion};
 type GLenum = u32;
 
+use script_bindings::cell::DomRefCell;
+
 use super::wrapper::{TypedWebGLExtensionWrapper, WebGLExtensionWrapper};
 use super::{WebGLExtension, WebGLExtensionSpec, ext};
-use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::ANGLEInstancedArraysBinding::ANGLEInstancedArraysConstants;
 use crate::dom::bindings::codegen::Bindings::EXTTextureFilterAnisotropicBinding::EXTTextureFilterAnisotropicConstants;
 use crate::dom::bindings::codegen::Bindings::OESStandardDerivativesBinding::OESStandardDerivativesConstants;
@@ -217,10 +219,10 @@ impl WebGLExtensions {
             .borrow()
             .iter()
             .filter(|v| {
-                if let WebGLExtensionSpec::Specific(version) = v.1.spec() {
-                    if self.webgl_version != version {
-                        return false;
-                    }
+                if let WebGLExtensionSpec::Specific(version) = v.1.spec() &&
+                    self.webgl_version != version
+                {
+                    return false;
                 }
                 v.1.is_supported(self)
             })
@@ -230,13 +232,14 @@ impl WebGLExtensions {
 
     pub(crate) fn get_or_init_extension(
         &self,
+        cx: &mut JSContext,
         name: &DOMString,
         ctx: &WebGLRenderingContext,
     ) -> Option<NonNull<JSObject>> {
         let name = name.to_uppercase();
         self.extensions.borrow().get(&name).and_then(|extension| {
             if extension.is_supported(self) {
-                Some(extension.instance_or_init(ctx, self))
+                Some(extension.instance_or_init(cx, ctx, self))
             } else {
                 None
             }
@@ -459,8 +462,8 @@ impl WebGLExtensions {
     }
 
     pub(crate) fn effective_type(&self, type_: u32) -> u32 {
-        if type_ == OESTextureHalfFloatConstants::HALF_FLOAT_OES
-            && !self.supports_gl_extension("GL_OES_texture_half_float")
+        if type_ == OESTextureHalfFloatConstants::HALF_FLOAT_OES &&
+            !self.supports_gl_extension("GL_OES_texture_half_float")
         {
             return glow::HALF_FLOAT;
         }

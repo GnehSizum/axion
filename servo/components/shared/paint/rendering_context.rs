@@ -119,9 +119,9 @@ impl SurfmanRenderingContext {
     ) -> Result<Self, Error> {
         let device = connection.create_device(adapter)?;
 
-        let flags = ContextAttributeFlags::ALPHA
-            | ContextAttributeFlags::DEPTH
-            | ContextAttributeFlags::STENCIL;
+        let flags = ContextAttributeFlags::ALPHA |
+            ContextAttributeFlags::DEPTH |
+            ContextAttributeFlags::STENCIL;
         let gl_api = connection.gl_api();
         let version = match &gl_api {
             GLApi::GLES => surfman::GLVersion { major: 3, minor: 0 },
@@ -188,37 +188,22 @@ impl SurfmanRenderingContext {
         SwapChain::create_attached(device, context, SurfaceAccess::GPUOnly)
     }
 
-    fn resize_surface(&self, size: PhysicalSize<u32>) -> Result<(), Error> {
-        let size = Size2D::new(size.width as i32, size.height as i32);
-        let device = &mut self.device.borrow_mut();
-        let context = &mut self.context.borrow_mut();
+    fn resize_bound_surface(&self, size: PhysicalSize<u32>) -> Result<(), Error> {
+        if size.width == 0 || size.height == 0 {
+            log::error!("Unable to resize to size under 1x1 ({size:?} provided)");
+            return Err(Error::Failed);
+        }
 
-        let mut surface = device.unbind_surface_from_context(context)?.unwrap();
-        device.resize_surface(context, &mut surface, size)?;
-        device
-            .bind_surface_to_context(context, surface)
-            .map_err(|(err, mut surface)| {
-                let _ = device.destroy_surface(context, &mut surface);
-                err
-            })
+        let size = Size2D::new(size.width as i32, size.height as i32);
+        self.device
+            .borrow()
+            .resize_bound_surface(&mut self.context.borrow_mut(), size)
     }
 
     fn present_bound_surface(&self) -> Result<(), Error> {
-        let device = &self.device.borrow();
-        let context = &mut self.context.borrow_mut();
-
-        let mut surface = device
-            .unbind_surface_from_context(context)?
-            // todo: proper error type. This probably should be done in surfman.
-            .ok_or(Error::Failed)
-            .inspect_err(|_| log::error!("Unable to present bound surface: no surface bound"))?;
-        device.present_surface(context, &mut surface)?;
-        device
-            .bind_surface_to_context(context, surface)
-            .map_err(|(err, mut surface)| {
-                let _ = device.destroy_surface(context, &mut surface);
-                err
-            })
+        self.device
+            .borrow()
+            .present_bound_surface(&mut self.context.borrow_mut())
     }
 
     #[expect(dead_code)]
@@ -309,6 +294,13 @@ pub struct SoftwareRenderingContext {
 
 impl SoftwareRenderingContext {
     pub fn new(size: PhysicalSize<u32>) -> Result<Self, Error> {
+        if size.width == 0 || size.height == 0 {
+            log::error!(
+                "Unable to create SoftwareRenderingContext with size under 1x1 ({size:?} provided)"
+            );
+            return Err(Error::Failed);
+        }
+
         let connection = Connection::new()?;
         let adapter = connection.create_software_adapter()?;
         let surfman_rendering_info = SurfmanRenderingContext::new(&connection, &adapter, None)?;
@@ -350,6 +342,11 @@ impl RenderingContext for SoftwareRenderingContext {
     }
 
     fn resize(&self, size: PhysicalSize<u32>) {
+        assert!(
+            size.width > 0 && size.height > 0,
+            "Dimensions must be at least 1x1, got {size:?}",
+        );
+
         if self.size.get() == size {
             return;
         }
@@ -362,6 +359,7 @@ impl RenderingContext for SoftwareRenderingContext {
         let _ = self.swap_chain.resize(device, context, size);
     }
 
+    #[servo_tracing::instrument(skip_all, name = "SoftwareRenderingContext::present")]
     fn present(&self) {
         let device = &mut self.surfman_rendering_info.device.borrow_mut();
         let context = &mut self.surfman_rendering_info.context.borrow_mut();
@@ -441,6 +439,13 @@ impl WindowRenderingContext {
         size: PhysicalSize<u32>,
         refresh_driver: Option<Rc<dyn RefreshDriver>>,
     ) -> Result<Self, Error> {
+        if size.width == 0 || size.height == 0 {
+            log::error!(
+                "Unable to create WindowRenderingContext with size under 1x1 ({size:?} provided)"
+            );
+            return Err(Error::Failed);
+        }
+
         let connection = Connection::from_display_handle(display_handle)?;
         let adapter = connection.create_adapter()?;
         let surfman_context = SurfmanRenderingContext::new(&connection, &adapter, refresh_driver)?;
@@ -537,12 +542,13 @@ impl RenderingContext for WindowRenderingContext {
     }
 
     fn resize(&self, size: PhysicalSize<u32>) {
-        match self.surfman_context.resize_surface(size) {
+        match self.surfman_context.resize_bound_surface(size) {
             Ok(..) => self.size.set(size),
             Err(error) => warn!("Error resizing surface: {error:?}"),
         }
     }
 
+    #[servo_tracing::instrument(skip_all, name = "WindowRenderingContext::present")]
     fn present(&self) {
         if let Err(error) = self.surfman_context.present_bound_surface() {
             warn!("Error presenting surface: {error:?}");
@@ -733,6 +739,11 @@ type RenderToParentCallback = Box<dyn Fn(&glow::Context, Rect<i32>) + Send + Syn
 
 impl OffscreenRenderingContext {
     fn new(parent_context: Rc<WindowRenderingContext>, size: PhysicalSize<u32>) -> Self {
+        assert!(
+            size.width != 0 && size.height != 0,
+            "Dimensions must be at least 1x1, got {size:?}",
+        );
+
         let framebuffer = RefCell::new(Framebuffer::new(parent_context.gleam_gl_api(), size));
         Self {
             parent_context,
@@ -810,6 +821,11 @@ impl RenderingContext for OffscreenRenderingContext {
     }
 
     fn resize(&self, new_size: PhysicalSize<u32>) {
+        assert!(
+            new_size.width != 0 && new_size.height != 0,
+            "Dimensions must be at least 1x1, got {new_size:?}",
+        );
+
         let old_size = self.size.get();
         if old_size == new_size {
             return;
@@ -940,6 +956,7 @@ mod test {
     use surfman::{Connection, ContextAttributeFlags, ContextAttributes, Error, GLApi, GLVersion};
 
     use super::Framebuffer;
+    use crate::rendering_context::SoftwareRenderingContext;
 
     #[test]
     #[expect(unsafe_code)]
@@ -985,5 +1002,17 @@ mod test {
         device.destroy_context(&mut context)?;
 
         Ok(())
+    }
+
+    #[test]
+    fn test_minimum_size_error() {
+        let result = SoftwareRenderingContext::new(PhysicalSize {
+            width: 0,
+            height: 1,
+        });
+        match result {
+            Err(surfman::Error::Failed) => (),
+            _ => panic!("Expected {:?}", surfman::Error::Failed),
+        }
     }
 }

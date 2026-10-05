@@ -3,19 +3,28 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::collections::HashMap;
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+use std::fs;
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use accesskit::Affine;
 use dpi::PhysicalSize;
 use egui::text::{CCursor, CCursorRange};
 use egui::text_edit::TextEditState;
 use egui::{
-    Button, Id, Key, Label, LayerId, Modifiers, Order, PaintCallback, TopBottomPanel, Vec2,
+    Button, FontDefinitions, Id, Key, Label, LayerId, Modifiers, Order, PaintCallback, Panel, Vec2,
     WidgetInfo, WidgetType, pos2,
 };
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+use egui::{FontData, FontFamily};
 use egui_glow::{CallbackFn, EguiGlow};
 use egui_winit::EventResponse;
 use euclid::{Length, Point2D, Rect, Scale, Size2D};
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+use log::info;
 use log::warn;
 use servo::{
     DeviceIndependentPixel, DevicePixel, Image, LoadStatus, OffscreenRenderingContext, PixelFormat,
@@ -59,6 +68,10 @@ pub struct Gui {
     ///
     /// These need to be cached across egui draw calls.
     favicon_textures: HashMap<WebViewId, (egui::TextureHandle, egui::load::SizedTexture)>,
+
+    /// AccessKit tree updates pending the next egui tick.
+    /// This allows us to ensure that graft nodes are sent before the subtrees they graft.
+    pending_accesskit_updates: Vec<accesskit::TreeUpdate>,
 }
 
 fn truncate_with_ellipsis(input: &str, max_length: usize) -> String {
@@ -68,6 +81,99 @@ fn truncate_with_ellipsis(input: &str, max_length: usize) -> String {
     } else {
         input.to_string()
     }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
+fn load_cjk_fonts(font_candidates: &[(&str, &str)]) -> FontDefinitions {
+    let mut fonts = FontDefinitions::default();
+    let mut loaded_font_names = Vec::new();
+
+    for (path_str, font_name) in font_candidates.iter() {
+        let font_path = Path::new(path_str);
+        if font_path.exists() {
+            match fs::read(font_path) {
+                Ok(bytes) => {
+                    if !fonts.font_data.contains_key(*font_name) {
+                        fonts
+                            .font_data
+                            .insert(font_name.to_string(), Arc::new(FontData::from_owned(bytes)));
+                        loaded_font_names.push(font_name.to_string());
+                        info!("Loaded font: {}", font_name);
+                    }
+                },
+                Err(error) => {
+                    info!("Failed to read font {}: {}", font_name, error);
+                },
+            }
+        }
+    }
+
+    if !loaded_font_names.is_empty() {
+        let proportional = fonts.families.get_mut(&FontFamily::Proportional).unwrap();
+        for font_name in loaded_font_names.iter() {
+            proportional.insert(0, font_name.clone());
+        }
+    }
+
+    fonts
+}
+
+#[cfg(target_os = "windows")]
+fn configure_fonts() -> FontDefinitions {
+    load_cjk_fonts(&[
+        (r"C:\Windows\Fonts\malgun.ttf", "Malgun Gothic"), // Korean
+        (r"C:\Windows\Fonts\msyh.ttc", "Microsoft YaHei"), // Chinese + Japanese
+    ])
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn configure_fonts() -> FontDefinitions {
+    load_cjk_fonts(&[
+        (
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "Noto Sans CJK",
+        ), // Ubuntu/Debian
+        (
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "Noto Sans CJK",
+        ), // Fedora/Arch
+        // FreeBSD splits the Noto CJK fonts into regional subsets
+        (
+            "/usr/local/share/fonts/noto/NotoSansCJKhk-Regular.otf",
+            "Noto Sans CJK HK",
+        ),
+        (
+            "/usr/local/share/fonts/noto/NotoSansCJKjp-Regular.otf",
+            "Noto Sans CJK JP",
+        ),
+        (
+            "/usr/local/share/fonts/noto/NotoSansCJKkr-Regular.otf",
+            "Noto Sans CJK KR",
+        ),
+        (
+            "/usr/local/share/fonts/noto/NotoSansCJKsc-Regular.otf",
+            "Noto Sans CJK SC",
+        ),
+        (
+            "/usr/local/share/fonts/noto/NotoSansCJKtc-Regular.otf",
+            "Noto Sans CJK TC",
+        ),
+        (
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "WenQuanYi Micro Hei",
+        ), // common fallback
+        (
+            "/usr/local/share/fonts/wqy/wqy-microhei.ttc",
+            "WenQuanYi Micro Hei",
+        ), // FreeBSD
+    ])
+}
+
+#[cfg(target_os = "macos")]
+fn configure_fonts() -> FontDefinitions {
+    // TODO: Default proportional fonts: ["Ubuntu-Light", "NotoEmoji-Regular", "emoji-icon-font"]
+    // does not support CJK. Add them for Mac.
+    FontDefinitions::default()
 }
 
 impl Drop for Gui {
@@ -98,6 +204,9 @@ impl Gui {
             false,
         );
 
+        let font_definitions = configure_fonts();
+        context.egui_ctx.set_fonts(font_definitions);
+
         context
             .egui_winit
             .init_accesskit(event_loop, winit_window, event_loop_proxy);
@@ -124,6 +233,7 @@ impl Gui {
             can_go_back: false,
             can_go_forward: false,
             favicon_textures: Default::default(),
+            pending_accesskit_updates: vec![],
         }
     }
 
@@ -282,11 +392,12 @@ impl Gui {
 
             // TODO: While in fullscreen add some way to mitigate the increased phishing risk
             // when not displaying the URL bar: https://github.com/servo/servo/issues/32443
-            if winit_window.fullscreen().is_none() {
+            // Show toolbar unless fullscreen is from document (web API)
+            if !headed_window.is_fullscreen_from_document() {
                 let frame = egui::Frame::default()
                     .fill(ctx.style().visuals.window_fill)
                     .inner_margin(4.0);
-                TopBottomPanel::top("toolbar").frame(frame).show(ctx, |ui| {
+                Panel::top("toolbar").frame(frame).show_inside(ctx, |ui| {
                     ui.allocate_ui_with_layout(
                         ui.available_size(),
                         egui::Layout::left_to_right(egui::Align::Center),
@@ -385,29 +496,28 @@ impl Gui {
                                         if cfg!(target_os = "macos") {
                                             i.clone().consume_key(Modifiers::COMMAND, Key::L)
                                         } else {
-                                            i.clone().consume_key(Modifiers::COMMAND, Key::L)
-                                                || i.clone().consume_key(Modifiers::ALT, Key::D)
+                                            i.clone().consume_key(Modifiers::COMMAND, Key::L) ||
+                                                i.clone().consume_key(Modifiers::ALT, Key::D)
                                         }
                                     }) {
                                         // The focus request immediately makes gained_focus return true.
                                         location_field.request_focus();
                                     }
                                     // Select address bar text when it's focused (click or shortcut).
-                                    if location_field.gained_focus() {
-                                        if let Some(mut state) =
+                                    if location_field.gained_focus() &&
+                                        let Some(mut state) =
                                             TextEditState::load(ui.ctx(), location_id)
-                                        {
-                                            // Select the whole input.
-                                            state.cursor.set_char_range(Some(CCursorRange::two(
-                                                CCursor::new(0),
-                                                CCursor::new(location.len()),
-                                            )));
-                                            state.store(ui.ctx(), location_id);
-                                        }
+                                    {
+                                        // Select the whole input.
+                                        state.cursor.set_char_range(Some(CCursorRange::two(
+                                            CCursor::new(0),
+                                            CCursor::new(location.len()),
+                                        )));
+                                        state.store(ui.ctx(), location_id);
                                     }
                                     // Navigate to address when enter is pressed in the address bar.
-                                    if location_field.lost_focus()
-                                        && ui.input(|i| i.clone().key_pressed(Key::Enter))
+                                    if location_field.lost_focus() &&
+                                        ui.input(|i| i.clone().key_pressed(Key::Enter))
                                     {
                                         window.queue_user_interface_command(
                                             UserInterfaceCommand::Go(location.clone()),
@@ -420,49 +530,55 @@ impl Gui {
                 });
 
                 // A simple Tab header strip
-                TopBottomPanel::top("tabs").show(ctx, |ui| {
-                    ui.allocate_ui_with_layout(
-                        ui.available_size(),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            for (id, webview) in window.webviews().into_iter() {
-                                let favicon = favicon_textures
-                                    .get(&id)
-                                    .map(|(_, favicon)| favicon)
-                                    .copied();
-                                Self::browser_tab(ui, window, webview, favicon);
-                            }
+                let outer = Panel::top("tabs").show_inside(ctx, |ui| {
+                    // Add scroll for overflowing tabs
+                    egui::ScrollArea::horizontal()
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                        .show(ui, |ui| {
+                            ui.allocate_ui_with_layout(
+                                ui.available_size(),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    for (id, webview) in window.webviews().into_iter() {
+                                        let favicon = favicon_textures
+                                            .get(&id)
+                                            .map(|(_, favicon)| favicon)
+                                            .copied();
+                                        Self::browser_tab(ui, window, webview, favicon);
+                                    }
 
-                            let new_tab_button = ui.add(Gui::toolbar_button("+"));
-                            new_tab_button.widget_info(|| {
-                                let mut info = WidgetInfo::new(WidgetType::Button);
-                                info.label = Some("New tab".into());
-                                info
-                            });
-                            if new_tab_button.clicked() {
-                                window
-                                    .queue_user_interface_command(UserInterfaceCommand::NewWebView);
-                            }
+                                    let new_tab_button = ui.add(Gui::toolbar_button("+"));
+                                    new_tab_button.widget_info(|| {
+                                        let mut info = WidgetInfo::new(WidgetType::Button);
+                                        info.label = Some("New tab".into());
+                                        info
+                                    });
+                                    if new_tab_button.clicked() {
+                                        window.queue_user_interface_command(
+                                            UserInterfaceCommand::NewWebView,
+                                        );
+                                    }
 
-                            let new_window_button = ui.add(Gui::toolbar_button("⊞"));
-                            new_window_button.widget_info(|| {
-                                let mut info = WidgetInfo::new(WidgetType::Button);
-                                info.label = Some("New window".into());
-                                info
-                            });
-                            if new_window_button.clicked() {
-                                window
-                                    .queue_user_interface_command(UserInterfaceCommand::NewWindow);
-                            }
-                        },
-                    );
+                                    let new_window_button = ui.add(Gui::toolbar_button("⊞"));
+                                    new_window_button.widget_info(|| {
+                                        let mut info = WidgetInfo::new(WidgetType::Button);
+                                        info.label = Some("New window".into());
+                                        info
+                                    });
+                                    if new_window_button.clicked() {
+                                        window.queue_user_interface_command(
+                                            UserInterfaceCommand::NewWindow,
+                                        );
+                                    }
+                                },
+                            );
+                        })
                 });
-            };
 
-            // The toolbar height is where the Context’s available rect starts.
-            // For reasons that are unclear, the TopBottomPanel’s ui cursor exceeds this by one egui
-            // point, but the Context is correct and the TopBottomPanel is wrong.
-            *toolbar_height = Length::new(ctx.available_rect().min.y);
+                *toolbar_height = Length::new(outer.response.rect.max.y);
+            } else {
+                *toolbar_height = Length::default();
+            }
 
             let scale =
                 Scale::<_, DeviceIndependentPixel, DevicePixel>::new(ctx.pixels_per_point());
@@ -471,10 +587,33 @@ impl Gui {
 
             // If the top parts of the GUI changed size, then update the size of the WebView and also
             // the size of its RenderingContext.
-            let rect = ctx.available_rect();
-            let size = Size2D::new(rect.width(), rect.height()) * scale;
-            if let Some(webview) = window.active_webview()
-                && size != webview.size()
+            let available_rect = ctx.available_rect_before_wrap();
+
+            // Build a graft node for each WebView.
+            let affine = {
+                // The grafted WebView tree reports bounds in device pixels relative to the
+                // WebView's own origin, so this node supplies the offset of the WebView within
+                // the window, and scales it to the same scale as the rest of the nodes in egui's
+                // AccessKit tree.
+                let scale = (1.0 / window.platform_window().hidpi_scale_factor().get()) as f64;
+                let x = available_rect.min.x as f64;
+                let y = available_rect.min.y as f64;
+                Affine::new([scale, 0.0, 0.0, scale, x, y])
+            };
+            for (webview_id, webview) in window.webviews() {
+                if let Some(tree_id) = webview.accesskit_tree_id() {
+                    let id = egui::Id::new(webview_id);
+                    ctx.accesskit_node_builder(id, |node| {
+                        node.set_tree_id(tree_id);
+                        // Only the transform is set: AccessKit consumers exclude graft nodes from
+                        // the presented tree, so bounds on this node would never be read.
+                        node.set_transform(affine);
+                    });
+                }
+            }
+            let size = Size2D::new(available_rect.width(), available_rect.height()) * scale;
+            if let Some(webview) = window.active_webview() &&
+                size != webview.size()
             {
                 // `rect` is sized to just the WebView viewport, which is required by
                 // `OffscreenRenderingContext` See:
@@ -487,17 +626,16 @@ impl Gui {
                     ctx.clone(),
                     LayerId::new(Order::Tooltip, Id::new("tooltip")),
                     "tooltip layer".into(),
-                    pos2(0.0, ctx.available_rect().max.y),
+                    pos2(0.0, available_rect.max.y),
                 )
                 .show(|ui| ui.add(Label::new(status_text.clone()).extend()));
-                window.set_needs_repaint();
             }
 
             window.repaint_webviews();
 
             if let Some(render_to_parent) = rendering_context.render_to_parent_callback() {
                 ctx.layer_painter(LayerId::background()).add(PaintCallback {
-                    rect: ctx.available_rect(),
+                    rect: available_rect,
                     callback: Arc::new(CallbackFn::new(move |info, painter| {
                         let clip = info.viewport_in_pixels();
                         let rect_in_parent = Rect::new(
@@ -509,6 +647,22 @@ impl Gui {
                 });
             }
         });
+
+        // If any egui widget requested a repaint, also request a repaint for our
+        // containing window. This allows egui widget to animate on their own.
+        if self.context.egui_ctx.has_requested_repaint() {
+            window.set_needs_repaint();
+        }
+
+        let adapter = self
+            .context
+            .egui_winit
+            .accesskit
+            .as_mut()
+            .expect("guaranteed by Gui::new()");
+        for tree_update in self.pending_accesskit_updates.drain(..) {
+            adapter.update_if_active(|| tree_update);
+        }
     }
 
     /// Paint the GUI, as of the last update.
@@ -585,10 +739,10 @@ impl Gui {
         //       because logical OR would short-circuit if any of the functions return true.
         //       We want to ensure that all functions are called. The "bitwise OR" operator
         //       does not short-circuit.
-        self.update_load_status(window)
-            | self.update_location_in_toolbar(window)
-            | self.update_status_text(window)
-            | self.update_can_go_back_and_forward(window)
+        self.update_load_status(window) |
+            self.update_location_in_toolbar(window) |
+            self.update_status_text(window) |
+            self.update_can_go_back_and_forward(window)
     }
 
     /// Returns true if a redraw is required after handling the provided event.
@@ -618,8 +772,8 @@ impl Gui {
         self.context.egui_ctx.set_zoom_factor(factor);
     }
 
-    pub(crate) fn notify_accessibility_tree_update(&mut self, _tree_update: accesskit::TreeUpdate) {
-        // TODO(#41930): Forward this update to `self.context.egui_winit.accesskit`
+    pub(crate) fn notify_accessibility_tree_update(&mut self, tree_update: accesskit::TreeUpdate) {
+        self.pending_accesskit_updates.push(tree_update);
     }
 }
 

@@ -7,17 +7,18 @@ use std::rc::Rc;
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
+use script_bindings::callback::OwnerWindow;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 
 use crate::dom::bindings::callback::ExceptionHandling::Rethrow;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
 use crate::dom::bindings::codegen::Bindings::NodeFilterBinding::{NodeFilter, NodeFilterConstants};
 use crate::dom::bindings::codegen::Bindings::NodeIteratorBinding::NodeIteratorMethods;
 use crate::dom::bindings::error::{Error, Fallible};
-use crate::dom::bindings::reflector::{Reflector, reflect_dom_object};
 use crate::dom::bindings::root::{Dom, DomRoot, MutDom};
 use crate::dom::document::Document;
+use crate::dom::iterators::ShadowIncluding;
 use crate::dom::node::Node;
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct NodeIterator {
@@ -45,31 +46,31 @@ impl NodeIterator {
     }
 
     pub(crate) fn new_with_filter(
+        cx: &mut JSContext,
         document: &Document,
         root_node: &Node,
         what_to_show: u32,
         filter: Filter,
-        can_gc: CanGc,
     ) -> DomRoot<NodeIterator> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(NodeIterator::new_inherited(root_node, what_to_show, filter)),
             document.window(),
-            can_gc,
+            cx,
         )
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         document: &Document,
         root_node: &Node,
         what_to_show: u32,
         node_filter: Option<Rc<NodeFilter>>,
-        can_gc: CanGc,
     ) -> DomRoot<NodeIterator> {
         let filter = match node_filter {
             None => Filter::None,
             Some(jsfilter) => Filter::Callback(jsfilter),
         };
-        NodeIterator::new_with_filter(document, root_node, what_to_show, filter, can_gc)
+        NodeIterator::new_with_filter(cx, document, root_node, what_to_show, filter)
     }
 }
 
@@ -129,7 +130,7 @@ impl NodeIteratorMethods<crate::DomTypeHolder> for NodeIterator {
         }
 
         // Step 3-1.
-        for following_node in node.following_nodes(&self.root_node) {
+        for following_node in node.following_nodes(&self.root_node, ShadowIncluding::No) {
             // Step 3-2.
             let result = self.accept_node(cx, &following_node)?;
 
@@ -201,7 +202,9 @@ impl NodeIterator {
     fn accept_node(&self, cx: &mut JSContext, node: &Node) -> Fallible<u16> {
         // Step 1.
         if self.active.get() {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "Node iterator cannot be active".into(),
+            )));
         }
         // Step 2.
         let n = node.NodeType() - 1;
@@ -217,7 +220,7 @@ impl NodeIterator {
                 // Step 5.
                 self.active.set(true);
                 // Step 6.
-                let result = callback.AcceptNode_(self, node, Rethrow, CanGc::from_cx(cx));
+                let result = callback.AcceptNode_(cx, self, node, Rethrow);
                 // Step 7.
                 self.active.set(false);
                 // Step 8.
@@ -232,3 +235,5 @@ pub(crate) enum Filter {
     None,
     Callback(#[ignore_malloc_size_of = "callbacks are hard"] Rc<NodeFilter>),
 }
+
+impl OwnerWindow<crate::DomTypeHolder> for NodeIterator {}

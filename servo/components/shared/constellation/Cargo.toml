@@ -15,9 +15,12 @@ path = "lib.rs"
 
 [features]
 bluetooth = []
-webgpu = ["wgpu-core"]
+webcrypto = []
+webgpu = ["dep:webgpu_traits", "dep:wgpu-core"]
+webgl = []
 
 [dependencies]
+base64 = { workspace = true }
 content-security-policy = { workspace = true }
 devtools_traits = { workspace = true }
 embedder_traits = { workspace = true }
@@ -43,6 +46,10 @@ servo-url = { workspace = true }
 storage_traits = { workspace = true }
 strum = { workspace = true }
 uuid = { workspace = true }
-webgpu_traits = { workspace = true }
+webgpu_traits = { workspace = true, optional = true }
 webrender_api = { workspace = true }
 wgpu-core = { workspace = true, optional = true }
+zeroize = { workspace = true }
+
+[lints]
+workspace = true

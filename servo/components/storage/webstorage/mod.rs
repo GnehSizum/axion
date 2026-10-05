@@ -25,7 +25,6 @@ use servo_base::generic_channel::{self, GenericReceiver, GenericSender};
 use servo_base::id::WebViewId;
 use servo_base::threadpool::ThreadPool;
 use servo_base::{read_json_from_file, write_json_to_file};
-use servo_config::pref;
 use servo_url::{ImmutableOrigin, ServoUrl};
 use storage_traits::webstorage_thread::{OriginDescriptor, WebStorageThreadMsg, WebStorageType};
 use uuid::Uuid;
@@ -86,7 +85,7 @@ impl StorageOrigins {
     /// Returns `true` if a new origin descriptor was created, or `false` if
     /// one already existed.
     fn ensure_origin_descriptor(&mut self, origin: &ImmutableOrigin) -> bool {
-        let origin = origin.ascii_serialization();
+        let origin = origin.ascii_serialization().into_owned();
         match self.origin_descriptors.entry(origin.clone()) {
             Entry::Occupied(_) => false,
             Entry::Vacant(entry) => {
@@ -224,20 +223,13 @@ impl WebStorageManager {
         if let Some(ref config_dir) = config_dir {
             read_json_from_file(&mut local_storage_origins, config_dir, "localstorage.json");
         }
-        // Uses an estimate of the system cpus to process Webstorage transactions
-        // See https://doc.rust-lang.org/stable/std/thread/fn.available_parallelism.html
-        // If no information can be obtained about the system, uses 4 threads as a default
-        let thread_count = thread::available_parallelism()
-            .map(|i| i.get())
-            .unwrap_or(pref!(threadpools_fallback_worker_num) as usize)
-            .min(pref!(threadpools_webstorage_workers_max).max(1) as usize);
         WebStorageManager {
             port,
             session_storage_origins: StorageOrigins::new(),
             local_storage_origins,
             session_data: FxHashMap::default(),
             config_dir,
-            thread_pool: Arc::new(ThreadPool::new(thread_count, "WebStorage".to_string())),
+            thread_pool: ThreadPool::global(),
             environments: FxHashMap::default(),
         }
     }
@@ -344,38 +336,51 @@ impl WebStorageManager {
         }
     }
 
-    fn add_new_environment(&mut self, origin: &ImmutableOrigin) {
+    fn add_new_environment(&mut self, origin: &ImmutableOrigin) -> Result<(), rusqlite::Error> {
         let origin_location = self.get_origin_location(origin);
 
-        let engine = SqliteEngine::new(&origin_location, self.thread_pool.clone()).unwrap();
+        let engine = SqliteEngine::new(&origin_location, self.thread_pool.clone())?;
         let environment = WebStorageEnvironment::new(engine);
         self.environments.insert(origin.clone(), environment);
+        Ok(())
     }
 
     fn get_environment(
         &mut self,
         origin: &ImmutableOrigin,
-    ) -> &WebStorageEnvironment<SqliteEngine> {
+    ) -> Result<&WebStorageEnvironment<SqliteEngine>, rusqlite::Error> {
         if self.environments.contains_key(origin) {
-            return self.environments.get(origin).unwrap();
+            return Ok(self
+                .environments
+                .get(origin)
+                .expect("environment should exist after contains_key check"));
         }
 
-        self.add_new_environment(origin);
+        self.add_new_environment(origin)?;
 
-        self.environments.get(origin).unwrap()
+        Ok(self
+            .environments
+            .get(origin)
+            .expect("environment should exist after add_new_environment"))
     }
 
     fn get_environment_mut(
         &mut self,
         origin: &ImmutableOrigin,
-    ) -> &mut WebStorageEnvironment<SqliteEngine> {
+    ) -> Result<&mut WebStorageEnvironment<SqliteEngine>, rusqlite::Error> {
         if self.environments.contains_key(origin) {
-            return self.environments.get_mut(origin).unwrap();
+            return Ok(self
+                .environments
+                .get_mut(origin)
+                .expect("environment should exist after contains_key check"));
         }
 
-        self.add_new_environment(origin);
+        self.add_new_environment(origin)?;
 
-        self.environments.get_mut(origin).unwrap()
+        Ok(self
+            .environments
+            .get_mut(origin)
+            .expect("environment should exist after add_new_environment"))
     }
 
     fn select_data(
@@ -397,7 +402,13 @@ impl WebStorageManager {
                 if self.local_storage_origins.ensure_origin_descriptor(&origin) {
                     self.save_local_storage_origins();
                 }
-                Some(&self.get_environment(&origin).data)
+                match self.get_environment(&origin) {
+                    Ok(env) => Some(&env.data),
+                    Err(e) => {
+                        warn!("Failed to get storage environment: {:?}", e);
+                        None
+                    },
+                }
             },
         }
     }
@@ -421,7 +432,13 @@ impl WebStorageManager {
                 if self.local_storage_origins.ensure_origin_descriptor(&origin) {
                     self.save_local_storage_origins();
                 }
-                Some(&mut self.get_environment_mut(&origin).data)
+                match self.get_environment_mut(&origin) {
+                    Ok(env) => Some(&mut env.data),
+                    Err(e) => {
+                        warn!("Failed to get storage environment: {:?}", e);
+                        None
+                    },
+                }
             },
         }
     }
@@ -431,22 +448,30 @@ impl WebStorageManager {
         storage_type: WebStorageType,
         webview_id: WebViewId,
         origin: ImmutableOrigin,
-    ) -> &mut OriginEntry {
+    ) -> Option<&mut OriginEntry> {
         match storage_type {
             WebStorageType::Session => {
                 self.session_storage_origins
                     .ensure_origin_descriptor(&origin);
-                self.session_data
-                    .entry(webview_id)
-                    .or_default()
-                    .entry(origin)
-                    .or_default()
+                Some(
+                    self.session_data
+                        .entry(webview_id)
+                        .or_default()
+                        .entry(origin)
+                        .or_default(),
+                )
             },
             WebStorageType::Local => {
                 if self.local_storage_origins.ensure_origin_descriptor(&origin) {
                     self.save_local_storage_origins();
                 }
-                &mut self.get_environment_mut(&origin).data
+                match self.get_environment_mut(&origin) {
+                    Ok(env) => Some(&mut env.data),
+                    Err(e) => {
+                        warn!("Failed to get storage environment: {:?}", e);
+                        None
+                    },
+                }
             },
         }
     }
@@ -456,9 +481,9 @@ impl WebStorageManager {
         sender: GenericSender<usize>,
         storage_type: WebStorageType,
         webview_id: WebViewId,
-        url: ServoUrl,
+        origin: ImmutableOrigin,
     ) {
-        let data = self.select_data(storage_type, webview_id, url.origin());
+        let data = self.select_data(storage_type, webview_id, origin);
         sender
             .send(data.map_or(0, |entry| entry.inner().len()))
             .unwrap();
@@ -469,10 +494,10 @@ impl WebStorageManager {
         sender: GenericSender<Option<String>>,
         storage_type: WebStorageType,
         webview_id: WebViewId,
-        url: ServoUrl,
+        origin: ImmutableOrigin,
         index: u32,
     ) {
-        let data = self.select_data(storage_type, webview_id, url.origin());
+        let data = self.select_data(storage_type, webview_id, origin);
         let key = data
             .and_then(|entry| entry.inner().keys().nth(index as usize))
             .cloned();
@@ -484,9 +509,9 @@ impl WebStorageManager {
         sender: GenericSender<Vec<String>>,
         storage_type: WebStorageType,
         webview_id: WebViewId,
-        url: ServoUrl,
+        origin: ImmutableOrigin,
     ) {
-        let data = self.select_data(storage_type, webview_id, url.origin());
+        let data = self.select_data(storage_type, webview_id, origin);
         let keys = data.map_or(vec![], |entry| entry.inner().keys().cloned().collect());
 
         sender.send(keys).unwrap();
@@ -501,11 +526,14 @@ impl WebStorageManager {
         sender: GenericSender<Result<(bool, Option<String>), ()>>,
         storage_type: WebStorageType,
         webview_id: WebViewId,
-        url: ServoUrl,
+        origin: ImmutableOrigin,
         name: String,
         value: String,
     ) {
-        let entry = self.ensure_data_mut(storage_type, webview_id, url.origin());
+        let Some(entry) = self.ensure_data_mut(storage_type, webview_id, origin.clone()) else {
+            sender.send(Err(())).unwrap();
+            return;
+        };
         let total_size = entry.size();
 
         let mut new_total_size = total_size + value.len();
@@ -528,8 +556,9 @@ impl WebStorageManager {
                             Ok((true, Some(old)))
                         }
                     });
-            if storage_type == WebStorageType::Local {
-                let env = self.get_environment_mut(&url.origin());
+            if storage_type == WebStorageType::Local &&
+                let Ok(env) = self.get_environment_mut(&origin)
+            {
                 env.set(&name, &value);
             }
             result
@@ -542,10 +571,10 @@ impl WebStorageManager {
         sender: GenericSender<Option<String>>,
         storage_type: WebStorageType,
         webview_id: WebViewId,
-        url: ServoUrl,
+        origin: ImmutableOrigin,
         name: String,
     ) {
-        let data = self.select_data(storage_type, webview_id, url.origin());
+        let data = self.select_data(storage_type, webview_id, origin);
         sender
             .send(data.and_then(|entry| entry.inner().get(&name)).cloned())
             .unwrap();
@@ -557,14 +586,15 @@ impl WebStorageManager {
         sender: GenericSender<Option<String>>,
         storage_type: WebStorageType,
         webview_id: WebViewId,
-        url: ServoUrl,
+        origin: ImmutableOrigin,
         name: String,
     ) {
-        let data = self.select_data_mut(storage_type, webview_id, url.origin());
+        let data = self.select_data_mut(storage_type, webview_id, origin.clone());
         let old_value = data.and_then(|entry| entry.remove(&name));
         sender.send(old_value).unwrap();
-        if storage_type == WebStorageType::Local {
-            let env = self.get_environment_mut(&url.origin());
+        if storage_type == WebStorageType::Local &&
+            let Ok(env) = self.get_environment_mut(&origin)
+        {
             env.delete(&name);
         }
     }
@@ -574,9 +604,9 @@ impl WebStorageManager {
         sender: GenericSender<bool>,
         storage_type: WebStorageType,
         webview_id: WebViewId,
-        url: ServoUrl,
+        origin: ImmutableOrigin,
     ) {
-        let data = self.select_data_mut(storage_type, webview_id, url.origin());
+        let data = self.select_data_mut(storage_type, webview_id, origin.clone());
         sender
             .send(data.is_some_and(|entry| {
                 if !entry.inner().is_empty() {
@@ -587,8 +617,9 @@ impl WebStorageManager {
                 }
             }))
             .unwrap();
-        if storage_type == WebStorageType::Local {
-            let env = self.get_environment_mut(&url.origin());
+        if storage_type == WebStorageType::Local &&
+            let Ok(env) = self.get_environment_mut(&origin)
+        {
             env.clear();
         }
     }

@@ -249,12 +249,12 @@ impl Snapshot {
             },
             (_, SnapshotAlphaMode::Opaque) => Multiply::None,
             (
-                SnapshotAlphaMode::Transparent { premultiplied }
-                | SnapshotAlphaMode::AsOpaque { premultiplied },
+                SnapshotAlphaMode::Transparent { premultiplied } |
+                SnapshotAlphaMode::AsOpaque { premultiplied },
                 SnapshotAlphaMode::Transparent {
                     premultiplied: target_premultiplied,
-                }
-                | SnapshotAlphaMode::AsOpaque {
+                } |
+                SnapshotAlphaMode::AsOpaque {
                     premultiplied: target_premultiplied,
                 },
             ) => {
@@ -268,8 +268,8 @@ impl Snapshot {
             },
         };
 
-        let clear_alpha = !matches!(self.alpha_mode, SnapshotAlphaMode::Opaque)
-            && matches!(target_alpha_mode, SnapshotAlphaMode::Opaque);
+        let clear_alpha = !matches!(self.alpha_mode, SnapshotAlphaMode::Opaque) &&
+            matches!(target_alpha_mode, SnapshotAlphaMode::Opaque);
 
         if matches!(multiply, Multiply::None) && !swap_rb && !clear_alpha {
             return;
@@ -292,7 +292,7 @@ impl Snapshot {
         let (data, byte_range) = match &self.data {
             SnapshotData::SharedMemory(data, byte_range) => (data.clone(), byte_range.clone()),
             SnapshotData::SharedVec(data, byte_range) => (
-                Arc::new(GenericSharedMemory::from_bytes(data)),
+                Arc::new(GenericSharedMemory::from_arc_vec(data.clone())),
                 byte_range.clone(),
             ),
             SnapshotData::Owned(data) => (

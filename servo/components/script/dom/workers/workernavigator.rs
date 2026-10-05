@@ -3,27 +3,30 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use js::rust::MutableHandleValue;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use servo_config::pref;
 
 use crate::dom::bindings::codegen::Bindings::WorkerNavigatorBinding::WorkerNavigatorMethods;
-use crate::dom::bindings::reflector::{DomGlobal, Reflector, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::utils::to_frozen_array;
 use crate::dom::navigator::hardware_concurrency;
 use crate::dom::navigatorinfo;
 use crate::dom::permissions::Permissions;
+use crate::dom::storagemanager::StorageManager;
 #[cfg(feature = "webgpu")]
 use crate::dom::webgpu::gpu::GPU;
 use crate::dom::workerglobalscope::WorkerGlobalScope;
-use crate::script_runtime::{CanGc, JSContext};
 
 // https://html.spec.whatwg.org/multipage/#workernavigator
 #[dom_struct]
 pub(crate) struct WorkerNavigator {
     reflector_: Reflector,
     permissions: MutNullableDom<Permissions>,
+    storage: MutNullableDom<StorageManager>,
     #[cfg(feature = "webgpu")]
     gpu: MutNullableDom<GPU>,
 }
@@ -33,13 +36,14 @@ impl WorkerNavigator {
         WorkerNavigator {
             reflector_: Reflector::new(),
             permissions: Default::default(),
+            storage: Default::default(),
             #[cfg(feature = "webgpu")]
             gpu: Default::default(),
         }
     }
 
-    pub(crate) fn new(global: &WorkerGlobalScope, can_gc: CanGc) -> DomRoot<WorkerNavigator> {
-        reflect_dom_object(Box::new(WorkerNavigator::new_inherited()), global, can_gc)
+    pub(crate) fn new(cx: &mut JSContext, global: &WorkerGlobalScope) -> DomRoot<WorkerNavigator> {
+        reflect_dom_object_with_cx(Box::new(WorkerNavigator::new_inherited()), global, cx)
     }
 }
 
@@ -100,8 +104,8 @@ impl WorkerNavigatorMethods<crate::DomTypeHolder> for WorkerNavigator {
     }
 
     // https://html.spec.whatwg.org/multipage/#dom-navigator-languages
-    fn Languages(&self, cx: JSContext, can_gc: CanGc, retval: MutableHandleValue) {
-        to_frozen_array(&[self.Language()], cx, retval, can_gc)
+    fn Languages(&self, cx: &mut JSContext, retval: MutableHandleValue) {
+        to_frozen_array(cx, &[self.Language()], retval)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-navigator-online>
@@ -110,15 +114,21 @@ impl WorkerNavigatorMethods<crate::DomTypeHolder> for WorkerNavigator {
     }
 
     /// <https://w3c.github.io/permissions/#navigator-and-workernavigator-extension>
-    fn Permissions(&self) -> DomRoot<Permissions> {
+    fn Permissions(&self, cx: &mut JSContext) -> DomRoot<Permissions> {
         self.permissions
-            .or_init(|| Permissions::new(&self.global(), CanGc::note()))
+            .or_init(|| Permissions::new(cx, &self.global()))
+    }
+
+    /// <https://storage.spec.whatwg.org/#api>
+    fn Storage(&self, cx: &mut JSContext) -> DomRoot<StorageManager> {
+        self.storage
+            .or_init(|| StorageManager::new(cx, &self.global()))
     }
 
     // https://gpuweb.github.io/gpuweb/#dom-navigator-gpu
     #[cfg(feature = "webgpu")]
-    fn Gpu(&self) -> DomRoot<GPU> {
-        self.gpu.or_init(|| GPU::new(&self.global(), CanGc::note()))
+    fn Gpu(&self, cx: &mut JSContext) -> DomRoot<GPU> {
+        self.gpu.or_init(|| GPU::new(cx, &self.global()))
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-navigator-hardwareconcurrency>

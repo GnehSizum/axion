@@ -9,21 +9,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{self, AtomicBool, AtomicUsize, Ordering};
 
+use bytes::Bytes;
 use embedder_traits::{
     EmbedderControlId, EmbedderControlResponse, FilePickerRequest, GenericEmbedderProxy,
     SelectedFile,
 };
 use headers::{ContentLength, ContentRange, ContentType, HeaderMap, HeaderMapExt, Range};
-use http::header::{self, HeaderValue};
 use ipc_channel::ipc::IpcSender;
 use log::warn;
-use mime::{self, Mime};
-use net_traits::blob_url_store::{BlobBuf, BlobURLStoreError};
+use mime::Mime;
+use net_traits::blob_url_store::{BlobBuf, BlobTokenCommunicator, BlobURLStoreError};
 use net_traits::filemanager_thread::{
     FileManagerResult, FileManagerThreadError, FileManagerThreadMsg, FileTokenCheck,
-    ReadFileProgress, RelativePos,
+    GetTokenForFileReply, ReadFileProgress, RelativePos,
 };
-use net_traits::http_percent_encode;
 use net_traits::response::{Response, ResponseBody};
 use parking_lot::{Mutex, RwLock};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -84,13 +83,18 @@ enum FileImpl {
 pub struct FileManager {
     embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
     store: Arc<FileManagerStore>,
+    blob_token_communicator: Arc<Mutex<BlobTokenCommunicator>>,
 }
 
 impl FileManager {
-    pub fn new(embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>) -> FileManager {
+    pub fn new(
+        embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>,
+        blob_token_communicator: Arc<Mutex<BlobTokenCommunicator>>,
+    ) -> FileManager {
         FileManager {
             embedder_proxy,
             store: Arc::new(FileManagerStore::new()),
+            blob_token_communicator,
         }
     }
 
@@ -108,8 +112,8 @@ impl FileManager {
         });
     }
 
-    pub(crate) fn get_token_for_file(&self, file_id: &Uuid) -> FileTokenCheck {
-        self.store.get_token_for_file(file_id)
+    pub(crate) fn get_token_for_file(&self, file_id: &Uuid, allow_revoked: bool) -> FileTokenCheck {
+        self.store.get_token_for_file(file_id, allow_revoked)
     }
 
     pub(crate) fn invalidate_token(&self, token: &FileTokenCheck, file_id: &Uuid) {
@@ -182,6 +186,22 @@ impl FileManager {
             FileManagerThreadMsg::ActivateBlobURL(id, sender, origin) => {
                 let _ = sender.send(self.store.set_blob_url_validity(true, &id, &origin));
             },
+            FileManagerThreadMsg::GetTokenForFile(id, sender) => {
+                let token = match self.get_token_for_file(&id, false) {
+                    FileTokenCheck::Required(token) => Some(token),
+                    _ => None,
+                };
+
+                let communicator = self.blob_token_communicator.lock();
+                let _ = sender.send(GetTokenForFileReply {
+                    token,
+                    revoke_sender: communicator.revoke_sender.clone(),
+                    refresh_sender: communicator.refresh_token_sender.clone(),
+                });
+            },
+            FileManagerThreadMsg::RevokeTokenForFile(token, id) => {
+                self.invalidate_token(&FileTokenCheck::Required(token), &id);
+            },
         }
     }
 
@@ -229,7 +249,7 @@ impl FileManager {
                         );
                         let chunk = &buffer[0..offset];
                         body.extend_from_slice(chunk);
-                        let _ = done_sender.send(Data::Payload(chunk.to_vec()));
+                        let _ = done_sender.send(Data::Payload(Bytes::copy_from_slice(chunk)));
                     }
                     buffer_len
                 };
@@ -288,18 +308,17 @@ impl FileManager {
                     None
                 };
 
-                set_headers(
+                set_blob_response_headers(
                     &mut response.headers,
                     len,
                     buf.type_string.parse().unwrap_or(mime::TEXT_PLAIN),
-                    /* filename */ None,
                     content_range,
                 );
 
                 let mut bytes = vec![];
                 bytes.extend_from_slice(buf.bytes.index(range));
 
-                let _ = done_sender.send(Data::Payload(bytes));
+                let _ = done_sender.send(Data::Payload(Bytes::copy_from_slice(&bytes)));
                 let _ = done_sender.send(Data::Done);
 
                 Ok(())
@@ -334,12 +353,6 @@ impl FileManager {
                     ));
                 }
 
-                let filename = metadata
-                    .path
-                    .file_name()
-                    .and_then(|osstr| osstr.to_str())
-                    .map(|s| s.to_string());
-
                 let content_range = if is_range_requested {
                     let abs_range = range.to_abs_blob_range(metadata.size as usize);
                     ContentRange::bytes(abs_range.start as u64..abs_range.end as u64, metadata.size)
@@ -347,13 +360,12 @@ impl FileManager {
                 } else {
                     None
                 };
-                set_headers(
+                set_blob_response_headers(
                     &mut response.headers,
                     metadata.size,
                     mime_guess::from_path(metadata.path)
                         .first()
                         .unwrap_or(mime::TEXT_PLAIN),
-                    filename,
                     content_range,
                 );
 
@@ -459,7 +471,7 @@ impl FileManagerStore {
         }
     }
 
-    pub(crate) fn get_token_for_file(&self, file_id: &Uuid) -> FileTokenCheck {
+    pub(crate) fn get_token_for_file(&self, file_id: &Uuid, allow_revoked: bool) -> FileTokenCheck {
         let mut entries = self.entries.write();
         let parent_id = match entries.get(file_id) {
             Some(entry) => {
@@ -471,12 +483,11 @@ impl FileManagerStore {
             },
             None => return FileTokenCheck::ShouldFail,
         };
-        let file_id = match parent_id.as_ref() {
-            Some(id) => id,
-            None => file_id,
-        };
+        let file_id = parent_id.as_ref().unwrap_or(file_id);
+
         if let Some(entry) = entries.get_mut(file_id) {
-            if !entry.is_valid_url.load(Ordering::Acquire) {
+            if !allow_revoked && !entry.is_valid_url.load(Ordering::Acquire) {
+                log::warn!("Refusing to grant token for revoked blob url: {file_id:?}");
                 return FileTokenCheck::ShouldFail;
             }
             let token = Uuid::new_v4();
@@ -636,7 +647,7 @@ impl FileManagerStore {
         let filename_path = Path::new(file_name);
         let type_string = match mime_guess::from_path(filename_path).first() {
             Some(x) => format!("{}", x),
-            None => "".to_string(),
+            None => String::new(),
         };
 
         Ok(SelectedFile {
@@ -699,7 +710,7 @@ impl FileManagerStore {
                 if seeked_start == (range.start as u64) {
                     let type_string = match mime {
                         Some(x) => format!("{}", x),
-                        None => "".to_string(),
+                        None => String::new(),
                     };
 
                     read_file_in_chunks(sender, file, range.len(), opt_filename, type_string).await;
@@ -902,48 +913,15 @@ async fn read_file_in_chunks(
     }
 }
 
-fn set_headers(
+fn set_blob_response_headers(
     headers: &mut HeaderMap,
     content_length: u64,
     mime: Mime,
-    filename: Option<String>,
     content_range: Option<ContentRange>,
 ) {
     headers.typed_insert(ContentLength(content_length));
     if let Some(content_range) = content_range {
         headers.typed_insert(content_range);
     }
-    headers.typed_insert(ContentType::from(mime.clone()));
-    let name = match filename {
-        Some(name) => name,
-        None => return,
-    };
-    let charset = mime.get_param(mime::CHARSET);
-    let charset = charset
-        .map(|c| c.as_ref().into())
-        .unwrap_or("us-ascii".to_owned());
-    // TODO(eijebong): Replace this once the typed header is there
-    //                 https://github.com/hyperium/headers/issues/8
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_bytes(
-            format!(
-                "inline; {}",
-                if charset.to_lowercase() == "utf-8" {
-                    format!(
-                        "filename=\"{}\"",
-                        String::from_utf8(name.as_bytes().into()).unwrap()
-                    )
-                } else {
-                    format!(
-                        "filename*=\"{}\"''{}",
-                        charset,
-                        http_percent_encode(name.as_bytes())
-                    )
-                }
-            )
-            .as_bytes(),
-        )
-        .unwrap(),
-    );
+    headers.typed_insert(ContentType::from(mime));
 }

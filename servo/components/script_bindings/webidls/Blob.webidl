@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-// https://w3c.github.io/FileAPI/#blob
+// https://w3c.github.io/FileAPI/#dfn-Blob
 
 [Exposed=(Window,Worker), Serializable]
 interface Blob {
@@ -20,11 +20,15 @@ interface Blob {
   [NewObject, Throws] ReadableStream stream();
   [NewObject] Promise<DOMString> text();
   [NewObject] Promise<ArrayBuffer> arrayBuffer();
+  [NewObject, Throws] ReadableStream textStream();
   [NewObject] Promise<Uint8Array> bytes();
 };
 
+enum EndingType { "transparent", "native" };
+
 dictionary BlobPropertyBag {
   DOMString type = "";
+  EndingType endings = "transparent";
 };
 
 typedef (ArrayBuffer or ArrayBufferView or Blob or DOMString) BlobPart;

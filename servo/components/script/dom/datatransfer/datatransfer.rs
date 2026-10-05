@@ -6,14 +6,16 @@ use std::cell::{Ref, RefCell};
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use js::rust::{HandleObject, MutableHandleValue};
 use net_traits::image_cache::Image;
+use script_bindings::cell::DomRefCell;
 use script_bindings::match_domstring_ascii;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 
-use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::DataTransferBinding::DataTransferMethods;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{DomGlobal, Reflector, reflect_dom_object_with_proto};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::datatransferitemlist::DataTransferItemList;
@@ -21,8 +23,7 @@ use crate::dom::element::Element;
 use crate::dom::filelist::FileList;
 use crate::dom::html::htmlimageelement::HTMLImageElement;
 use crate::dom::window::Window;
-use crate::drag_data_store::{DragDataStore, Mode};
-use crate::script_runtime::{CanGc, JSContext};
+use crate::drag::drag_data_store::{DragDataStore, Mode};
 
 const VALID_DROP_EFFECTS: [&str; 4] = ["none", "copy", "link", "move"];
 const VALID_EFFECTS_ALLOWED: [&str; 9] = [
@@ -55,35 +56,35 @@ impl DataTransfer {
     ) -> DataTransfer {
         DataTransfer {
             reflector_: Reflector::new(),
-            drop_effect: DomRefCell::new(DOMString::from("none")),
-            effect_allowed: DomRefCell::new(DOMString::from("none")),
+            drop_effect: DomRefCell::new(DOMString::from_static("none")),
+            effect_allowed: DomRefCell::new(DOMString::from_static("none")),
             items: Dom::from_ref(item_list),
             data_store,
         }
     }
 
     pub(crate) fn new_with_proto(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
         data_store: Rc<RefCell<Option<DragDataStore>>>,
     ) -> DomRoot<DataTransfer> {
-        let item_list = DataTransferItemList::new(window, Rc::clone(&data_store), can_gc);
+        let item_list = DataTransferItemList::new(cx, window, Rc::clone(&data_store));
 
         reflect_dom_object_with_proto(
+            cx,
             Box::new(DataTransfer::new_inherited(data_store, &item_list)),
             window,
             proto,
-            can_gc,
         )
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         window: &Window,
         data_store: Rc<RefCell<Option<DragDataStore>>>,
-        can_gc: CanGc,
     ) -> DomRoot<DataTransfer> {
-        Self::new_with_proto(window, None, can_gc, data_store)
+        Self::new_with_proto(cx, window, None, data_store)
     }
 
     pub(crate) fn data_store(&self) -> Option<Ref<'_, DragDataStore>> {
@@ -94,16 +95,16 @@ impl DataTransfer {
 impl DataTransferMethods<crate::DomTypeHolder> for DataTransfer {
     /// <https://html.spec.whatwg.org/multipage/#dom-datatransfer>
     fn Constructor(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
     ) -> DomRoot<DataTransfer> {
         let mut drag_data_store = DragDataStore::new();
         drag_data_store.set_mode(Mode::ReadWrite);
 
         let data_store = Rc::new(RefCell::new(Some(drag_data_store)));
 
-        DataTransfer::new_with_proto(window, proto, can_gc, data_store)
+        DataTransfer::new_with_proto(cx, window, proto, data_store)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-datatransfer-dropeffect>
@@ -129,8 +130,8 @@ impl DataTransferMethods<crate::DomTypeHolder> for DataTransfer {
             .data_store
             .borrow()
             .as_ref()
-            .is_some_and(|data_store| data_store.mode() == Mode::ReadWrite)
-            && VALID_EFFECTS_ALLOWED.contains(&&*value.str())
+            .is_some_and(|data_store| data_store.mode() == Mode::ReadWrite) &&
+            VALID_EFFECTS_ALLOWED.contains(&&*value.str())
         {
             *self.drop_effect.borrow_mut() = value;
         }
@@ -165,8 +166,8 @@ impl DataTransferMethods<crate::DomTypeHolder> for DataTransfer {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-datatransfer-types>
-    fn Types(&self, cx: JSContext, can_gc: CanGc, retval: MutableHandleValue) {
-        self.items.frozen_types(cx, retval, can_gc);
+    fn Types(&self, cx: &mut js::context::JSContext, retval: MutableHandleValue) {
+        self.items.frozen_types(cx, retval);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-datatransfer-getdata>
@@ -188,15 +189,18 @@ impl DataTransferMethods<crate::DomTypeHolder> for DataTransfer {
         // Step 4 Let convert-to-URL be false.
         let mut convert_to_url = false;
 
-        let type_ = match_domstring_ascii!(format,
+        let type_override = match_domstring_ascii!(format,
             // Step 5 If format equals "text", change it to "text/plain".
-            "text" => DOMString::from("text/plain"),
+            "text" => Some(DOMString::from_static("text/plain")),
             // Step 6 If format equals "url", change it to "text/uri-list" and set convert-to-URL to true.
             "url" => {
                 convert_to_url = true;
-                DOMString::from("text/uri-list")
+                Some(DOMString::from_static("text/uri-list"))
             },
-            _ => format.clone(),);
+            _ => None,
+        );
+        // Clone outside of `match_domstring_ascii!` to avoid "RefCell already borrowed" panic
+        let type_ = type_override.unwrap_or_else(|| format.clone());
 
         let data = data_store.find_matching_text(&type_);
 
@@ -255,16 +259,16 @@ impl DataTransferMethods<crate::DomTypeHolder> for DataTransfer {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-datatransfer-files>
-    fn Files(&self, can_gc: CanGc) -> DomRoot<FileList> {
+    fn Files(&self, cx: &mut js::context::JSContext) -> DomRoot<FileList> {
         // Step 1 Start with an empty list.
         let mut files = Vec::new();
 
         // Step 2 If the DataTransfer is not associated with a data store return the empty list.
         if let Some(data_store) = self.data_store.borrow().as_ref() {
-            data_store.files(&self.global(), can_gc, &mut files);
+            data_store.files(cx, &self.global(), &mut files);
         }
 
         // Step 5
-        FileList::new(self.global().as_window(), files, can_gc)
+        FileList::new(cx, self.global().as_window(), files)
     }
 }

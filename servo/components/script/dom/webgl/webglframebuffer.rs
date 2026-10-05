@@ -8,6 +8,9 @@ use std::cell::Cell;
 use dom_struct::dom_struct;
 #[cfg(feature = "webxr")]
 use euclid::Size2D;
+use js::context::JSContext;
+use script_bindings::cell::DomRefCell;
+use script_bindings::reflector::reflect_dom_object_with_cx;
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
     WebGLCommand, WebGLError, WebGLFramebufferBindingRequest, WebGLFramebufferId,
@@ -16,10 +19,9 @@ use servo_canvas_traits::webgl::{
 #[cfg(feature = "webxr")]
 use webxr_api::Viewport;
 
-use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{DomGlobal, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 #[cfg(feature = "webxr")]
 use crate::dom::bindings::root::MutNullableDom;
 use crate::dom::bindings::root::{Dom, DomRoot};
@@ -29,7 +31,6 @@ use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext}
 use crate::dom::webgl::webgltexture::WebGLTexture;
 #[cfg(feature = "webxr")]
 use crate::dom::xrsession::XRSession;
-use crate::script_runtime::CanGc;
 
 pub(crate) enum CompleteForRendering {
     Complete,
@@ -157,7 +158,7 @@ pub(crate) struct WebGLFramebuffer {
     depth: DomRefCell<Option<WebGLFramebufferAttachment>>,
     stencil: DomRefCell<Option<WebGLFramebufferAttachment>>,
     depthstencil: DomRefCell<Option<WebGLFramebufferAttachment>>,
-    color_read_buffer: DomRefCell<u32>,
+    color_read_buffer: Cell<u32>,
     color_draw_buffers: DomRefCell<Vec<u32>>,
     is_initialized: Cell<bool>,
     // Framebuffers for XR keep a reference to the XR session.
@@ -179,7 +180,7 @@ impl WebGLFramebuffer {
             depth: DomRefCell::new(None),
             stencil: DomRefCell::new(None),
             depthstencil: DomRefCell::new(None),
-            color_read_buffer: DomRefCell::new(constants::COLOR_ATTACHMENT0),
+            color_read_buffer: Cell::new(constants::COLOR_ATTACHMENT0),
             color_draw_buffers: DomRefCell::new(vec![constants::COLOR_ATTACHMENT0]),
             is_initialized: Cell::new(false),
             #[cfg(feature = "webxr")]
@@ -189,13 +190,13 @@ impl WebGLFramebuffer {
     }
 
     pub(crate) fn maybe_new(
+        cx: &mut JSContext,
         context: &WebGLRenderingContext,
-        can_gc: CanGc,
     ) -> Option<DomRoot<Self>> {
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::CreateFramebuffer(sender));
         let id = receiver.recv().unwrap()?;
-        let framebuffer = WebGLFramebuffer::new(context, id, can_gc);
+        let framebuffer = WebGLFramebuffer::new(cx, context, id);
         Some(framebuffer)
     }
 
@@ -203,12 +204,12 @@ impl WebGLFramebuffer {
     // https://github.com/servo/servo/issues/24498
     #[cfg(feature = "webxr")]
     pub(crate) fn maybe_new_webxr(
+        cx: &mut JSContext,
         session: &XRSession,
         context: &WebGLRenderingContext,
         size: Size2D<i32, Viewport>,
-        can_gc: CanGc,
     ) -> Option<DomRoot<Self>> {
-        let framebuffer = Self::maybe_new(context, can_gc)?;
+        let framebuffer = Self::maybe_new(cx, context)?;
         framebuffer.size.set(Some((size.width, size.height)));
         framebuffer.status.set(constants::FRAMEBUFFER_COMPLETE);
         framebuffer.xr_session.set(Some(session));
@@ -216,14 +217,14 @@ impl WebGLFramebuffer {
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         context: &WebGLRenderingContext,
         id: WebGLFramebufferId,
-        can_gc: CanGc,
     ) -> DomRoot<Self> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(WebGLFramebuffer::new_inherited(context, id)),
             &*context.global(),
-            can_gc,
+            cx,
         )
     }
 }
@@ -336,10 +337,10 @@ impl WebGLFramebuffer {
             }
         }
 
-        if let Some(format) = format {
-            if constraints.all(|c| *c != format) {
-                return Err(constants::FRAMEBUFFER_INCOMPLETE_ATTACHMENT);
-            }
+        if let Some(format) = format &&
+            constraints.all(|c| *c != format)
+        {
+            return Err(constants::FRAMEBUFFER_INCOMPLETE_ATTACHMENT);
         }
 
         Ok(())
@@ -571,19 +572,19 @@ impl WebGLFramebuffer {
             ];
             let mut clear_bits = 0;
             for &(attachment, bits) in &attachments {
-                if let Some(ref att) = *attachment.borrow() {
-                    if att.needs_initialization() {
-                        att.mark_initialized();
-                        clear_bits |= bits;
-                    }
+                if let Some(ref att) = *attachment.borrow() &&
+                    att.needs_initialization()
+                {
+                    att.mark_initialized();
+                    clear_bits |= bits;
                 }
             }
             for attachment in self.colors.iter() {
-                if let Some(ref att) = *attachment.borrow() {
-                    if att.needs_initialization() {
-                        att.mark_initialized();
-                        clear_bits |= constants::COLOR_BUFFER_BIT;
-                    }
+                if let Some(ref att) = *attachment.borrow() &&
+                    att.needs_initialization()
+                {
+                    att.mark_initialized();
+                    clear_bits |= constants::COLOR_BUFFER_BIT;
                 }
             }
 
@@ -928,11 +929,10 @@ impl WebGLFramebuffer {
         }
     }
 
-    fn with_matching_textures<F>(&self, texture: &WebGLTexture, mut closure: F)
+    fn with_matching_textures_id<F>(&self, tex_id: WebGLTextureId, mut closure: F)
     where
         F: FnMut(&DomRefCell<Option<WebGLFramebufferAttachment>>, u32),
     {
-        let tex_id = texture.id();
         let attachments = [
             (&self.depth, constants::DEPTH_ATTACHMENT),
             (&self.stencil, constants::STENCIL_ATTACHMENT),
@@ -984,13 +984,13 @@ impl WebGLFramebuffer {
         Ok(())
     }
 
-    pub(crate) fn detach_texture(&self, texture: &WebGLTexture) -> WebGLResult<()> {
+    pub(crate) fn detach_texture(&self, tex_id: WebGLTextureId) -> WebGLResult<()> {
         // Opaque framebuffers cannot have their attachments changed
         // https://immersive-web.github.io/webxr/#opaque-framebuffer
         self.validate_transparent()?;
 
         let mut depth_or_stencil_updated = false;
-        self.with_matching_textures(texture, |att, name| {
+        self.with_matching_textures_id(tex_id, |att, name| {
             depth_or_stencil_updated |= INTERESTING_ATTACHMENT_POINTS.contains(&name);
             if let Some(att) = &*att.borrow() {
                 att.detach();
@@ -1013,7 +1013,7 @@ impl WebGLFramebuffer {
     }
 
     pub(crate) fn invalidate_texture(&self, texture: &WebGLTexture) {
-        self.with_matching_textures(texture, |_att, _name| {
+        self.with_matching_textures_id(texture.id(), |_att, _name| {
             self.update_status();
         });
     }
@@ -1029,7 +1029,7 @@ impl WebGLFramebuffer {
             _ => return Err(WebGLError::InvalidOperation),
         };
 
-        *self.color_read_buffer.borrow_mut() = buffer;
+        self.color_read_buffer.set(buffer);
         context.send_command(WebGLCommand::ReadBuffer(buffer));
         Ok(())
     }
@@ -1063,7 +1063,7 @@ impl WebGLFramebuffer {
     }
 
     pub(crate) fn read_buffer(&self) -> u32 {
-        *self.color_read_buffer.borrow()
+        self.color_read_buffer.get()
     }
 
     pub(crate) fn draw_buffer_i(&self, index: usize) -> u32 {

@@ -3,20 +3,20 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
+use js::context::{JSContext, NoGC};
 use js::gc::HandleObject;
 use rustc_hash::FxHashMap;
 use script_bindings::codegen::GenericBindings::QuotaExceededErrorBinding::{
     QuotaExceededErrorMethods, QuotaExceededErrorOptions,
 };
 use script_bindings::num::Finite;
+use script_bindings::reflector::{reflect_dom_object_with_cx, reflect_dom_object_with_proto};
 use script_bindings::root::DomRoot;
-use script_bindings::script_runtime::CanGc;
 use script_bindings::str::DOMString;
 use servo_base::id::{QuotaExceededErrorId, QuotaExceededErrorIndex};
 use servo_constellation_traits::SerializableQuotaExceededError;
 
 use crate::dom::bindings::error::Error;
-use crate::dom::bindings::reflector::{reflect_dom_object, reflect_dom_object_with_proto};
 use crate::dom::bindings::serializable::Serializable;
 use crate::dom::bindings::structuredclone::StructuredData;
 use crate::dom::types::{DOMException, GlobalScope};
@@ -46,16 +46,16 @@ impl QuotaExceededError {
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         global: &GlobalScope,
         message: DOMString,
         quota: Option<Finite<f64>>,
         requested: Option<Finite<f64>>,
-        can_gc: CanGc,
     ) -> DomRoot<Self> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(Self::new_inherited(message, quota, requested)),
             global,
-            can_gc,
+            cx,
         )
     }
 }
@@ -63,9 +63,9 @@ impl QuotaExceededError {
 impl QuotaExceededErrorMethods<crate::DomTypeHolder> for QuotaExceededError {
     /// <https://webidl.spec.whatwg.org/#dom-quotaexceedederror-quotaexceedederror>
     fn Constructor(
+        cx: &mut JSContext,
         global: &GlobalScope,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
         message: DOMString,
         options: &QuotaExceededErrorOptions,
     ) -> Result<DomRoot<Self>, Error> {
@@ -89,12 +89,13 @@ impl QuotaExceededErrorMethods<crate::DomTypeHolder> for QuotaExceededError {
         }
         // If this’s quota is not null, this’s requested is not null, and this’s requested
         // is less than this’s quota, then throw a RangeError.
-        if let (Some(quota), Some(requested)) = (options.quota, options.requested) {
-            if *requested < *quota {
-                return Err(Error::Range(c"requested is less than quota".to_owned()));
-            }
+        if let (Some(quota), Some(requested)) = (options.quota, options.requested) &&
+            *requested < *quota
+        {
+            return Err(Error::Range(c"requested is less than quota".to_owned()));
         }
         Ok(reflect_dom_object_with_proto(
+            cx,
             Box::new(QuotaExceededError::new_inherited(
                 message,
                 options.quota,
@@ -102,7 +103,6 @@ impl QuotaExceededErrorMethods<crate::DomTypeHolder> for QuotaExceededError {
             )),
             global,
             proto,
-            can_gc,
         ))
     }
 
@@ -124,8 +124,8 @@ impl Serializable for QuotaExceededError {
     type Data = SerializableQuotaExceededError;
 
     /// <https://webidl.spec.whatwg.org/#quotaexceedederror>
-    fn serialize(&self) -> Result<(QuotaExceededErrorId, Self::Data), ()> {
-        let (_, dom_exception) = self.dom_exception.serialize()?;
+    fn serialize(&self, no_gc: &NoGC) -> Result<(QuotaExceededErrorId, Self::Data), ()> {
+        let (_, dom_exception) = self.dom_exception.serialize(no_gc)?;
         let serialized = SerializableQuotaExceededError {
             dom_exception,
             quota: self.quota.as_deref().copied(),
@@ -136,14 +136,15 @@ impl Serializable for QuotaExceededError {
 
     /// <https://webidl.spec.whatwg.org/#quotaexceedederror>
     fn deserialize(
+        cx: &mut JSContext,
         owner: &GlobalScope,
         serialized: Self::Data,
-        can_gc: CanGc,
     ) -> Result<DomRoot<Self>, ()>
     where
         Self: Sized,
     {
         Ok(Self::new(
+            cx,
             owner,
             DOMString::from(serialized.dom_exception.message),
             serialized
@@ -154,7 +155,6 @@ impl Serializable for QuotaExceededError {
                 .requested
                 .map(|val| Finite::new(val).ok_or(()))
                 .transpose()?,
-            can_gc,
         ))
     }
 

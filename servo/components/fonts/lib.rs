@@ -6,6 +6,7 @@
 
 mod font;
 mod font_context;
+pub mod font_feature_values;
 mod font_store;
 mod glyph;
 #[expect(unsafe_code)]
@@ -27,10 +28,10 @@ pub use font_context::{
 pub use font_store::FontTemplates;
 pub use fonts_traits::*;
 pub(crate) use glyph::*;
-pub use glyph::{GlyphInfo, GlyphStore};
+pub use glyph::{GlyphInfo, ShapedText, ShapedTextSlice, ShapedTextSliceType, ShapedTextSlicer};
+use icu_locale_core::subtags::Language;
 pub use platform::font_list::fallback_font_families;
 pub(crate) use shapers::*;
-use style::values::computed::XLang;
 pub use system_font_service::SystemFontService;
 use unicode_properties::{EmojiStatus, UnicodeEmoji, emoji};
 
@@ -47,7 +48,7 @@ pub(crate) enum EmojiPresentationPreference {
 pub struct FallbackFontSelectionOptions {
     pub(crate) character: char,
     pub(crate) presentation_preference: EmojiPresentationPreference,
-    pub(crate) lang: XLang,
+    pub(crate) language: Language,
 }
 
 impl Default for FallbackFontSelectionOptions {
@@ -55,13 +56,13 @@ impl Default for FallbackFontSelectionOptions {
         Self {
             character: ' ',
             presentation_preference: EmojiPresentationPreference::None,
-            lang: XLang::get_initial_value(),
+            language: Language::UNKNOWN,
         }
     }
 }
 
 impl FallbackFontSelectionOptions {
-    pub(crate) fn new(character: char, next_character: Option<char>, lang: XLang) -> Self {
+    pub fn new(character: char, next_character: Option<char>, language: Language) -> Self {
         let presentation_preference = match next_character {
             Some(next_character) if emoji::is_emoji_presentation_selector(next_character) => {
                 EmojiPresentationPreference::Emoji
@@ -75,10 +76,10 @@ impl FallbackFontSelectionOptions {
             // of the emoji presentation selectors above).
             _ if matches!(
                 character.emoji_status(),
-                EmojiStatus::EmojiPresentation
-                    | EmojiStatus::EmojiPresentationAndModifierBase
-                    | EmojiStatus::EmojiPresentationAndEmojiComponent
-                    | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+                EmojiStatus::EmojiPresentation |
+                    EmojiStatus::EmojiPresentationAndModifierBase |
+                    EmojiStatus::EmojiPresentationAndEmojiComponent |
+                    EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
             ) =>
             {
                 EmojiPresentationPreference::Emoji
@@ -89,7 +90,7 @@ impl FallbackFontSelectionOptions {
         Self {
             character,
             presentation_preference,
-            lang,
+            language,
         }
     }
 }

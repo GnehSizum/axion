@@ -9,17 +9,16 @@ use js::context::JSContext;
 use js::jsapi::Heap;
 use js::jsval::{JSVal, UndefinedValue};
 use js::rust::MutableHandleValue;
-use script_bindings::script_runtime::CanGc;
+use script_bindings::cell::DomRefCell;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use storage_traits::indexeddb::{IndexedDBKeyRange, IndexedDBKeyType, IndexedDBRecord};
 
-use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::IDBCursorBinding::{
     IDBCursorDirection, IDBCursorMethods,
 };
 use crate::dom::bindings::codegen::UnionTypes::IDBObjectStoreOrIDBIndex;
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::refcounted::Trusted;
-use crate::dom::bindings::reflector::{Reflector, reflect_dom_object};
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::structuredclone;
 use crate::dom::globalscope::GlobalScope;
@@ -27,7 +26,7 @@ use crate::dom::indexeddb::idbindex::IDBIndex;
 use crate::dom::indexeddb::idbobjectstore::IDBObjectStore;
 use crate::dom::indexeddb::idbrequest::IDBRequest;
 use crate::dom::indexeddb::idbtransaction::IDBTransaction;
-use crate::indexeddb::key_type_to_jsval;
+use crate::dom::indexeddb::key::key_type_to_jsval;
 
 #[derive(JSTraceable, MallocSizeOf)]
 #[expect(unused)]
@@ -56,6 +55,10 @@ pub(crate) struct IDBCursor {
     /// <https://www.w3.org/TR/IndexedDB-3/#cursor-key>
     #[no_trace]
     key: DomRefCell<Option<IndexedDBKeyType>>,
+    #[ignore_malloc_size_of = "mozjs"]
+    cached_key: DomRefCell<Option<Heap<JSVal>>>,
+    #[ignore_malloc_size_of = "mozjs"]
+    cached_primary_key: DomRefCell<Option<Heap<JSVal>>>,
     /// <https://www.w3.org/TR/IndexedDB-3/#cursor-value>
     #[ignore_malloc_size_of = "mozjs"]
     value: Heap<JSVal>,
@@ -89,6 +92,8 @@ impl IDBCursor {
             direction,
             position: DomRefCell::new(None),
             key: DomRefCell::new(None),
+            cached_key: DomRefCell::new(None),
+            cached_primary_key: DomRefCell::new(None),
             value: Heap::default(),
             got_value: Cell::new(got_value),
             object_store_position: DomRefCell::new(None),
@@ -100,6 +105,7 @@ impl IDBCursor {
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        cx: &mut JSContext,
         global: &GlobalScope,
         transaction: &IDBTransaction,
         direction: IDBCursorDirection,
@@ -107,9 +113,8 @@ impl IDBCursor {
         source: ObjectStoreOrIndex,
         range: IndexedDBKeyRange,
         key_only: bool,
-        can_gc: CanGc,
     ) -> DomRoot<IDBCursor> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(IDBCursor::new_inherited(
                 transaction,
                 direction,
@@ -119,20 +124,35 @@ impl IDBCursor {
                 key_only,
             )),
             global,
-            can_gc,
+            cx,
         )
     }
 
     fn set_position(&self, position: Option<IndexedDBKeyType>) {
+        let changed = *self.position.borrow() != position;
         *self.position.borrow_mut() = position;
+        if changed {
+            *self.cached_primary_key.borrow_mut() = None;
+        }
     }
 
     fn set_key(&self, key: Option<IndexedDBKeyType>) {
+        let key_changed = {
+            let current_key = self.key.borrow();
+            current_key.as_ref() != key.as_ref()
+        };
         *self.key.borrow_mut() = key;
+        if key_changed {
+            *self.cached_key.borrow_mut() = None;
+        }
     }
 
     fn set_object_store_position(&self, object_store_position: Option<IndexedDBKeyType>) {
+        let changed = *self.object_store_position.borrow() != object_store_position;
         *self.object_store_position.borrow_mut() = object_store_position;
+        if changed {
+            *self.cached_primary_key.borrow_mut() = None;
+        }
     }
 
     pub(crate) fn set_request(&self, request: &IDBRequest) {
@@ -172,18 +192,50 @@ impl IDBCursorMethods<crate::DomTypeHolder> for IDBCursor {
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-key>
     fn Key(&self, cx: &mut JSContext, mut value: MutableHandleValue) {
+        // The key getter steps are to return the result of converting a key to a value with the cursor’s current key.
+        //
+        // NOTE: If key returns an object (e.g. a Date or Array), it returns the
+        // same object instance every time it is inspected, until the cursor’s key is changed.
+        // This means that if the object is modified, those modifications will be seen by
+        // anyone inspecting the value of the cursor. However modifying such an object does not
+        // modify the contents of the database.
+        if let Some(cached) = &*self.cached_key.borrow() {
+            value.set(cached.get());
+            return;
+        }
+
         match self.key.borrow().as_ref() {
-            Some(key) => key_type_to_jsval(cx, key, value),
+            Some(key) => key_type_to_jsval(cx, key, value.reborrow()),
             None => value.set(UndefinedValue()),
         }
+
+        *self.cached_key.borrow_mut() = Some(Heap::default());
+        self.cached_key.borrow().as_ref().unwrap().set(value.get());
     }
 
     /// <https://www.w3.org/TR/IndexedDB-3/#dom-idbcursor-primarykey>
     fn PrimaryKey(&self, cx: &mut JSContext, mut value: MutableHandleValue) {
+        // NOTE: If primaryKey returns an object (e.g. a Date or Array),
+        // it returns the same object instance every time it is inspected,
+        // until the cursor’s effective key is changed. This means that if the object is modified,
+        // those modifications will be seen by anyone inspecting the value of the cursor.
+        // However modifying such an object does not modify the contents of the database.
+        if let Some(cached) = &*self.cached_primary_key.borrow() {
+            value.set(cached.get());
+            return;
+        }
+
         match self.effective_key() {
-            Some(effective_key) => key_type_to_jsval(cx, &effective_key, value),
+            Some(effective_key) => key_type_to_jsval(cx, &effective_key, value.reborrow()),
             None => value.set(UndefinedValue()),
         }
+
+        *self.cached_primary_key.borrow_mut() = Some(Heap::default());
+        self.cached_primary_key
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .set(value.get());
     }
 
     /// <https://w3c.github.io/IndexedDB/#dom-idbcursor-request>
@@ -275,8 +327,8 @@ pub(crate) fn iterate_cursor(
                 // than key.
                 let requirement2 = || match &primary_key {
                     Some(primary_key) => key.as_ref().is_some_and(|key| {
-                        (&record.key == key && &record.primary_key >= primary_key)
-                            || &record.key > key
+                        (&record.key == key && &record.primary_key >= primary_key) ||
+                            &record.key > key
                     }),
                     _ => true,
                 };
@@ -293,11 +345,11 @@ pub(crate) fn iterate_cursor(
                 // record’s key is greater than position.
                 let requirement4 = || match (&position, source) {
                     (Some(position), ObjectStoreOrIndex::Index(_)) => {
-                        (&record.key == position
-                            && object_store_position.as_ref().is_some_and(
+                        (&record.key == position &&
+                            object_store_position.as_ref().is_some_and(
                                 |object_store_position| &record.primary_key > object_store_position,
-                            ))
-                            || &record.key > position
+                            )) ||
+                            &record.key > position
                     },
                     _ => true,
                 };
@@ -306,11 +358,11 @@ pub(crate) fn iterate_cursor(
                 let requirement5 = || range.contains(&record.key);
 
                 // NOTE: Use closures here for lazy computation on requirements.
-                requirement1()
-                    && requirement2()
-                    && requirement3()
-                    && requirement4()
-                    && requirement5()
+                requirement1() &&
+                    requirement2() &&
+                    requirement3() &&
+                    requirement4() &&
+                    requirement5()
             }),
             // "nextunique"
             IDBCursorDirection::Nextunique => records.iter().find(|record| {
@@ -352,8 +404,8 @@ pub(crate) fn iterate_cursor(
                     // key.
                     let requirement2 = || match &primary_key {
                         Some(primary_key) => key.as_ref().is_some_and(|key| {
-                            (&record.key == key && &record.primary_key <= primary_key)
-                                || &record.key < key
+                            (&record.key == key && &record.primary_key <= primary_key) ||
+                                &record.key < key
                         }),
                         _ => true,
                     };
@@ -372,13 +424,13 @@ pub(crate) fn iterate_cursor(
                     // record’s key is less than position.
                     let requirement4 = || match (&position, source) {
                         (Some(position), ObjectStoreOrIndex::Index(_)) => {
-                            (&record.key == position
-                                && object_store_position.as_ref().is_some_and(
+                            (&record.key == position &&
+                                object_store_position.as_ref().is_some_and(
                                     |object_store_position| {
                                         &record.primary_key < object_store_position
                                     },
-                                ))
-                                || &record.key < position
+                                )) ||
+                                &record.key < position
                         },
                         _ => true,
                     };
@@ -387,11 +439,11 @@ pub(crate) fn iterate_cursor(
                     let requirement5 = || range.contains(&record.key);
 
                     // NOTE: Use closures here for lazy computation on requirements.
-                    requirement1()
-                        && requirement2()
-                        && requirement3()
-                        && requirement4()
-                        && requirement5()
+                    requirement1() &&
+                        requirement2() &&
+                        requirement3() &&
+                        requirement4() &&
+                        requirement5()
                 })
             },
             // "prevunique"
@@ -487,12 +539,7 @@ pub(crate) fn iterate_cursor(
         postcard::from_bytes(&found_record.value)
             .map_err(|_| Error::Data(None))
             .and_then(|data| {
-                structuredclone::read(
-                    global,
-                    data,
-                    new_cursor_value.handle_mut(),
-                    CanGc::from_cx(cx),
-                )
+                structuredclone::read(cx, global, data, new_cursor_value.handle_mut())
             })?;
         cursor.value.set(new_cursor_value.get());
     }

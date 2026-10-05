@@ -199,25 +199,24 @@ impl HstsList {
         entries.retain(|e| !e.is_expired());
     }
 
-    /// Step 2.9 of <https://fetch.spec.whatwg.org/#concept-main-fetch>.
+    /// Step 10 of <https://fetch.spec.whatwg.org/#concept-main-fetch>.
     pub fn apply_hsts_rules(&self, url: &mut ServoUrl) {
         if url.scheme() != "http" && url.scheme() != "ws" {
             return;
         }
 
         let upgrade_scheme = if pref!(network_enforce_tls_enabled) {
-            if (!pref!(network_enforce_tls_localhost)
-                && match url.host() {
+            if (!pref!(network_enforce_tls_localhost) &&
+                match url.host() {
                     Some(Host::Domain(domain)) => {
                         domain.ends_with(".localhost") || domain == "localhost"
                     },
                     Some(Host::Ipv4(ipv4)) => ipv4.is_loopback(),
                     Some(Host::Ipv6(ipv6)) => ipv6.is_loopback(),
                     _ => false,
-                })
-                || (!pref!(network_enforce_tls_onion)
-                    && url
-                        .domain()
+                }) ||
+                (!pref!(network_enforce_tls_onion) &&
+                    url.domain()
                         .is_some_and(|domain| domain.ends_with(".onion")))
             {
                 url.domain()
@@ -244,25 +243,25 @@ impl HstsList {
             return;
         }
 
-        if let Some(header) = headers.typed_get::<StrictTransportSecurity>() {
-            if let Some(host) = url.domain() {
-                let include_subdomains = if header.include_subdomains() {
-                    IncludeSubdomains::Included
-                } else {
-                    IncludeSubdomains::NotIncluded
-                };
+        if let Some(header) = headers.typed_get::<StrictTransportSecurity>() &&
+            let Some(host) = url.domain()
+        {
+            let include_subdomains = if header.include_subdomains() {
+                IncludeSubdomains::Included
+            } else {
+                IncludeSubdomains::NotIncluded
+            };
 
-                if let Some(entry) =
-                    HstsEntry::new(host.to_owned(), include_subdomains, Some(header.max_age()))
-                {
-                    info!("adding host {} to the strict transport security list", host);
-                    info!("- max-age {}", header.max_age().as_secs());
-                    if header.include_subdomains() {
-                        info!("- includeSubdomains");
-                    }
-
-                    self.push(entry);
+            if let Some(entry) =
+                HstsEntry::new(host.to_owned(), include_subdomains, Some(header.max_age()))
+            {
+                info!("adding host {} to the strict transport security list", host);
+                info!("- max-age {}", header.max_age().as_secs());
+                if header.include_subdomains() {
+                    info!("- includeSubdomains");
                 }
+
+                self.push(entry);
             }
         }
     }

@@ -2,8 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::borrow::Cow;
-
+use layout_api::LayoutNode;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use servo_arc::Arc;
 use style::properties::ComputedValues;
@@ -21,9 +20,11 @@ use crate::cell::ArcRefCell;
 use crate::context::LayoutContext;
 use crate::dom::{BoxSlot, LayoutBox, NodeExt};
 use crate::dom_traversal::{
-    Contents, NodeAndStyleInfo, NonReplacedContents, PseudoElementContentItem, TraversalHandler,
+    BoxTreeString, Contents, NodeAndStyleInfo, NonReplacedContents, PseudoElementContentItem,
+    TraversalHandler,
 };
 use crate::flow::float::FloatBox;
+use crate::flow::same_formatting_context_block::SameFormattingContextBlock;
 use crate::flow::{BlockContainer, BlockFormattingContext, BlockLevelBox};
 use crate::formatting_contexts::{
     IndependentFormattingContext, IndependentFormattingContextContents,
@@ -209,18 +210,18 @@ impl BlockContainer {
     ) -> BlockContainer {
         let mut builder = BlockContainerBuilder::new(context, info, propagated_data);
 
-        if is_list_item {
-            if let Some((marker_info, marker_contents)) = crate::lists::make_marker(context, info) {
-                match marker_info.style.clone_list_style_position() {
-                    ListStylePosition::Inside => {
-                        builder.handle_list_item_marker_inside(&marker_info, marker_contents)
-                    },
-                    ListStylePosition::Outside => builder.handle_list_item_marker_outside(
-                        &marker_info,
-                        marker_contents,
-                        info.style.clone(),
-                    ),
-                }
+        if is_list_item &&
+            let Some((marker_info, marker_contents)) = crate::lists::make_marker(context, info)
+        {
+            match marker_info.style.clone_list_style_position() {
+                ListStylePosition::Inside => {
+                    builder.handle_list_item_marker_inside(&marker_info, marker_contents)
+                },
+                ListStylePosition::Outside => builder.handle_list_item_marker_outside(
+                    &marker_info,
+                    marker_contents,
+                    info.style.clone(),
+                ),
             }
         }
 
@@ -290,7 +291,10 @@ impl<'dom, 'style> BlockContainerBuilder<'dom, 'style> {
         }
 
         let context = self.context;
-        let block_level_boxes = if self.context.use_rayon {
+        let block_level_boxes = if self
+            .context
+            .should_parallelize(self.block_level_boxes.len())
+        {
             self.block_level_boxes
                 .into_par_iter()
                 .map(|block_level_job| block_level_job.finish(context))
@@ -319,15 +323,21 @@ impl<'dom, 'style> BlockContainerBuilder<'dom, 'style> {
         // creation of an inline table. It requires the parent to be an inline box.
         let inline_table = self.currently_processing_inline_box();
 
-        let contents: Vec<AnonymousTableContent<'dom>> =
+        let mut contents: Vec<AnonymousTableContent<'dom>> =
             self.anonymous_table_content.drain(..).collect();
-        let last_text = match contents.last() {
-            Some(AnonymousTableContent::Text(info, text)) => Some((info.clone(), text.clone())),
-            _ => None,
-        };
+        let last_element_index = contents
+            .iter()
+            .rposition(|content| matches!(content, AnonymousTableContent::Element { .. }))
+            .expect("Anonymous table contents should include some table-level element");
+        let trailing_contents = contents.split_off(last_element_index + 1);
 
-        let (table_info, ifc) =
-            Table::construct_anonymous(self.context, self.info, contents, self.propagated_data);
+        let (table_info, ifc) = Table::construct_anonymous(
+            self.context,
+            self,
+            self.info,
+            contents,
+            self.propagated_data,
+        );
 
         if inline_table {
             self.ensure_inline_formatting_context_builder()
@@ -349,7 +359,7 @@ impl<'dom, 'style> BlockContainerBuilder<'dom, 'style> {
             });
         }
 
-        // If the last element in the anonymous table content is whitespace, that
+        // If the anonymous table contents end with trailing whitespace, that
         // whitespace doesn't actually belong to the table. It should be processed outside
         // ie become a space between the anonymous table and the rest of the block
         // content. Anonymous tables are really only constructed around internal table
@@ -358,8 +368,17 @@ impl<'dom, 'style> BlockContainerBuilder<'dom, 'style> {
         //
         // See https://drafts.csswg.org/css-tables/#fixup-algorithm sections "Remove
         // irrelevant boxes" and "Generate missing parents."
-        if let Some((info, text)) = last_text {
-            self.handle_text(&info, text);
+        for content in trailing_contents {
+            match content {
+                AnonymousTableContent::Text(info, text) => self.handle_text(&info, text),
+                AnonymousTableContent::EnterDisplayContents(styles) => {
+                    self.enter_display_contents(styles)
+                },
+                AnonymousTableContent::LeaveDisplayContents => self.leave_display_contents(),
+                AnonymousTableContent::Element { .. } => {
+                    unreachable!("All elements were placed inside the table")
+                },
+            }
         }
     }
 }
@@ -408,7 +427,7 @@ impl<'dom> TraversalHandler<'dom> for BlockContainerBuilder<'dom, '_> {
         }
     }
 
-    fn handle_text(&mut self, info: &NodeAndStyleInfo<'dom>, text: Cow<'dom, str>) {
+    fn handle_text(&mut self, info: &NodeAndStyleInfo<'dom>, text: BoxTreeString<'dom>) {
         if text.is_empty() {
             return;
         }
@@ -432,6 +451,11 @@ impl<'dom> TraversalHandler<'dom> for BlockContainerBuilder<'dom, '_> {
     }
 
     fn enter_display_contents(&mut self, styles: SharedInlineStyles) {
+        if !self.anonymous_table_content.is_empty() {
+            self.anonymous_table_content
+                .push(AnonymousTableContent::EnterDisplayContents(styles));
+            return;
+        }
         self.display_contents_shared_styles.push(styles.clone());
         if let Some(builder) = self.inline_formatting_context_builder.as_mut() {
             builder.enter_display_contents(styles);
@@ -439,6 +463,11 @@ impl<'dom> TraversalHandler<'dom> for BlockContainerBuilder<'dom, '_> {
     }
 
     fn leave_display_contents(&mut self) {
+        if !self.anonymous_table_content.is_empty() {
+            self.anonymous_table_content
+                .push(AnonymousTableContent::LeaveDisplayContents);
+            return;
+        }
         self.display_contents_shared_styles.pop();
         if let Some(builder) = self.inline_formatting_context_builder.as_mut() {
             builder.leave_display_contents();
@@ -526,18 +555,16 @@ impl<'dom> BlockContainerBuilder<'dom, '_> {
         );
         box_slot.set(LayoutBox::InlineLevel(inline_item));
 
-        if is_list_item {
-            if let Some((marker_info, marker_contents)) =
+        if is_list_item &&
+            let Some((marker_info, marker_contents)) =
                 crate::lists::make_marker(self.context, info)
-            {
-                // Ignore `list-style-position` here:
-                // “If the list item is an inline box: this value is equivalent to `inside`.”
-                // https://drafts.csswg.org/css-lists/#list-style-position-outside
-                self.handle_list_item_marker_inside(&marker_info, marker_contents)
-            }
+        {
+            // Ignore `list-style-position` here:
+            // “If the list item is an inline box: this value is equivalent to `inside`.”
+            // https://drafts.csswg.org/css-lists/#list-style-position-outside
+            self.handle_list_item_marker_inside(&marker_info, marker_contents)
         }
 
-        // `unwrap` doesn’t panic here because `is_replaced` returned `false`.
         non_replaced_contents.traverse(self.context, info, self);
 
         self.finish_anonymous_table_if_needed();
@@ -640,22 +667,22 @@ impl<'dom> BlockContainerBuilder<'dom, '_> {
         contents: Contents,
         box_slot: BoxSlot<'dom>,
     ) {
-        if let Some(builder) = self.inline_formatting_context_builder.as_mut() {
-            if !builder.is_empty {
-                let constructor = || {
-                    ArcRefCell::new(FloatBox::construct(
-                        self.context,
-                        info,
-                        display_inside,
-                        contents,
-                        self.propagated_data,
-                    ))
-                };
-                let old_layout_box = box_slot.take_layout_box();
-                let inline_level_box = builder.push_float_box(constructor, old_layout_box);
-                box_slot.set(LayoutBox::InlineLevel(inline_level_box));
-                return;
-            }
+        if let Some(builder) = self.inline_formatting_context_builder.as_mut() &&
+            !builder.is_empty
+        {
+            let constructor = || {
+                ArcRefCell::new(FloatBox::construct(
+                    self.context,
+                    info,
+                    display_inside,
+                    contents,
+                    self.propagated_data,
+                ))
+            };
+            let old_layout_box = box_slot.take_layout_box();
+            let inline_level_box = builder.push_float_box(constructor, old_layout_box);
+            box_slot.set(LayoutBox::InlineLevel(inline_level_box));
+            return;
         }
 
         let kind = BlockLevelCreator::OutOfFlowFloatBox {
@@ -717,11 +744,13 @@ impl BlockLevelJob<'_> {
             BlockLevelCreator::SameFormattingContextBlock(intermediate_block_container) => {
                 let contents = intermediate_block_container.finish(context, info);
                 let contains_floats = contents.contains_floats();
-                ArcRefCell::new(BlockLevelBox::SameFormattingContextBlock {
-                    base: LayoutBoxBase::new(info.into(), info.style.clone()),
-                    contents,
-                    contains_floats,
-                })
+
+                let base = LayoutBoxBase::new(info.into(), info.style.clone());
+                base.set_subtree_size(contents.subtree_size() + 1);
+
+                ArcRefCell::new(BlockLevelBox::SameFormattingContextBlock(
+                    SameFormattingContextBlock::new(base, contents, contains_floats),
+                ))
             },
             BlockLevelCreator::Independent {
                 display_inside,

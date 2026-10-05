@@ -88,7 +88,7 @@ impl ServoUrl {
     }
 
     pub fn origin(&self) -> ImmutableOrigin {
-        ImmutableOrigin::new(self.0.origin())
+        ImmutableOrigin::new(self.as_url())
     }
 
     pub fn scheme(&self) -> &str {
@@ -109,12 +109,12 @@ impl ServoUrl {
     /// <https://url.spec.whatwg.org/#special-scheme>
     pub fn is_special_scheme(&self) -> bool {
         let scheme = self.scheme();
-        scheme == "ftp"
-            || scheme == "file"
-            || scheme == "http"
-            || scheme == "https"
-            || scheme == "ws"
-            || scheme == "wss"
+        scheme == "ftp" ||
+            scheme == "file" ||
+            scheme == "http" ||
+            scheme == "https" ||
+            scheme == "ws" ||
+            scheme == "wss"
     }
 
     /// <https://url.spec.whatwg.org/#url-equivalence>
@@ -235,15 +235,17 @@ impl ServoUrl {
 
     /// <https://w3c.github.io/webappsec-secure-contexts/#potentially-trustworthy-url>
     pub fn is_potentially_trustworthy(&self) -> bool {
-        // Step 1
+        // Step 1. If url is "about:blank" or "about:srcdoc", return "Potentially Trustworthy".
         if self.as_str() == "about:blank" || self.as_str() == "about:srcdoc" {
             return true;
         }
-        // Step 2
+
+        // Step 2. If url’s scheme is "data", return "Potentially Trustworthy".
         if self.scheme() == "data" {
             return true;
         }
-        // Step 3
+
+        // Step 3. Return the result of executing § 3.1 Is origin potentially trustworthy? on url’s origin.
         self.origin().is_potentially_trustworthy()
     }
 
@@ -252,7 +254,9 @@ impl ServoUrl {
         // A URL matches about:blank if
 
         // its scheme is "about",
-        let scheme_is_about = self.scheme() == "about";
+        if self.scheme() != "about" {
+            return false;
+        }
 
         // its path contains a single string "blank",
         let path_is_blank = self.0.path() == "blank";
@@ -264,7 +268,7 @@ impl ServoUrl {
         // and its host is null.
         let null_host = self.0.host().is_none();
 
-        scheme_is_about && path_is_blank && empty_username_and_password && null_host
+        path_is_blank && empty_username_and_password && null_host
     }
 }
 

@@ -19,12 +19,13 @@ use fontconfig_sys::{
     FcPatternDestroy, FcPatternGetInteger, FcPatternGetString, FcResultMatch, FcSetSystem,
 };
 use fonts_traits::{FontTemplate, FontTemplateDescriptor, LocalFontIdentifier};
+use icu_locale_core::subtags::language;
 use libc::{c_char, c_int};
 use log::debug;
 use servo_base::text::{UnicodeBlock, UnicodeBlockMethod};
 use style::Atom;
 use style::values::computed::font::GenericFontFamily;
-use style::values::computed::{FontStretch, FontStyle, FontWeight, XLang};
+use style::values::computed::{FontStretch, FontStyle, FontWeight};
 use unicode_script::Script;
 
 use crate::font::map_platform_values_to_style_values;
@@ -46,8 +47,8 @@ where
             let mut family: *mut FcChar8 = ptr::null_mut();
             let mut format: *mut FcChar8 = ptr::null_mut();
             let mut v: c_int = 0;
-            if FcPatternGetString(*font, FC_FONTFORMAT.as_ptr() as *mut c_char, v, &mut format)
-                != FcResultMatch
+            if FcPatternGetString(*font, FC_FONTFORMAT.as_ptr() as *mut c_char, v, &mut format) !=
+                FcResultMatch
             {
                 continue;
             }
@@ -58,8 +59,8 @@ where
                 continue;
             }
 
-            while FcPatternGetString(*font, FC_FAMILY.as_ptr() as *mut c_char, v, &mut family)
-                == FcResultMatch
+            while FcPatternGetString(*font, FC_FAMILY.as_ptr() as *mut c_char, v, &mut family) ==
+                FcResultMatch
             {
                 let family_name = match CStr::from_ptr(family as *const c_char).to_str() {
                     Ok(family_name) => family_name,
@@ -164,7 +165,6 @@ where
                 FontIdentifier::Local(local_font_identifier),
                 descriptor,
                 None,
-                None,
             ))
         }
 
@@ -188,21 +188,21 @@ pub fn fallback_font_families(options: FallbackFontSelectionOptions) -> Vec<&'st
             // In Japanese typography, it is not common to use different fonts
             // for Kanji(Han), Hiragana, and Katakana within the same document.
             // We uniformly fallback to Japanese fonts when the document language is Japanese.
-            _ if options.lang == XLang(Atom::from("ja")) => {
+            _ if options.language == language!("ja") => {
                 families.push("TakaoPGothic");
             },
             _ if matches!(
                 Script::from(options.character),
                 Script::Bopomofo | Script::Han
-            ) && options.lang != XLang(Atom::from("ja")) =>
+            ) && options.language != language!("ja") =>
             {
                 families.push("WenQuanYi Micro Hei");
             },
-            UnicodeBlock::HalfwidthandFullwidthForms
-            | UnicodeBlock::EnclosedIdeographicSupplement => families.push("WenQuanYi Micro Hei"),
-            UnicodeBlock::Hiragana
-            | UnicodeBlock::Katakana
-            | UnicodeBlock::KatakanaPhoneticExtensions => {
+            UnicodeBlock::HalfwidthandFullwidthForms |
+            UnicodeBlock::EnclosedIdeographicSupplement => families.push("WenQuanYi Micro Hei"),
+            UnicodeBlock::Hiragana |
+            UnicodeBlock::Katakana |
+            UnicodeBlock::KatakanaPhoneticExtensions => {
                 families.push("TakaoPGothic");
             },
             _ => {},

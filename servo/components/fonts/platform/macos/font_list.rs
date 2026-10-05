@@ -5,6 +5,7 @@
 use std::ffi::c_void;
 
 use fonts_traits::LocalFontIdentifier;
+use icu_locale_core::subtags::language;
 use log::debug;
 use objc2_core_foundation::{CFDictionary, CFRetained, CFSet, CFString, CFType, CFURL};
 use objc2_core_text::{
@@ -13,7 +14,6 @@ use objc2_core_text::{
 };
 use servo_base::text::{UnicodeBlock, UnicodeBlockMethod, unicode_plane};
 use style::Atom;
-use style::values::computed::XLang;
 use style::values::computed::font::GenericFontFamily;
 use unicode_script::Script;
 
@@ -63,7 +63,6 @@ pub(crate) fn font_template_for_local_font_descriptor(
     Some(FontTemplate::new(
         FontIdentifier::Local(identifier),
         font_template_descriptor_from_ctfont_attributes(traits),
-        None,
         None,
     ))
 }
@@ -120,11 +119,11 @@ pub fn fallback_font_families(options: FallbackFontSelectionOptions) -> Vec<&'st
             // we'll just try common default fonts here.
             _ if matches!(
                 script,
-                Script::Common
-                    | Script::Inherited
-                    | Script::Latin
-                    | Script::Cyrillic
-                    | Script::Greek
+                Script::Common |
+                    Script::Inherited |
+                    Script::Latin |
+                    Script::Cyrillic |
+                    Script::Greek
             ) =>
             {
                 families.push("Lucida Grande");
@@ -132,7 +131,7 @@ pub fn fallback_font_families(options: FallbackFontSelectionOptions) -> Vec<&'st
             // In Japanese typography, it is not common to use different fonts
             // for Kanji(Han), Hiragana, and Katakana within the same document. Since Hiragino supports
             // a comprehensive set of Japanese kanji, we uniformly fallback to Hiragino for all Japanese text.
-            _ if options.lang == XLang(Atom::from("ja")) => {
+            _ if options.language == language!("ja") => {
                 families.push("Hiragino Sans");
                 families.push("Hiragino Kaku Gothic ProN");
             },
@@ -140,8 +139,8 @@ pub fn fallback_font_families(options: FallbackFontSelectionOptions) -> Vec<&'st
             // we'll probably just get HAN much of the time, so the choice of which
             // language font to try for fallback is rather arbitrary. Usually, though,
             // we hope that font prefs will have handled this earlier.
-            _ if matches!(script, Script::Bopomofo | Script::Han)
-                && options.lang != XLang(Atom::from("ja")) =>
+            _ if matches!(script, Script::Bopomofo | Script::Han) &&
+                options.language != language!("ja") =>
             {
                 // TODO: Need to differentiate between traditional and simplified Han here!
                 families.push("Songti SC");
@@ -150,17 +149,17 @@ pub fn fallback_font_families(options: FallbackFontSelectionOptions) -> Vec<&'st
                     families.push("SimSun-ExtB");
                 }
             },
-            UnicodeBlock::Hiragana
-            | UnicodeBlock::Katakana
-            | UnicodeBlock::KatakanaPhoneticExtensions => {
+            UnicodeBlock::Hiragana |
+            UnicodeBlock::Katakana |
+            UnicodeBlock::KatakanaPhoneticExtensions => {
                 families.push("Hiragino Sans");
                 families.push("Hiragino Kaku Gothic ProN");
             },
-            UnicodeBlock::HangulJamo
-            | UnicodeBlock::HangulJamoExtendedA
-            | UnicodeBlock::HangulJamoExtendedB
-            | UnicodeBlock::HangulCompatibilityJamo
-            | UnicodeBlock::HangulSyllables => {
+            UnicodeBlock::HangulJamo |
+            UnicodeBlock::HangulJamoExtendedA |
+            UnicodeBlock::HangulJamoExtendedB |
+            UnicodeBlock::HangulCompatibilityJamo |
+            UnicodeBlock::HangulSyllables => {
                 families.push("Nanum Gothic");
                 families.push("Apple SD Gothic Neo");
             },
@@ -172,10 +171,10 @@ pub fn fallback_font_families(options: FallbackFontSelectionOptions) -> Vec<&'st
             UnicodeBlock::Devanagari | UnicodeBlock::DevanagariExtended => {
                 families.push("Devanagari Sangam MN")
             },
-            UnicodeBlock::Ethiopic
-            | UnicodeBlock::EthiopicExtended
-            | UnicodeBlock::EthiopicExtendedA
-            | UnicodeBlock::EthiopicSupplement => families.push("Kefa"),
+            UnicodeBlock::Ethiopic |
+            UnicodeBlock::EthiopicExtended |
+            UnicodeBlock::EthiopicExtendedA |
+            UnicodeBlock::EthiopicSupplement => families.push("Kefa"),
             UnicodeBlock::Georgian | UnicodeBlock::GeorgianSupplement => families.push("Helvetica"),
             UnicodeBlock::Gujarati => families.push("Gujarati Sangam MN"),
             UnicodeBlock::Gurmukhi => families.push("Gurmukhi MN"),
@@ -184,9 +183,9 @@ pub fn fallback_font_families(options: FallbackFontSelectionOptions) -> Vec<&'st
             UnicodeBlock::Khmer => families.push("Khmer MN"),
             UnicodeBlock::Lao => families.push("Lao MN"),
             UnicodeBlock::Malayalam => families.push("Malayalam Sangam MN"),
-            UnicodeBlock::Myanmar
-            | UnicodeBlock::MyanmarExtendedA
-            | UnicodeBlock::MyanmarExtendedB => families.push("Myanmar MN"),
+            UnicodeBlock::Myanmar |
+            UnicodeBlock::MyanmarExtendedA |
+            UnicodeBlock::MyanmarExtendedB => families.push("Myanmar MN"),
             UnicodeBlock::Oriya => families.push("Oriya Sangam MN"),
             UnicodeBlock::Sinhala | UnicodeBlock::SinhalaArchaicNumbers => {
                 families.push("Sinhala Sangam MN")
@@ -197,8 +196,8 @@ pub fn fallback_font_families(options: FallbackFontSelectionOptions) -> Vec<&'st
                 families.push("Thonburi");
             },
             UnicodeBlock::Tibetan => families.push("Kailasa"),
-            UnicodeBlock::UnifiedCanadianAboriginalSyllabics
-            | UnicodeBlock::UnifiedCanadianAboriginalSyllabicsExtended => {
+            UnicodeBlock::UnifiedCanadianAboriginalSyllabics |
+            UnicodeBlock::UnifiedCanadianAboriginalSyllabicsExtended => {
                 families.push("Euphemia UCAS")
             },
             UnicodeBlock::YiSyllables | UnicodeBlock::YiRadicals => {

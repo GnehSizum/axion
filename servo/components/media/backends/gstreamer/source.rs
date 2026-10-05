@@ -9,13 +9,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use glib::subclass::prelude::*;
 use gstreamer::prelude::*;
 use gstreamer::subclass::prelude::*;
-use once_cell::sync::Lazy;
 use url::Url;
 
 const MAX_SRC_QUEUE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB.
 
 // Implementation sub-module of the GObject
 mod imp {
+    use std::sync::LazyLock;
+
     use super::*;
 
     macro_rules! inner_appsrc_proxy {
@@ -46,6 +47,7 @@ mod imp {
         srcpad: gstreamer::GhostPad,
         position: Mutex<Position>,
         seeking: AtomicBool,
+        seekable: AtomicBool,
         size: Mutex<Option<i64>>,
     }
 
@@ -62,6 +64,10 @@ mod imp {
             if self.appsrc.size() == -1 {
                 self.appsrc.set_size(size);
             }
+        }
+
+        pub fn set_seekable(&self, seekable: bool) {
+            self.seekable.store(seekable, Ordering::Relaxed);
         }
 
         pub fn set_seek_offset<O: IsA<gstreamer::Object>>(&self, parent: &O, offset: u64) -> bool {
@@ -86,10 +92,10 @@ mod imp {
         pub fn set_seek_done(&self) {
             self.seeking.store(false, Ordering::Relaxed);
 
-            if let Some(size) = self.size.lock().unwrap().take() {
-                if self.appsrc.size() == -1 {
-                    self.appsrc.set_size(size);
-                }
+            if let Some(size) = self.size.lock().unwrap().take() &&
+                self.appsrc.size() == -1
+            {
+                self.appsrc.set_size(size);
             }
 
             let mut pos = self.position.lock().unwrap();
@@ -123,18 +129,18 @@ mod imp {
 
             // set the stream size (in bytes) to current offset if
             // size is lesser than it
-            if let Ok(size) = u64::try_from(self.appsrc.size()) {
-                if pos.offset > size {
-                    gstreamer::debug!(
-                        self.cat,
-                        obj = parent,
-                        "Updating internal size from {} to {}",
-                        size,
-                        pos.offset
-                    );
-                    let new_size = i64::try_from(pos.offset).unwrap();
-                    self.appsrc.set_size(new_size);
-                }
+            if let Ok(size) = u64::try_from(self.appsrc.size()) &&
+                pos.offset > size
+            {
+                gstreamer::debug!(
+                    self.cat,
+                    obj = parent,
+                    "Updating internal size from {} to {}",
+                    size,
+                    pos.offset
+                );
+                let new_size = i64::try_from(pos.offset).unwrap();
+                self.appsrc.set_size(new_size);
             }
 
             // Split the received vec<> into buffers that are of a
@@ -203,22 +209,25 @@ mod imp {
 
             // In order to make buffering/downloading work as we want, apart from
             // setting the appropriate flags on the player playbin,
-            // the source needs to either:
+            // the source:
             //
-            // 1. be an http, mms, etc. scheme
-            // 2. report that it is "bandwidth limited".
-            //
-            // 1. is not straightforward because we are using a servosrc scheme for now.
-            // This may change in the future if we end up handling http/https/data
-            // URIs, which is what WebKit does.
-            //
-            // For 2. we need to make servosrc handle the scheduling properties query
-            // to report that it "is bandwidth limited".
+            // 1. Announces seekability when the media element confirmed it.
+            // 2. Assumes seekable = true as default.
+            // 3. Keeps assuming bandwidth limited.
+            // 4. set_seekable is called when range requests are supported or not.
             let ret = match query.view_mut() {
                 gstreamer::QueryViewMut::Scheduling(ref mut q) => {
-                    let flags = gstreamer::SchedulingFlags::SEQUENTIAL
-                        | gstreamer::SchedulingFlags::BANDWIDTH_LIMITED;
-                    q.set(flags, 1, -1, 0);
+                    let seekability_flag = if self.seekable.load(Ordering::Relaxed) {
+                        gstreamer::SchedulingFlags::SEEKABLE
+                    } else {
+                        gstreamer::SchedulingFlags::SEQUENTIAL
+                    };
+                    q.set(
+                        seekability_flag | gstreamer::SchedulingFlags::BANDWIDTH_LIMITED,
+                        1,
+                        -1,
+                        0,
+                    );
                     q.add_scheduling_modes([gstreamer::PadMode::Push]);
                     true
                 },
@@ -271,6 +280,7 @@ mod imp {
                 srcpad: ghost_pad,
                 position: Mutex::new(Default::default()),
                 seeking: AtomicBool::new(false),
+                seekable: AtomicBool::new(true),
                 size: Mutex::new(None),
             }
         }
@@ -316,20 +326,21 @@ mod imp {
     // Implementation of gstreamer::Element virtual methods
     impl ElementImpl for ServoSrc {
         fn metadata() -> Option<&'static gstreamer::subclass::ElementMetadata> {
-            static ELEMENT_METADATA: Lazy<gstreamer::subclass::ElementMetadata> = Lazy::new(|| {
-                gstreamer::subclass::ElementMetadata::new(
-                    "Servo Media Source",
-                    "Source/Audio/Video",
-                    "Feed player with media data",
-                    "Servo developers",
-                )
-            });
+            static ELEMENT_METADATA: LazyLock<gstreamer::subclass::ElementMetadata> =
+                LazyLock::new(|| {
+                    gstreamer::subclass::ElementMetadata::new(
+                        "Servo Media Source",
+                        "Source/Audio/Video",
+                        "Feed player with media data",
+                        "Servo developers",
+                    )
+                });
 
             Some(&*ELEMENT_METADATA)
         }
 
         fn pad_templates() -> &'static [gstreamer::PadTemplate] {
-            static PAD_TEMPLATES: Lazy<Vec<gstreamer::PadTemplate>> = Lazy::new(|| {
+            static PAD_TEMPLATES: LazyLock<Vec<gstreamer::PadTemplate>> = LazyLock::new(|| {
                 let caps = gstreamer::Caps::new_any();
                 let src_pad_template = gstreamer::PadTemplate::new(
                     "src",
@@ -361,10 +372,10 @@ mod imp {
         }
 
         fn set_uri(&self, uri: &str) -> Result<(), glib::Error> {
-            if let Ok(uri) = Url::parse(uri) {
-                if uri.scheme() == "servosrc" {
-                    return Ok(());
-                }
+            if let Ok(uri) = Url::parse(uri) &&
+                uri.scheme() == "servosrc"
+            {
+                return Ok(());
             }
             Err(glib::Error::new(
                 gstreamer::URIError::BadUri,
@@ -387,6 +398,10 @@ unsafe impl Sync for ServoSrc {}
 impl ServoSrc {
     pub fn set_size(&self, size: i64) {
         self.imp().set_size(size);
+    }
+
+    pub fn set_seekable(&self, seekable: bool) {
+        self.imp().set_seekable(seekable);
     }
 
     pub fn set_seek_offset(&self, offset: u64) -> bool {

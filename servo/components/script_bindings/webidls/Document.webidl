@@ -93,7 +93,7 @@ dictionary ImportNodeOptions {
 // [LegacyOverrideBuiltIns]
 partial /*sealed*/ interface Document {
   [NewObject, Throws]
-  static Document parseHTMLUnsafe((TrustedHTML or DOMString) html);
+  static Document parseHTMLUnsafe((TrustedHTML or DOMString) html, optional SetHTMLUnsafeOptions options = {});
 
   // resource metadata management
   [PutForwards=href, LegacyUnforgeable]
@@ -238,3 +238,9 @@ partial interface Document {
 
 // https://html.spec.whatwg.org/multipage/#dom-document-nameditem-filter
 typedef (WindowProxy or Element or HTMLCollection) NamedPropertyValue;
+
+// https://wicg.github.io/sanitizer-api/#sanitizer-api
+partial interface Document {
+  [Throws]
+  static Document parseHTML(DOMString html, optional SetHTMLOptions options = {});
+};

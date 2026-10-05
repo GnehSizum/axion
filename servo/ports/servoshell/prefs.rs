@@ -19,26 +19,38 @@ use log::warn;
 use serde_json::Value;
 use servo::user_contents::UserStyleSheet;
 use servo::{
-    DeviceIndependentPixel, DiagnosticsLogging, Opts, OutputOptions, PrefValue, Preferences,
+    DeviceIndependentPixel, DiagnosticsLogging, DiagnosticsLoggingOption, Opts, OutputOptions,
+    PrefValue, Preferences,
 };
 use url::Url;
 
 use crate::VERSION;
 
+/// Preferences enabled when servoshell is launched with the `--enable-experimental-web-platform-features` flag.
+///
+/// These preferences are disabled by default but activated in experimental mode.
+/// For more details, see the
+/// [experimental features documentation](https://book.servo.org/design-documentation/experimental-features.html).
 pub(crate) static EXPERIMENTAL_PREFS: &[&str] = &[
     "dom_async_clipboard_enabled",
     "dom_exec_command_enabled",
     "dom_fontface_enabled",
+    "dom_indexeddb_enabled",
     "dom_intersection_observer_enabled",
     "dom_navigator_protocol_handlers_enabled",
     "dom_notification_enabled",
     "dom_offscreen_canvas_enabled",
     "dom_permissions_enabled",
+    "dom_sanitizer_enabled",
+    "dom_storage_manager_api_enabled",
     "dom_webgl2_enabled",
     "dom_webgpu_enabled",
+    "layout_css_alpha_color_function_enabled",
+    "layout_css_attr_enabled",
+    "layout_css_ellipse_corners_enabled",
+    "layout_css_progress_function_enabled",
     "layout_columns_enabled",
     "layout_container_queries_enabled",
-    "layout_grid_enabled",
     "layout_variable_fonts_enabled",
 ];
 
@@ -78,6 +90,9 @@ pub(crate) struct ServoShellPreferences {
     pub output_image_path: Option<String>,
     /// Whether or not to exit after Servo detects a stable output image in all WebViews.
     pub exit_after_stable_image: bool,
+    /// Where to load userscripts from, if any.
+    /// and if the option isn't passed userscripts won't be loaded.
+    pub userscripts_directory: Option<PathBuf>,
     /// A set of [`UserStylesheets`] to load for content.
     pub user_stylesheets: Vec<Rc<UserStyleSheet>>,
     /// `None` to disable WebDriver or `Some` with a port number to start a server to listen to
@@ -110,6 +125,7 @@ impl Default for ServoShellPreferences {
             url: None,
             output_image_path: None,
             exit_after_stable_image: false,
+            userscripts_directory: None,
             user_stylesheets: Default::default(),
             webdriver_port: Cell::new(None),
             #[cfg(target_env = "ohos")]
@@ -334,6 +350,15 @@ fn profile() -> impl Parser<Option<OutputOptions>> {
     )
 }
 
+fn userscripts() -> impl Parser<Option<PathBuf>> {
+    let arg = long("userscripts")
+        .argument::<String>("your/directory")
+        .help("Uses userscripts in specified full path")
+        .map(PathBuf::from);
+
+    construct!([arg]).optional()
+}
+
 fn webdriver_port() -> impl Parser<Option<u16>> {
     flag_with_default_parser(
         None,
@@ -418,6 +443,12 @@ struct CmdArgs {
     headless: bool,
 
     ///
+    /// Path to a hosts file (like `/etc/hosts`).
+    /// Ignored if the `HOST_FILE` environment variable is set.
+    #[bpaf(long("host-file"), argument("/path/to/hosts"))]
+    host_file: Option<PathBuf>,
+
+    ///
     ///  Whether or not to completely ignore certificate errors.
     #[bpaf(long)]
     ignore_certificate_errors: bool,
@@ -500,6 +531,9 @@ struct CmdArgs {
     #[bpaf(long("simulate-touch-events"))]
     simulate_touch_events: bool,
 
+    /// Use temporary storage (data on disk will not persist across restarts).
+    #[bpaf(long)]
+    temporary_storage: bool,
     /// Define a custom filter for traces. Overrides `SERVO_TRACING` if set.
     #[bpaf(long("tracing-filter"), argument("FILTER"))]
     tracing_filter: Option<String>,
@@ -518,6 +552,11 @@ struct CmdArgs {
     user_agent: Option<String>,
 
     ///
+    ///  Uses userscripts in a specified full path.
+    #[bpaf(external)]
+    userscripts: Option<PathBuf>,
+
+    ///
     /// Add each of the given UTF-8 encoded CSS files in the space or comma-separated
     /// list as user stylesheet to apply to every page loaded.
     #[bpaf(argument::<String>("file.css"), parse(parse_user_stylesheets),
@@ -533,12 +572,16 @@ struct CmdArgs {
     #[bpaf(argument::<String>("1024x740"), parse(parse_resolution_string), fallback(None))]
     window_size: Option<Size2D<u32, DeviceIndependentPixel>>,
 
+    /// Set js_mem_gc_zeal_level=2 and js_mem_gc_zeal_frequency=1
+    #[bpaf(long)]
+    zealous_gc: bool,
+
     /// The url we should load.
     #[bpaf(positional("URL"), fallback(String::from("https://www.servo.org")))]
     url: String,
 }
 
-fn update_preferences_from_command_line_arguemnts(
+fn update_preferences_from_command_line_arguments(
     preferences: &mut Preferences,
     cmd_args: &CmdArgs,
 ) {
@@ -575,6 +618,16 @@ fn update_preferences_from_command_line_arguemnts(
 
     if cmd_args.webdriver_port.is_some() {
         preferences.dom_testing_html_input_element_select_files_enabled = true;
+    }
+
+    if cmd_args.zealous_gc {
+        #[cfg(not(feature = "debugmozjs"))]
+        warn!(
+            "The zealous-gc option requires Servo to be compiled with debug-mozjs to take effect."
+        );
+
+        preferences.js_mem_gc_zeal_level = 2;
+        preferences.js_mem_gc_zeal_frequency = 1;
     }
 }
 
@@ -627,6 +680,7 @@ fn parse_arguments_helper(args_without_binary: Args) -> ArgumentParsingResult {
                 fs::create_dir_all(config_dir).expect("Could not create config_dir");
             }
         });
+    let temporary_storage = cmd_args.temporary_storage;
     if let Some(ref time_profiler_trace_path) = cmd_args.profiler_trace_path {
         let mut path = PathBuf::from(time_profiler_trace_path);
         path.pop();
@@ -635,7 +689,7 @@ fn parse_arguments_helper(args_without_binary: Args) -> ArgumentParsingResult {
 
     let mut preferences = get_preferences(&cmd_args.prefs_file, &config_dir);
 
-    update_preferences_from_command_line_arguemnts(&mut preferences, &cmd_args);
+    update_preferences_from_command_line_arguments(&mut preferences, &cmd_args);
 
     // FIXME: enable JIT compilation on 32-bit Android after the startup crash issue (#31134) is fixed.
     if cfg!(target_os = "android") && cfg!(target_pointer_width = "32") {
@@ -665,6 +719,7 @@ fn parse_arguments_helper(args_without_binary: Args) -> ArgumentParsingResult {
         webdriver_port: Cell::new(cmd_args.webdriver_port),
         output_image_path: cmd_args.output.map(|p| p.to_string_lossy().into_owned()),
         exit_after_stable_image: cmd_args.exit,
+        userscripts_directory: cmd_args.userscripts,
         user_stylesheets: cmd_args.user_stylesheet,
         experimental_preferences_enabled: cmd_args.enable_experimental_web_platform_features,
         #[cfg(target_env = "ohos")]
@@ -676,15 +731,9 @@ fn parse_arguments_helper(args_without_binary: Args) -> ArgumentParsingResult {
         ..Default::default()
     };
 
-    let mut debug_options = DiagnosticsLogging::new();
-
-    // Parse -Z command-line flags.
-    for debug_string in cmd_args.debug {
-        if let Err(error) = debug_options.extend_from_string(&debug_string) {
-            eprintln!("Could not parse debug logging option: {error}");
-            return ArgumentParsingResult::ErrorParsing;
-        }
-    }
+    let Ok(debug_options) = parse_diagnostics_logging(cmd_args.debug) else {
+        return ArgumentParsingResult::ErrorParsing;
+    };
 
     let opts = Opts {
         debug: debug_options,
@@ -699,10 +748,12 @@ fn parse_arguments_helper(args_without_binary: Args) -> ArgumentParsingResult {
         random_pipeline_closure_probability: cmd_args.random_pipeline_closure_probability,
         random_pipeline_closure_seed: cmd_args.random_pipeline_closure_seed,
         config_dir,
+        temporary_storage,
         shaders_path: cmd_args.shaders,
         certificate_path: cmd_args
             .certificate_path
             .map(|p| p.to_string_lossy().into_owned()),
+        host_file: cmd_args.host_file,
         ignore_certificate_errors: cmd_args.ignore_certificate_errors,
         unminify_js: cmd_args.unminify_js,
         local_script_source: cmd_args
@@ -713,6 +764,34 @@ fn parse_arguments_helper(args_without_binary: Args) -> ArgumentParsingResult {
     };
 
     ArgumentParsingResult::ChromeProcess(opts, preferences, servoshell_preferences)
+}
+
+/// Parse the '-Z' command-line flags.
+fn parse_diagnostics_logging(cli_options: Vec<String>) -> Result<DiagnosticsLogging, ()> {
+    fn print_option(name: &str, description: &str) {
+        println!("\t{:<35} {}", name, description);
+    }
+
+    if cli_options.contains(&"help".into()) {
+        // TODO: Remove hardcoded binary name by perhaps receiving this as an argument.
+        println!("Usage: servoshell -Z option,[option,...]\n\twhere options include:");
+        print_option("help", "Show this help message");
+        for option in DiagnosticsLoggingOption::iter() {
+            print_option(option.help_option(), option.help_message())
+        }
+
+        std::process::exit(0);
+    }
+
+    let mut diagnostics_logging = DiagnosticsLogging::new();
+    for cli_option in cli_options.iter() {
+        if let Err(error) = diagnostics_logging.extend_from_string(cli_option) {
+            eprintln!("Could not parse debug logging option: {error}");
+            return Err(());
+        }
+    }
+
+    Ok(diagnostics_logging)
 }
 
 #[cfg(test)]
@@ -744,6 +823,12 @@ fn test_parse_pref_from_command_line() {
     // Test with numbers
     let preferences = test_parse_pref("layout_threads=42");
     assert_eq!(preferences.layout_threads, 42);
+
+    // Test with unsigned numbers
+    let preferences = test_parse_pref("network_http_cache_size=50");
+    assert_eq!(preferences.network_http_cache_size, 50);
+    let preferences = test_parse_pref("network_connection_timeout=30");
+    assert_eq!(preferences.network_connection_timeout, 30);
 
     // Test string.
     let preferences = test_parse_pref("fonts_default=Lucida");
@@ -835,4 +920,9 @@ fn test_servoshell_cmd() {
             .unwrap(),
         String::from("/tmp/test")
     );
+
+    assert!({
+        let p = test_parse("--zealous-gc").1;
+        p.js_mem_gc_zeal_level == 2 && p.js_mem_gc_zeal_frequency == 1
+    });
 }

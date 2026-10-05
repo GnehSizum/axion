@@ -5,11 +5,10 @@
 use app_units::Au;
 use euclid::Rect;
 use euclid::default::Size2D as UntypedSize2D;
-use layout_api::AxesOverflow;
-use layout_api::wrapper_traits::{LayoutNode, ThreadSafeLayoutElement, ThreadSafeLayoutNode};
+use layout_api::{AxesOverflow, LayoutElement, LayoutNode};
 use malloc_size_of_derive::MallocSizeOf;
 use paint_api::display_list::AxesScrollSensitivity;
-use script::layout_dom::{ServoLayoutNode, ServoThreadSafeLayoutNode};
+use script::layout_dom::ServoLayoutNode;
 use style::values::computed::Overflow;
 use style_traits::CSSPixel;
 
@@ -39,7 +38,6 @@ pub struct BoxTree {
 impl BoxTree {
     #[servo_tracing::instrument(name = "Box Tree Construction", skip_all)]
     pub(crate) fn construct(context: &LayoutContext, root_element: ServoLayoutNode<'_>) -> Self {
-        let root_element = root_element.to_threadsafe();
         let boxes = construct_for_root_element(context, root_element);
 
         // Zero box for `:root { display: none }`, one for the root element otherwise.
@@ -61,7 +59,7 @@ impl BoxTree {
     }
 
     fn viewport_overflow(
-        root_element: ServoThreadSafeLayoutNode<'_>,
+        root_element: ServoLayoutNode<'_>,
         root_box: Option<&ArcRefCell<BlockLevelBox>>,
     ) -> AxesOverflow {
         // From https://www.w3.org/TR/css-overflow-3/#overflow-propagation:
@@ -84,7 +82,7 @@ impl BoxTree {
             // Unlike what the spec implies, we stop iterating when we find the first <body>,
             // even if it's not suitable because it lacks a box. This matches other browsers.
             // See https://github.com/w3c/csswg-drafts/issues/12644
-            let body = root_element.children().find(|child| {
+            let body = root_element.flat_tree_children().find(|child| {
                 child
                     .as_element()
                     .is_some_and(|element| element.is_body_element_of_html_element_root())
@@ -105,10 +103,11 @@ impl BoxTree {
 
         root_box.borrow_mut().with_base_mut(|base| {
             let root_overflow = AxesOverflow::from(&*base.style);
-            if root_overflow.x == Overflow::Visible && root_overflow.y == Overflow::Visible {
-                if let Some(body_overflow) = propagate_from_body() {
-                    return body_overflow;
-                }
+            if root_overflow.x == Overflow::Visible &&
+                root_overflow.y == Overflow::Visible &&
+                let Some(body_overflow) = propagate_from_body()
+            {
+                return body_overflow;
             }
             base.base_fragment_info
                 .flags
@@ -120,7 +119,7 @@ impl BoxTree {
 
 fn construct_for_root_element(
     context: &LayoutContext,
-    root_element: ServoThreadSafeLayoutNode<'_>,
+    root_element: ServoLayoutNode<'_>,
 ) -> Vec<ArcRefCell<BlockLevelBox>> {
     let info = NodeAndStyleInfo::new(root_element, root_element.style(&context.style_context));
     let box_style = info.style.get_box();
@@ -180,7 +179,7 @@ impl BoxTree {
             .style_context
             .stylist
             .device()
-            .default_computed_values();
+            .default_computed_values_arc();
 
         // FIXME: use the document’s mode:
         // https://drafts.csswg.org/css-writing-modes/#principal-flow
@@ -199,6 +198,8 @@ impl BoxTree {
             layout_context,
             &mut positioning_context,
             &(&initial_containing_block).into(),
+            &initial_containing_block.size.block.into(),
+            None,
         );
 
         let mut root_fragments = independent_layout.fragments;
@@ -221,7 +222,6 @@ impl BoxTree {
         };
 
         FragmentTree::new(
-            layout_context,
             root_fragments,
             physical_containing_block,
             viewport_scroll_sensitivity,

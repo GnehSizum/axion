@@ -8,8 +8,10 @@ use std::str::FromStr;
 use data_url::mime::Mime;
 use dom_struct::dom_struct;
 use embedder_traits::EmbedderMsg;
+use js::context::JSContext;
 use js::realm::CurrentRealm;
 use js::rust::HandleValue as SafeHandleValue;
+use script_bindings::reflector::reflect_dom_object_with_cx;
 use servo_constellation_traits::BlobImpl;
 
 use super::clipboarditem::Representation;
@@ -18,7 +20,7 @@ use crate::dom::bindings::codegen::Bindings::ClipboardBinding::{
 };
 use crate::dom::bindings::error::Error;
 use crate::dom::bindings::refcounted::TrustedPromise;
-use crate::dom::bindings::reflector::{DomGlobal, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::blob::Blob;
@@ -27,9 +29,8 @@ use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::dom::promisenativehandler::{Callback, PromiseNativeHandler};
 use crate::dom::window::Window;
-use crate::realms::{InRealm, enter_realm};
+use crate::realms::enter_auto_realm;
 use crate::routed_promise::{RoutedPromiseListener, callback_promise};
-use crate::script_runtime::CanGc;
 
 /// The fulfillment handler for the reacting to representationDataPromise part of
 /// <https://w3c.github.io/clipboard-apis/#dom-clipboard-readtext>.
@@ -46,7 +47,7 @@ impl Callback for RepresentationDataPromiseFulfillmentHandler {
         // If v is a DOMString, then follow the below steps:
         // Resolve p with v.
         // Return p.
-        self.promise.resolve(cx.into(), v, CanGc::from_cx(cx));
+        self.promise.resolve(cx, v);
 
         // NOTE: Since we ask text from arboard, v can't be a Blob
         // If v is a Blob, then follow the below steps:
@@ -70,8 +71,7 @@ impl Callback for RepresentationDataPromiseRejectionHandler {
     fn callback(&self, cx: &mut CurrentRealm, _v: SafeHandleValue) {
         // Reject p with "NotFoundError" DOMException in realm.
         // Return p.
-        self.promise
-            .reject_error(Error::NotFound(None), CanGc::from_cx(cx));
+        self.promise.reject_error(cx, Error::NotFound(None));
     }
 }
 
@@ -87,19 +87,19 @@ impl Clipboard {
         }
     }
 
-    pub(crate) fn new(global: &GlobalScope, can_gc: CanGc) -> DomRoot<Clipboard> {
-        reflect_dom_object(Box::new(Clipboard::new_inherited()), global, can_gc)
+    pub(crate) fn new(cx: &mut JSContext, global: &GlobalScope) -> DomRoot<Clipboard> {
+        reflect_dom_object_with_cx(Box::new(Clipboard::new_inherited()), global, cx)
     }
 }
 
 impl ClipboardMethods<crate::DomTypeHolder> for Clipboard {
     /// <https://w3c.github.io/clipboard-apis/#dom-clipboard-readtext>
-    fn ReadText(&self, can_gc: CanGc) -> Rc<Promise> {
+    fn ReadText(&self, realm: &mut CurrentRealm) -> Rc<Promise> {
         // Step 1 Let realm be this's relevant realm.
         let global = self.global();
 
         // Step 2 Let p be a new promise in realm.
-        let p = Promise::new(&global, can_gc);
+        let p = Promise::new_in_realm(realm);
 
         // Step 3 Run the following steps in parallel:
 
@@ -122,10 +122,11 @@ impl ClipboardMethods<crate::DomTypeHolder> for Clipboard {
     }
 
     /// <https://w3c.github.io/clipboard-apis/#dom-clipboard-writetext>
-    fn WriteText(&self, data: DOMString, can_gc: CanGc) -> Rc<Promise> {
+    fn WriteText(&self, realm: &mut CurrentRealm, data: DOMString) -> Rc<Promise> {
         // Step 1 Let realm be this's relevant realm.
+        let global = self.global();
         // Step 2 Let p be a new promise in realm.
-        let p = Promise::new(&self.global(), can_gc);
+        let p = Promise::new_in_realm(realm);
 
         // Step 3 Run the following steps in parallel:
 
@@ -141,8 +142,8 @@ impl ClipboardMethods<crate::DomTypeHolder> for Clipboard {
 
         // Step 3.3 Queue a global task on the clipboard task source,
         // given realm’s global object, to perform the below steps:
-        self.global().task_manager().clipboard_task_source().queue(
-            task!(write_to_system_clipboard: move || {
+        global.task_manager().clipboard_task_source().queue(
+            task!(write_to_system_clipboard: move |cx| {
                 let promise = trusted_promise.root();
                 let global = promise.global();
 
@@ -152,9 +153,9 @@ impl ClipboardMethods<crate::DomTypeHolder> for Clipboard {
                 // Step 3.3.2 Let textBlob be a new Blob created with: type attribute set to "text/plain;charset=utf-8",
                 // and its underlying byte sequence set to the UTF-8 encoding of data.
                 let text_blob = Blob::new(
+                    cx,
                     &global,
                     BlobImpl::new_from_bytes(bytes, "text/plain;charset=utf-8".into()),
-                    CanGc::note(),
                 );
 
                 // Step 3.3.3 Add textBlob to itemList.
@@ -167,7 +168,7 @@ impl ClipboardMethods<crate::DomTypeHolder> for Clipboard {
                 write_blobs_and_option_to_the_clipboard(global.as_window(), item_list, option);
 
                 // Step 3.3.6 Resolve p.
-                promise.resolve_native(&(), CanGc::note());
+                promise.resolve_native(cx, &());
             }),
         );
 
@@ -179,9 +180,9 @@ impl ClipboardMethods<crate::DomTypeHolder> for Clipboard {
 impl RoutedPromiseListener<Result<String, String>> for Clipboard {
     fn handle_response(
         &self,
+        cx: &mut js::context::JSContext,
         response: Result<String, String>,
         promise: &Rc<Promise>,
-        can_gc: CanGc,
     ) {
         let global = self.global();
         let text = response.unwrap_or_default();
@@ -202,12 +203,7 @@ impl RoutedPromiseListener<Result<String, String>> for Clipboard {
         let representation = Representation {
             mime_type,
             is_custom: false,
-            data: Promise::new_resolved(
-                &global,
-                GlobalScope::get_cx(),
-                DOMString::from(text),
-                can_gc,
-            ),
+            data: Promise::new_resolved(cx, &global, DOMString::from(text)),
         };
 
         // Step 3.4.1.1.4 If representation’s MIME type essence is "text/plain", then:
@@ -224,16 +220,14 @@ impl RoutedPromiseListener<Result<String, String>> for Clipboard {
             promise: promise.clone(),
         });
         let handler = PromiseNativeHandler::new(
+            cx,
             &global,
             Some(fulfillment_handler),
             Some(rejection_handler),
-            can_gc,
         );
-        let realm = enter_realm(&*global);
-        let comp = InRealm::Entered(&realm);
-        representation
-            .data
-            .append_native_handler(&handler, comp, can_gc);
+        let mut realm = enter_auto_realm(cx, &*global);
+        let cx = &mut realm.current_realm();
+        representation.data.append_native_handler(cx, &handler);
 
         // Step 3.4.2 Reject p with "NotFoundError" DOMException in realm.
         // Step 3.4.3 Return p.

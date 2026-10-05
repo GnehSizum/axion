@@ -61,12 +61,10 @@ mod from_embedder {
                 Self::LogEntry(..) => target!("LogEntry"),
                 Self::NewWebView(..) => target!("NewWebView"),
                 Self::CloseWebView(..) => target!("CloseWebView"),
-                Self::SendError(..) => target!("SendError"),
                 Self::FocusWebView(..) => target!("FocusWebView"),
                 Self::BlurWebView => target!("BlurWebView"),
                 Self::ForwardInputEvent(_webview_id, event, ..) => event.log_target(),
                 Self::RefreshCursor(..) => target!("RefreshCursor"),
-                Self::ToggleProfiler(..) => target!("EnableProfiler"),
                 Self::ExitFullScreen(_) => target!("ExitFullScreen"),
                 Self::MediaSessionAction(_) => target!("MediaSessionAction"),
                 Self::SetWebViewThrottled(_, _) => target!("SetWebViewThrottled"),
@@ -123,6 +121,7 @@ mod from_script {
     impl LogTarget for servo_constellation_traits::ScriptToConstellationMessage {
         fn log_target(&self) -> &'static str {
             match self {
+                Self::ServiceWorkerAlgorithm(..) => target!("ServiceWorkerAlgorithm"),
                 Self::CompleteMessagePortTransfer(..) => target!("CompleteMessagePortTransfer"),
                 Self::MessagePortTransferResult(..) => target!("MessagePortTransferResult"),
                 Self::NewMessagePort(..) => target!("NewMessagePort"),
@@ -141,14 +140,31 @@ mod from_script {
                     target!("RemoveBroadcastChannelNameInRouter")
                 },
                 Self::ScheduleBroadcast(..) => target!("ScheduleBroadcast"),
+                Self::RegisterInterest(..) => target!("RegisterInterest"),
+                Self::UnregisterInterest(..) => target!("UnregisterInterest"),
                 Self::BroadcastStorageEvent(..) => target!("BroadcastStorageEvent"),
                 Self::ChangeRunningAnimationsState(..) => target!("ChangeRunningAnimationsState"),
+                Self::RegisterWorkerAnimationFrameProvider(..) => {
+                    target!("RegisterWorkerAnimationFrameProvider")
+                },
+                Self::UnregisterWorkerAnimationFrameProvider(..) => {
+                    target!("UnregisterWorkerAnimationFrameProvider")
+                },
+                Self::ChangeWorkerAnimationFrameProviderState(..) => {
+                    target!("ChangeWorkerAnimationFrameProviderState")
+                },
                 Self::CreateCanvasPaintThread(..) => target!("CreateCanvasPaintThread"),
-                Self::Focus(..) => target!("Focus"),
-                Self::FocusRemoteDocument(..) => target!("FocusRemoteDocument"),
+                Self::FocusAncestorBrowsingContextsForFocusingSteps(..) => {
+                    target!("FocusAncestorBrowsingContextsForFocusingSteps")
+                },
+                Self::FocusRemoteBrowsingContext(..) => target!("FocusRemoteBrowsingContext"),
                 Self::GetTopForBrowsingContext(..) => target!("GetTopForBrowsingContext"),
                 Self::GetBrowsingContextInfo(..) => target!("GetBrowsingContextInfo"),
                 Self::GetDocumentOrigin(..) => target!("GetDocumentOrigin"),
+                Self::IsCurrentlyFullyActive(..) => target!("IsCurrentlyFullyActive"),
+                Self::GetDocumentOriginDetails(..) => {
+                    target!("GetDocumentOriginDetails")
+                },
                 Self::GetChildBrowsingContextId(..) => target!("GetChildBrowsingContextId"),
                 Self::LoadComplete => target!("LoadComplete"),
                 Self::LoadUrl(..) => target!("LoadUrl"),
@@ -165,14 +181,12 @@ mod from_script {
                 Self::ScriptNewIFrame(..) => target!("ScriptNewIFrame"),
                 Self::CreateAuxiliaryWebView(..) => target!("ScriptNewAuxiliary"),
                 Self::ActivateDocument => target!("ActivateDocument"),
-                Self::SetDocumentState(..) => target!("SetDocumentState"),
                 Self::SetFinalUrl(..) => target!("SetFinalUrl"),
                 Self::LogEntry(..) => target!("LogEntry"),
                 Self::DiscardDocument => target!("DiscardDocument"),
                 Self::DiscardTopLevelBrowsingContext => target!("DiscardTopLevelBrowsingContext"),
                 Self::PipelineExited => target!("PipelineExited"),
                 Self::ForwardDOMMessage(..) => target!("ForwardDOMMessage"),
-                Self::ScheduleJob(..) => target!("ScheduleJob"),
                 Self::MediaSessionEvent(..) => target!("MediaSessionEvent"),
                 #[cfg(feature = "webgpu")]
                 Self::RequestAdapter(..) => target!("RequestAdapter"),
@@ -187,6 +201,8 @@ mod from_script {
                     target!("RespondToScreenshotReadinessRequest")
                 },
                 Self::TriggerGarbageCollection => target!("TriggerGarbageCollection"),
+                Self::AcquireWakeLock(..) => target!("AcquireWakeLock"),
+                Self::ReleaseWakeLock(..) => target!("ReleaseWakeLock"),
             }
         }
     }

@@ -29,7 +29,7 @@ embedder_traits = { package = "servo-embedder-traits", path = "../../servo/compo
 euclid = { workspace = true, optional = true }
 http = { version = "1.4", optional = true }
 net_traits = { package = "servo-net-traits", path = "../../servo/components/shared/net", optional = true }
-servo = { path = "../../servo/components/servo", default-features = false, features = ["baked-in-resources"], optional = true }
+servo = { path = "../../servo/components/servo", default-features = false, features = ["bundled", "brotli-compression-stream", "webcrypto", "webgl"], optional = true }
 thiserror.workspace = true
 tokio = { version = "1", features = ["sync"], optional = true }
 url = { workspace = true, optional = true }

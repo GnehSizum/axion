@@ -5,6 +5,8 @@
 use std::cell::Cell;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
+use script_bindings::reflector::reflect_dom_object_with_proto;
 use stylo_atoms::Atom;
 
 use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
@@ -13,13 +15,11 @@ use crate::dom::bindings::codegen::Bindings::IDBVersionChangeEventBinding::{
 };
 use crate::dom::bindings::import::module::HandleObject;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct IDBVersionChangeEvent {
@@ -38,15 +38,16 @@ impl IDBVersionChangeEvent {
     }
 
     pub fn new(
+        cx: &mut JSContext,
         global: &GlobalScope,
         type_: Atom,
         bubbles: EventBubbles,
         cancelable: EventCancelable,
         old_version: u64,
         new_version: Option<u64>,
-        can_gc: CanGc,
     ) -> DomRoot<IDBVersionChangeEvent> {
         Self::new_with_proto(
+            cx,
             global,
             None,
             type_,
@@ -54,12 +55,12 @@ impl IDBVersionChangeEvent {
             bool::from(cancelable),
             old_version,
             new_version,
-            can_gc,
         )
     }
 
     #[expect(clippy::too_many_arguments)]
     fn new_with_proto(
+        cx: &mut JSContext,
         global: &GlobalScope,
         proto: Option<HandleObject>,
         type_: Atom,
@@ -67,16 +68,15 @@ impl IDBVersionChangeEvent {
         cancelable: bool,
         old_version: u64,
         new_version: Option<u64>,
-        can_gc: CanGc,
     ) -> DomRoot<Self> {
         let ev = reflect_dom_object_with_proto(
+            cx,
             Box::new(IDBVersionChangeEvent::new_inherited(
                 old_version,
                 new_version,
             )),
             global,
             proto,
-            can_gc,
         );
         {
             let event = ev.upcast::<Event>();
@@ -87,12 +87,12 @@ impl IDBVersionChangeEvent {
 
     /// <https://w3c.github.io/IndexedDB/#fire-a-version-change-event>
     pub(crate) fn fire_version_change_event(
+        cx: &mut JSContext,
         global: &GlobalScope,
         target: &EventTarget,
         event_type: Atom,
         old_version: u64,
         new_version: Option<u64>,
-        can_gc: CanGc,
     ) -> bool {
         // Step 1: Let event be the result of creating an event using IDBVersionChangeEvent.
         // Step 2: Set event’s type attribute to e.
@@ -100,13 +100,13 @@ impl IDBVersionChangeEvent {
         // Step 4: Set event’s oldVersion attribute to oldVersion.
         // Step 5: Set event’s newVersion attribute to newVersion.
         let event = IDBVersionChangeEvent::new(
+            cx,
             global,
             event_type,
             EventBubbles::DoesNotBubble,
             EventCancelable::NotCancelable,
             old_version,
             new_version,
-            can_gc,
         );
 
         // Step 6: Let legacyOutputDidListenersThrowFlag be false.
@@ -115,9 +115,9 @@ impl IDBVersionChangeEvent {
         let _ = event
             .upcast::<Event>()
             .fire_with_legacy_output_did_listeners_throw(
+                cx,
                 target,
                 &legacy_output_did_listeners_throw,
-                can_gc,
             );
         // Step 8: Return legacyOutputDidListenersThrowFlag.
         legacy_output_did_listeners_throw.get()
@@ -127,13 +127,14 @@ impl IDBVersionChangeEvent {
 impl IDBVersionChangeEventMethods<crate::DomTypeHolder> for IDBVersionChangeEvent {
     /// <https://w3c.github.io/IndexedDB/#dom-idbversionchangeevent-idbversionchangeevent>
     fn Constructor(
+        cx: &mut JSContext,
         global: &GlobalScope,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
         type_: DOMString,
         init: &IDBVersionChangeEventInit,
     ) -> DomRoot<Self> {
         Self::new_with_proto(
+            cx,
             global,
             proto,
             Atom::from(type_),
@@ -141,7 +142,6 @@ impl IDBVersionChangeEventMethods<crate::DomTypeHolder> for IDBVersionChangeEven
             init.parent.cancelable,
             init.oldVersion,
             init.newVersion,
-            can_gc,
         )
     }
 

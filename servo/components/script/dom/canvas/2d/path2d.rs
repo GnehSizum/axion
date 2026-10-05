@@ -5,19 +5,19 @@
 use std::cell::RefCell;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use js::rust::HandleObject;
 use script_bindings::codegen::GenericBindings::DOMMatrixBinding::DOMMatrix2DInit;
 use script_bindings::error::ErrorResult;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use script_bindings::str::DOMString;
 use servo_canvas_traits::canvas::Path;
 
 use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::Path2DMethods;
 use crate::dom::bindings::error::{Error, Fallible};
-use crate::dom::bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::dommatrixreadonly::dommatrix2dinit_to_matrix;
 use crate::dom::globalscope::GlobalScope;
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct Path2D {
@@ -68,12 +68,12 @@ impl Path2D {
         // Step 3. If one or more of matrix's m11 element, m12 element, m21
         // element, m22 element, m41 element, or m42 element are infinite or
         // NaN, then return.
-        if !matrix.m11.is_finite()
-            || !matrix.m12.is_finite()
-            || !matrix.m21.is_finite()
-            || !matrix.m22.is_finite()
-            || !matrix.m31.is_finite()
-            || !matrix.m32.is_finite()
+        if !matrix.m11.is_finite() ||
+            !matrix.m12.is_finite() ||
+            !matrix.m21.is_finite() ||
+            !matrix.m22.is_finite() ||
+            !matrix.m31.is_finite() ||
+            !matrix.m32.is_finite()
         {
             return Ok(());
         }
@@ -192,35 +192,35 @@ impl Path2DMethods<crate::DomTypeHolder> for Path2D {
 
     /// <https://html.spec.whatwg.org/multipage/#dom-path2d-dev>
     fn Constructor(
+        cx: &mut JSContext,
         global: &GlobalScope,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
     ) -> DomRoot<Path2D> {
-        reflect_dom_object_with_proto(Box::new(Self::new()), global, proto, can_gc)
+        reflect_dom_object_with_proto(cx, Box::new(Self::new()), global, proto)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-path2d-dev>
     fn Constructor_(
+        cx: &mut JSContext,
         global: &GlobalScope,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
         other: &Path2D,
     ) -> DomRoot<Path2D> {
-        reflect_dom_object_with_proto(Box::new(Self::new_with_path(other)), global, proto, can_gc)
+        reflect_dom_object_with_proto(cx, Box::new(Self::new_with_path(other)), global, proto)
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-path2d-dev>
     fn Constructor__(
+        cx: &mut JSContext,
         global: &GlobalScope,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
         path_string: DOMString,
     ) -> DomRoot<Path2D> {
         reflect_dom_object_with_proto(
+            cx,
             Box::new(Self::new_with_str(&path_string.str())),
             global,
             proto,
-            can_gc,
         )
     }
 }

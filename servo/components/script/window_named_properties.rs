@@ -7,30 +7,29 @@ use std::ptr::NonNull;
 use std::sync::LazyLock;
 
 use js::conversions::jsstr_to_string;
-use js::glue::{AppendToIdVector, CreateProxyHandler, NewProxyObject, ProxyTraps};
+use js::glue::{AppendToIdVector, CreateProxyHandler, ProxyTraps};
 use js::jsapi::{
-    GetWellKnownSymbol, Handle, HandleId, HandleObject, JS_SetImmutablePrototype,
-    JSCLASS_DELAY_METADATA_BUILDER, JSCLASS_IS_PROXY, JSCLASS_RESERVED_SLOTS_MASK,
-    JSCLASS_RESERVED_SLOTS_SHIFT, JSClass, JSClass_NON_NATIVE, JSContext, JSErrNum,
-    JSPROP_READONLY, MutableHandle, MutableHandleIdVector, MutableHandleObject, ObjectOpResult,
-    PropertyDescriptor, ProxyClassExtension, ProxyClassOps, ProxyObjectOps, SymbolCode,
-    UndefinedHandleValue,
+    Handle, HandleId, HandleObject, JSCLASS_DELAY_METADATA_BUILDER, JSCLASS_IS_PROXY,
+    JSCLASS_RESERVED_SLOTS_MASK, JSCLASS_RESERVED_SLOTS_SHIFT, JSClass, JSClass_NON_NATIVE,
+    JSContext, JSErrNum, JSPROP_READONLY, MutableHandle, MutableHandleIdVector,
+    MutableHandleObject, ObjectOpResult, PropertyDescriptor, ProxyClassExtension, ProxyClassOps,
+    ProxyObjectOps, SymbolCode, UndefinedHandleValue,
 };
 use js::jsid::SymbolId;
 use js::jsval::UndefinedValue;
+use js::rust::wrappers2::{GetWellKnownSymbol, JS_SetImmutablePrototype, NewProxyObject};
 use js::rust::{
-    Handle as RustHandle, HandleObject as RustHandleObject, IntoHandle,
-    MutableHandle as RustMutableHandle, MutableHandleObject as RustMutableHandleObject,
+    Handle as RustHandle, HandleObject as RustHandleObject, MutableHandle as RustMutableHandle,
+    MutableHandleObject as RustMutableHandleObject,
 };
+use script_bindings::proxyhandler::set_property_descriptor;
 
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
-use crate::dom::bindings::proxyhandler::set_property_descriptor;
 use crate::dom::bindings::root::Root;
 use crate::dom::bindings::utils::has_property_on_prototype;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::window::Window;
 use crate::js::conversions::ToJSValConvertible;
-use crate::script_runtime::JSContext as SafeJSContext;
 
 struct SyncWrapper(*const libc::c_void);
 #[expect(unsafe_code)]
@@ -86,14 +85,15 @@ unsafe extern "C" fn get_own_property_descriptor(
     desc: MutableHandle<PropertyDescriptor>,
     is_none: *mut bool,
 ) -> bool {
-    let cx = unsafe { SafeJSContext::from_ptr(cx) };
+    // SAFETY: it is safe to construct a JSContext from an engine callback.
+    let mut cx = unsafe { js::context::JSContext::from_ptr(ptr::NonNull::new(cx).unwrap()) };
 
     if id.is_symbol() {
-        if id.get().asBits_
-            == SymbolId(unsafe { GetWellKnownSymbol(*cx, SymbolCode::toStringTag) }).asBits_
+        if id.get().asBits_ ==
+            SymbolId(unsafe { GetWellKnownSymbol(&cx, SymbolCode::toStringTag) }).asBits_
         {
-            rooted!(in(*cx) let mut rval = UndefinedValue());
-            unsafe { "WindowProperties".to_jsval(*cx, rval.handle_mut()) };
+            rooted!(&in(cx) let mut rval = UndefinedValue());
+            "WindowProperties".to_jsval(&mut cx, rval.handle_mut());
             set_property_descriptor(
                 unsafe { RustMutableHandle::from_raw(desc) },
                 rval.handle(),
@@ -105,14 +105,12 @@ unsafe extern "C" fn get_own_property_descriptor(
     }
 
     let mut found = false;
-    let lookup_succeeded = unsafe {
-        has_property_on_prototype(
-            *cx,
-            RustHandle::from_raw(proxy),
-            RustHandle::from_raw(id),
-            &mut found,
-        )
-    };
+    let lookup_succeeded = has_property_on_prototype(
+        &mut cx,
+        unsafe { RustHandle::from_raw(proxy) },
+        unsafe { RustHandle::from_raw(id) },
+        &mut found,
+    );
     if !lookup_succeeded {
         return false;
     }
@@ -121,7 +119,7 @@ unsafe extern "C" fn get_own_property_descriptor(
     }
 
     let s = if id.is_string() {
-        unsafe { jsstr_to_string(*cx, NonNull::new(id.to_string()).unwrap()) }
+        unsafe { jsstr_to_string(&cx, NonNull::new(id.to_string()).unwrap()) }
     } else if id.is_int() {
         // If the property key is an integer index, convert it to a String too.
         // For indexed access on the window object, which may shadow this, see
@@ -139,11 +137,9 @@ unsafe extern "C" fn get_own_property_descriptor(
 
     let window = Root::downcast::<Window>(unsafe { GlobalScope::from_object(proxy.get()) })
         .expect("global is not a window");
-    if let Some(obj) = window.NamedGetter(s.into()) {
-        rooted!(in(*cx) let mut rval = UndefinedValue());
-        unsafe {
-            obj.to_jsval(*cx, rval.handle_mut());
-        }
+    if let Some(obj) = window.NamedGetter(&mut cx, s.into()) {
+        rooted!(&in(cx) let mut rval = UndefinedValue());
+        obj.to_jsval(&mut cx, rval.handle_mut());
         set_property_descriptor(
             unsafe { RustMutableHandle::from_raw(desc) },
             rval.handle(),
@@ -164,7 +160,7 @@ unsafe extern "C" fn own_property_keys(
     // https://searchfox.org/mozilla-central/rev/af78418c4b5f2c8721d1a06486cf4cf0b33e1e8d/dom/base/WindowNamedPropertiesHandler.cpp#175-232
     // see also https://github.com/whatwg/html/issues/9068
     unsafe {
-        rooted!(in(cx) let mut rooted = SymbolId(GetWellKnownSymbol(cx, SymbolCode::toStringTag)));
+        rooted!(in(cx) let mut rooted = SymbolId(js::jsapi::GetWellKnownSymbol(cx, SymbolCode::toStringTag)));
         AppendToIdVector(props, rooted.handle().into());
     }
     true
@@ -244,10 +240,10 @@ unsafe extern "C" fn class_name(_cx: *mut JSContext, _proxy: HandleObject) -> *c
 #[expect(unsafe_code)]
 static CLASS: JSClass = JSClass {
     name: c"WindowProperties".as_ptr(),
-    flags: JSClass_NON_NATIVE
-        | JSCLASS_IS_PROXY
-        | JSCLASS_DELAY_METADATA_BUILDER
-        | ((1 & JSCLASS_RESERVED_SLOTS_MASK) << JSCLASS_RESERVED_SLOTS_SHIFT), /* JSCLASS_HAS_RESERVED_SLOTS(1) */
+    flags: JSClass_NON_NATIVE |
+        JSCLASS_IS_PROXY |
+        JSCLASS_DELAY_METADATA_BUILDER |
+        ((1 & JSCLASS_RESERVED_SLOTS_MASK) << JSCLASS_RESERVED_SLOTS_SHIFT), /* JSCLASS_HAS_RESERVED_SLOTS(1) */
     cOps: unsafe { &ProxyClassOps },
     spec: ptr::null(),
     ext: unsafe { &ProxyClassExtension },
@@ -256,26 +252,28 @@ static CLASS: JSClass = JSClass {
 
 #[expect(unsafe_code)]
 pub(crate) fn create(
-    cx: SafeJSContext,
+    cx: &mut js::context::JSContext,
     proto: RustHandleObject,
     mut properties_obj: RustMutableHandleObject,
 ) {
     unsafe {
         properties_obj.set(NewProxyObject(
-            *cx,
+            cx,
             HANDLER.0,
-            UndefinedHandleValue,
+            RustHandle::from_raw(UndefinedHandleValue),
             proto.get(),
             &CLASS,
             false,
         ));
-        assert!(!properties_obj.get().is_null());
-        let mut succeeded = false;
+    }
+    assert!(!properties_obj.get().is_null());
+    let mut succeeded = false;
+    unsafe {
         assert!(JS_SetImmutablePrototype(
-            *cx,
-            properties_obj.handle().into_handle(),
+            cx,
+            properties_obj.handle(),
             &mut succeeded
         ));
-        assert!(succeeded);
     }
+    assert!(succeeded);
 }

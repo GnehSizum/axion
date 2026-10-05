@@ -4,6 +4,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::atomic::AtomicU64;
 
 use euclid::Scale;
 use log::warn;
@@ -29,12 +30,21 @@ pub(crate) const LINE_WIDTH: f32 = 76.0;
 #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
 pub(crate) const MIN_WINDOW_INNER_SIZE: DeviceIntSize = DeviceIntSize::new(100, 100);
 
-#[derive(Copy, Clone, Eq, Hash, PartialEq)]
+static SERVOSHELL_WINDOW_ID: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub(crate) struct ServoShellWindowId(u64);
 
 impl From<u64> for ServoShellWindowId {
     fn from(value: u64) -> Self {
         Self(value)
+    }
+}
+
+impl ServoShellWindowId {
+    #[cfg_attr(not(any(target_os = "android", target_env = "ohos")), expect(unused))]
+    pub(crate) fn next() -> ServoShellWindowId {
+        ServoShellWindowId(SERVOSHELL_WINDOW_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
     }
 }
 
@@ -74,8 +84,9 @@ impl ServoShellWindow {
         self.platform_window().id()
     }
 
+    /// Must be called *after* `self` is in `state.windows`, otherwise it will panic.
     pub(crate) fn create_and_activate_toplevel_webview(
-        &self,
+        self: &Rc<Self>,
         state: Rc<RunningAppState>,
         url: Url,
     ) -> WebView {
@@ -84,7 +95,14 @@ impl ServoShellWindow {
         webview
     }
 
-    pub(crate) fn create_toplevel_webview(&self, state: Rc<RunningAppState>, url: Url) -> WebView {
+    /// Must be called *after* `self` is in `state.windows`, otherwise it will panic.
+    #[servo::servo_tracing::instrument(skip(self, state))]
+    pub(crate) fn create_toplevel_webview(
+        self: &Rc<Self>,
+        state: Rc<RunningAppState>,
+        url: Url,
+    ) -> WebView {
+        #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(unused_mut))]
         let mut webview_builder =
             WebViewBuilder::new(state.servo(), self.platform_window.rendering_context())
                 .url(url)
@@ -103,6 +121,13 @@ impl ServoShellWindow {
         let webview = webview_builder.build();
         webview.notify_theme_change(self.platform_window.theme());
         self.add_webview(webview.clone());
+
+        // If `self` is not in `state.windows`, our notify_accessibility_tree_update() will panic.
+        if state.accessibility_active() {
+            // Activate accessibility in the WebView.
+            // There are two sites like this; this is the WebView creation site.
+            webview.set_accessibility_active(true);
+        }
         webview
     }
 
@@ -125,10 +150,6 @@ impl ServoShellWindow {
         self.webview_collection.borrow().is_empty() || self.close_scheduled.get()
     }
 
-    pub(crate) fn contains_webview(&self, id: WebViewId) -> bool {
-        self.webview_collection.borrow().contains(id)
-    }
-
     pub(crate) fn webview_by_id(&self, id: WebViewId) -> Option<WebView> {
         self.webview_collection.borrow().get(id).cloned()
     }
@@ -141,7 +162,7 @@ impl ServoShellWindow {
         self.needs_repaint.set(true)
     }
 
-    #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
+    #[cfg_attr(target_os = "android", expect(dead_code))]
     pub(crate) fn schedule_close(&self) {
         self.close_scheduled.set(true)
     }
@@ -197,9 +218,8 @@ impl ServoShellWindow {
     }
 
     pub(crate) fn update_and_request_repaint_if_necessary(&self, state: &RunningAppState) {
-        let updated_user_interface = self.needs_update.take()
-            && self
-                .platform_window
+        let updated_user_interface = self.needs_update.take() &&
+            self.platform_window
                 .update_user_interface_state(state, self);
 
         // Delegate handlers may have asked us to present or update painted WebView contents.
@@ -289,7 +309,7 @@ impl ServoShellWindow {
 
     /// Takes any events generated during UI updates and performs their actions.
     pub(crate) fn handle_interface_commands(
-        &self,
+        self: &Rc<Self>,
         state: &Rc<RunningAppState>,
         create_platform_window: Option<&dyn Fn(Url) -> Rc<dyn PlatformWindow>>,
     ) {
@@ -365,11 +385,6 @@ pub(crate) trait PlatformWindow {
     fn hidpi_scale_factor(&self) -> Scale<f32, DeviceIndependentPixel, DevicePixel>;
     #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
     fn get_fullscreen(&self) -> bool;
-    /// Request that the `Window` rebuild its user interface, if it has one. This should
-    /// not repaint, but should prepare the user interface for painting when it is
-    /// actually requested.
-    #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
-    fn rebuild_user_interface(&self, _: &RunningAppState, _: &ServoShellWindow) {}
     /// Inform the `Window` that the state of a `WebView` has changed and that it should
     /// do an incremental update of user interface state. Returns `true` if the user
     /// interface actually changed and a rebuild  and repaint is needed, `false` otherwise.

@@ -13,19 +13,19 @@ mod structured_data;
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::time::Duration;
 
 use embedder_traits::user_contents::{
     UserContentManagerId, UserScript, UserScriptId, UserStyleSheet, UserStyleSheetId,
 };
 use embedder_traits::{
     EmbedderControlId, EmbedderControlResponse, InputEventAndId, JavaScriptEvaluationId,
-    MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme, TraversalId,
+    MediaSessionActionType, NewWebViewDetails, PaintHitTestResult, Theme, TraversalId, UrlRequest,
     ViewportDetails, WebDriverCommandMsg,
 };
 pub use from_script_message::*;
 use malloc_size_of_derive::MallocSizeOf;
 use paint_api::PinchZoomInfos;
+use paint_api::largest_contentful_paint_candidate::LCPCandidateID;
 use profile_traits::mem::MemoryReportResult;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -47,10 +47,10 @@ pub enum EmbedderToConstellationMessage {
     Exit,
     /// Whether to allow script to navigate.
     AllowNavigationResponse(PipelineId, bool),
-    /// Request to load a page.
-    LoadUrl(WebViewId, ServoUrl),
+    /// Request to load a page, with optionally additional data in [`URLRequest`].
+    LoadUrl(WebViewId, UrlRequest),
     /// Request to traverse the joint session history of the provided browsing context.
-    TraverseHistory(WebViewId, TraversalDirection, TraversalId),
+    TraverseHistory(SessionHistoryTraversalRequest),
     /// Inform the Constellation that a `WebView`'s [`ViewportDetails`] have changed.
     ChangeViewportDetails(WebViewId, ViewportDetails, WindowSizeType),
     /// Inform the constellation of a theme change.
@@ -72,8 +72,6 @@ pub enum EmbedderToConstellationMessage {
     NewWebView(ServoUrl, NewWebViewDetails),
     /// Close a top level browsing context.
     CloseWebView(WebViewId),
-    /// Panic a top level browsing context.
-    SendError(Option<WebViewId>, String),
     /// Make a webview focused. [EmbedderMsg::WebViewFocused] will be sent with
     /// the result of this operation.
     FocusWebView(WebViewId),
@@ -85,8 +83,6 @@ pub enum EmbedderToConstellationMessage {
     /// recently hovered cursor position and resetting the cursor. This happens after a
     /// display list update is rendered.
     RefreshCursor(PipelineId),
-    /// Enable the sampling profiler, with a given sampling rate and max total sampling duration.
-    ToggleProfiler(Duration, Duration),
     /// Request to exit from fullscreen mode
     ExitFullScreen(WebViewId),
     /// Media session action.
@@ -133,7 +129,12 @@ pub enum UserContentManagerAction {
 pub enum PaintMetricEvent {
     FirstPaint(CrossProcessInstant, bool /* first_reflow */),
     FirstContentfulPaint(CrossProcessInstant, bool /* first_reflow */),
-    LargestContentfulPaint(CrossProcessInstant, usize /* area */, Option<ServoUrl>),
+    LargestContentfulPaint(
+        CrossProcessInstant,
+        usize, /* area */
+        Option<ServoUrl>,
+        LCPCandidateID,
+    ),
 }
 
 impl fmt::Debug for EmbedderToConstellationMessage {
@@ -172,6 +173,46 @@ pub enum TraversalDirection {
     Forward(usize),
     /// Travel backward the given number of documents.
     Back(usize),
+}
+
+/// The source of a [`HistoryTraversalRequest`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum HistoryTraversalSource {
+    /// The traversal was triggered from the embedder, which means it is expecting
+    /// a notification when the request has completed.
+    Embedder,
+    /// The traversal was triggered from the script event loop.
+    Script,
+}
+
+/// A history traversal request.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SessionHistoryTraversalRequest {
+    /// An identifier that uniquely identifies this [`HistoryTraversalRequest`].
+    pub id: TraversalId,
+    /// The `WebView` that should be traversed.
+    pub webview_id: WebViewId,
+    /// The direction and number of steps that should be traversed.
+    pub direction: TraversalDirection,
+    /// The [`HistoryTraversalSource`] of this [`HistoryTraversalRequest`].
+    pub source: HistoryTraversalSource,
+}
+
+impl SessionHistoryTraversalRequest {
+    /// Create a new [`HistoryTraversalRequest`] either due to an embedder API call
+    /// or a script-initiated history traversal.
+    pub fn new(
+        webview_id: WebViewId,
+        direction: TraversalDirection,
+        source: HistoryTraversalSource,
+    ) -> Self {
+        Self {
+            id: TraversalId::new(),
+            webview_id,
+            direction,
+            source,
+        }
+    }
 }
 
 /// A task on the <https://html.spec.whatwg.org/multipage/#port-message-queue>

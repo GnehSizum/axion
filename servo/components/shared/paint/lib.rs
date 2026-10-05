@@ -187,8 +187,6 @@ pub enum PaintMessage {
     ScreenshotReadinessReponse(WebViewId, FxHashMap<PipelineId, Epoch>),
     /// The candidate of largest-contentful-paint
     SendLCPCandidate(LCPCandidate, WebViewId, PipelineId, Epoch),
-    /// Enable LCP calculation for the given WebView.
-    EnableLCPCalculation(WebViewId),
 }
 
 impl Debug for PaintMessage {
@@ -218,11 +216,6 @@ pub struct SerializableDisplayListPayload {
     #[serde(with = "serde_bytes")]
     pub items_data: Vec<u8>,
 
-    /// Serde encoded `DisplayItemCache` structs
-    #[serde(with = "serde_bytes")]
-    pub cache_data: Vec<u8>,
-
-    /// Serde encoded `SpatialTreeItem` structs.
     #[serde(with = "serde_bytes")]
     pub spatial_tree: Vec<u8>,
 }
@@ -249,10 +242,10 @@ impl CrossProcessPaintApi {
         callback: Option<Box<dyn Fn(PaintMessage) + Send + 'static>>,
     ) -> Self {
         let callback = GenericCallback::new(move |msg| {
-            if let Some(ref handler) = callback {
-                if let Ok(paint_message) = msg {
-                    handler(paint_message);
-                }
+            if let Some(ref handler) = callback &&
+                let Ok(paint_message) = msg
+            {
+                handler(paint_message);
             }
         })
         .unwrap();
@@ -363,7 +356,6 @@ impl CrossProcessPaintApi {
         }
         let display_list_data = SerializableDisplayListPayload {
             items_data: display_list_data.items_data,
-            cache_data: display_list_data.cache_data,
             spatial_tree: display_list_data.spatial_tree,
         };
 
@@ -792,7 +784,9 @@ pub enum SerializableImageData {
 impl From<SerializableImageData> for ImageData {
     fn from(value: SerializableImageData) -> Self {
         match value {
-            SerializableImageData::Raw(shared_memory) => ImageData::new(shared_memory.to_vec()),
+            SerializableImageData::Raw(shared_memory) => {
+                ImageData::Raw(shared_memory.into_arc_vec())
+            },
             SerializableImageData::External(image) => ImageData::External(image),
         }
     }
@@ -805,6 +799,10 @@ pub trait WebViewTrait {
     fn id(&self) -> WebViewId;
     fn screen_geometry(&self) -> Option<ScreenGeometry>;
     fn set_animating(&self, new_value: bool);
+    /// Notify the embedding layer that this `WebView`'s viewport geometry changed — its size, page
+    /// or pinch zoom, or HiDPI scale — so it can refresh geometry, such as the accessibility root
+    /// node, that the embedder derives from the viewport rather than from a pipeline update.
+    fn notify_viewport_updated(&self);
 }
 
 /// What entity is reporting that a `Pipeline` has exited. Only when all have

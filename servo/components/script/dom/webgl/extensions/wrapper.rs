@@ -4,21 +4,22 @@
 
 use std::ptr::NonNull;
 
+use js::context::JSContext;
 use js::jsapi::JSObject;
 use malloc_size_of::MallocSizeOf;
+use script_bindings::reflector::DomObject;
 
 use super::{WebGLExtension, WebGLExtensionSpec, WebGLExtensions};
-use crate::dom::bindings::reflector::DomObject;
 use crate::dom::bindings::root::MutNullableDom;
 use crate::dom::bindings::trace::JSTraceable;
 use crate::dom::webgl::webglrenderingcontext::WebGLRenderingContext;
-use crate::script_runtime::CanGc;
 
 /// Trait used internally by WebGLExtensions to store and
 /// handle the different WebGL extensions in a common list.
 pub(crate) trait WebGLExtensionWrapper: JSTraceable + MallocSizeOf {
     fn instance_or_init(
         &self,
+        cx: &mut JSContext,
         ctx: &WebGLRenderingContext,
         ext: &WebGLExtensions,
     ) -> NonNull<JSObject>;
@@ -52,13 +53,14 @@ where
     #[expect(unsafe_code)]
     fn instance_or_init(
         &self,
+        cx: &mut JSContext,
         ctx: &WebGLRenderingContext,
         ext: &WebGLExtensions,
     ) -> NonNull<JSObject> {
         let mut enabled = true;
         let extension = self.extension.or_init(|| {
             enabled = false;
-            T::new(ctx, CanGc::note())
+            T::new(cx, ctx)
         });
         if !enabled {
             self.enable(ext);

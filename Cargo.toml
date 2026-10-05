@@ -18,9 +18,9 @@ members = [
 exclude = ["servo"]
 
 [workspace.package]
-version = "0.1.33"
+version = "0.6.0"
 edition = "2024"
-rust-version = "1.86.0"
+rust-version = "1.88.0"
 
 [workspace.dependencies]
 axion-bridge = { path = "crates/axion-bridge" }
@@ -42,8 +42,10 @@ winit = "0.30.13"
 
 [workspace.metadata.axion]
 engine_path = "servo"
-milestone = "v0.1.33.0"
-release = "v0.1.33.0"
-servo_baseline = "0.1"
+milestone = "v0.6.0"
+release = "v0.6.0"
+servo_baseline = "0.6"
+servo_version = "0.6.0"
+servo_revision = "c78d2c206f80a1c8b67eefa97f773bba513205d3"
 feature_version = 33
 bugfix_version = 0

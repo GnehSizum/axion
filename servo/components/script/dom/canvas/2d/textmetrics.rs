@@ -4,10 +4,10 @@
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 
 use crate::dom::bindings::codegen::Bindings::TextMetricsBinding::TextMetricsMethods;
 use crate::dom::bindings::num::Finite;
-use crate::dom::bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::globalscope::GlobalScope;
 
@@ -95,28 +95,6 @@ impl TextMetrics {
                 alphabeticBaseline,
                 ideographicBaseline,
             )),
-            global,
-            cx,
-        )
-    }
-
-    pub(crate) fn default(global: &GlobalScope, cx: &mut JSContext) -> DomRoot<Self> {
-        reflect_dom_object_with_cx(
-            Box::new(Self {
-                reflector_: Reflector::new(),
-                width: Default::default(),
-                actualBoundingBoxLeft: Default::default(),
-                actualBoundingBoxRight: Default::default(),
-                fontBoundingBoxAscent: Default::default(),
-                fontBoundingBoxDescent: Default::default(),
-                actualBoundingBoxAscent: Default::default(),
-                actualBoundingBoxDescent: Default::default(),
-                emHeightAscent: Default::default(),
-                emHeightDescent: Default::default(),
-                hangingBaseline: Default::default(),
-                alphabeticBaseline: Default::default(),
-                ideographicBaseline: Default::default(),
-            }),
             global,
             cx,
         )

@@ -3,9 +3,11 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use js::rust::HandleObject;
+use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_media::ServoMedia;
-use servo_media::audio::node::AudioNodeInit;
+use servo_media::audio::audio_node::AudioNodeInit;
 use servo_media::streams::MediaStreamType;
 
 use crate::dom::audio::audiocontext::AudioContext;
@@ -16,11 +18,10 @@ use crate::dom::bindings::codegen::Bindings::AudioNodeBinding::{
 use crate::dom::bindings::codegen::Bindings::MediaStreamAudioDestinationNodeBinding::MediaStreamAudioDestinationNodeMethods;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{DomGlobal, reflect_dom_object_with_proto};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::mediastream::MediaStream;
 use crate::dom::window::Window;
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct MediaStreamAudioDestinationNode {
@@ -31,19 +32,20 @@ pub(crate) struct MediaStreamAudioDestinationNode {
 impl MediaStreamAudioDestinationNode {
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn new_inherited(
+        cx: &mut JSContext,
         context: &AudioContext,
         options: &AudioNodeOptions,
-        can_gc: CanGc,
     ) -> Fallible<MediaStreamAudioDestinationNode> {
         let media = ServoMedia::get();
         let (socket, id) = media.create_stream_and_socket(MediaStreamType::Audio);
-        let stream = MediaStream::new_single(&context.global(), id, MediaStreamType::Audio, can_gc);
+        let stream = MediaStream::new_single(cx, &context.global(), id, MediaStreamType::Audio);
         let node_options = options.unwrap_or(
             2,
             ChannelCountMode::Explicit,
             ChannelInterpretation::Speakers,
         );
         let node = AudioNode::new_inherited(
+            cx,
             AudioNodeInit::MediaStreamDestinationNode(socket),
             context.upcast(),
             node_options,
@@ -57,28 +59,28 @@ impl MediaStreamAudioDestinationNode {
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         window: &Window,
         context: &AudioContext,
         options: &AudioNodeOptions,
-        can_gc: CanGc,
     ) -> Fallible<DomRoot<MediaStreamAudioDestinationNode>> {
-        Self::new_with_proto(window, None, context, options, can_gc)
+        Self::new_with_proto(cx, window, None, context, options)
     }
 
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     fn new_with_proto(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
         context: &AudioContext,
         options: &AudioNodeOptions,
-        can_gc: CanGc,
     ) -> Fallible<DomRoot<MediaStreamAudioDestinationNode>> {
-        let node = MediaStreamAudioDestinationNode::new_inherited(context, options, can_gc)?;
+        let node = MediaStreamAudioDestinationNode::new_inherited(cx, context, options)?;
         Ok(reflect_dom_object_with_proto(
+            cx,
             Box::new(node),
             window,
             proto,
-            can_gc,
         ))
     }
 }
@@ -88,13 +90,13 @@ impl MediaStreamAudioDestinationNodeMethods<crate::DomTypeHolder>
 {
     /// <https://webaudio.github.io/web-audio-api/#dom-mediastreamaudiodestinationnode-mediastreamaudiodestinationnode>
     fn Constructor(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
         context: &AudioContext,
         options: &AudioNodeOptions,
     ) -> Fallible<DomRoot<MediaStreamAudioDestinationNode>> {
-        MediaStreamAudioDestinationNode::new_with_proto(window, proto, context, options, can_gc)
+        MediaStreamAudioDestinationNode::new_with_proto(cx, window, proto, context, options)
     }
 
     /// <https://webaudio.github.io/web-audio-api/#dom-mediastreamaudiodestinationnode-stream>

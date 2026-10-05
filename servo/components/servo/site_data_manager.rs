@@ -2,16 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::{Cell, RefCell};
+
 use bitflags::bitflags;
 use cookie::Cookie;
 use log::warn;
 use net_traits::pub_domains::registered_domain_name;
-use net_traits::{CookieSource, ResourceThreads, SiteDescriptor};
+use net_traits::{CookieOperationId, ResourceThreads, SiteDescriptor};
 use rustc_hash::FxHashMap;
 use servo_url::ServoUrl;
 use storage_traits::StorageThreads;
 use storage_traits::webstorage_thread::{OriginDescriptor, WebStorageType};
 use url::Url;
+
+use crate::CookieSource;
 
 bitflags! {
     /// Identifies categories of site data associated with a site.
@@ -60,6 +64,25 @@ impl SiteData {
     }
 }
 
+/// The response data for a pending embedder cookie operation.
+pub(crate) enum CookieOperationResponse {
+    /// Cookies returned from a get operation.
+    Cookies(Vec<Cookie<'static>>),
+    /// Acknowledgement that a operation is completed.
+    Done,
+}
+
+/// A callback for a pending embedder cookie operation,
+/// paired with the [`CookieOperationResponse`].
+enum CookieOperationCallback {
+    Cookies(Box<dyn FnOnce(Vec<Cookie<'static>>)>),
+    Done(Box<dyn FnOnce()>),
+    DoneAfterResponses {
+        remaining_responses: u8,
+        callback: Box<dyn FnOnce()>,
+    },
+}
+
 /// Provides APIs for inspecting and managing site data.
 ///
 /// `SiteDataManager` exposes information about data that is conceptually
@@ -77,6 +100,8 @@ pub struct SiteDataManager {
     private_resource_threads: ResourceThreads,
     public_storage_threads: StorageThreads,
     private_storage_threads: StorageThreads,
+    next_cookie_op_id: Cell<u64>,
+    pending_cookie_callbacks: RefCell<FxHashMap<CookieOperationId, CookieOperationCallback>>,
 }
 
 impl SiteDataManager {
@@ -91,6 +116,8 @@ impl SiteDataManager {
             private_resource_threads,
             public_storage_threads,
             private_storage_threads,
+            next_cookie_op_id: Cell::new(0),
+            pending_cookie_callbacks: RefCell::new(FxHashMap::default()),
         }
     }
 
@@ -201,9 +228,54 @@ impl SiteDataManager {
         }
     }
 
-    pub fn clear_cookies(&self) {
-        self.public_resource_threads.clear_cookies();
-        self.private_resource_threads.clear_cookies();
+    /// Clears all cookies from both the public and private cookie jars.
+    ///
+    /// An optional callback is provided for async operation.
+    pub fn clear_cookies(&self, callback: Option<Box<dyn FnOnce()>>) {
+        match callback {
+            None => {
+                self.public_resource_threads.clear_cookies();
+                self.private_resource_threads.clear_cookies();
+            },
+            Some(callback) => {
+                let id = self.next_operation_id();
+                self.pending_cookie_callbacks.borrow_mut().insert(
+                    id,
+                    CookieOperationCallback::DoneAfterResponses {
+                        remaining_responses: 2,
+                        callback,
+                    },
+                );
+                self.public_resource_threads.clear_cookies_async(id);
+                self.private_resource_threads.clear_cookies_async(id);
+            },
+        }
+    }
+
+    /// Delete all session cookies (cookies that have no expiry or max-age).
+    ///
+    /// Session cookies from both the public and private browsing session cookies are removed.
+    /// An optional callback is provided for async operation.
+    pub fn clear_session_cookies(&self, callback: Option<Box<dyn FnOnce()>>) {
+        match callback {
+            None => {
+                self.public_resource_threads.clear_session_cookies();
+                self.private_resource_threads.clear_session_cookies();
+            },
+            Some(callback) => {
+                let id = self.next_operation_id();
+                self.pending_cookie_callbacks.borrow_mut().insert(
+                    id,
+                    CookieOperationCallback::DoneAfterResponses {
+                        remaining_responses: 2,
+                        callback,
+                    },
+                );
+                self.public_resource_threads.clear_session_cookies_async(id);
+                self.private_resource_threads
+                    .clear_session_cookies_async(id);
+            },
+        }
     }
 
     /// Returns the cookies for the domain associated with the given [`Url`].
@@ -212,16 +284,100 @@ impl SiteDataManager {
             .cookies_for_url(url.into(), source)
     }
 
+    /// Asynchronously returns the cookies for the domain associated with the given [`Url`].
+    pub fn cookies_for_url_async(
+        &self,
+        url: Url,
+        source: CookieSource,
+        callback: impl FnOnce(Vec<Cookie<'static>>) + 'static,
+    ) {
+        let id = self.next_operation_id();
+        self.pending_cookie_callbacks
+            .borrow_mut()
+            .insert(id, CookieOperationCallback::Cookies(Box::new(callback)));
+        self.public_resource_threads
+            .cookies_for_url_async(id, url.into(), source);
+    }
+
     /// Sets a cookie for the domain associated with the given [`Url`].
     ///
-    /// Returns `true` if the request to set the cookie is successfully sent.
-    /// This call will block, such that any operations triggered after the
-    /// call will use the provided cookie.
-    pub fn set_cookie_for_url(&self, url: Url, cookie: Cookie<'static>) {
-        self.public_resource_threads.set_cookie_for_url_sync(
-            url.into(),
-            cookie,
-            CookieSource::HTTP,
-        );
+    /// An optional callback is provided for async operation.
+    pub fn set_cookie_for_url(
+        &self,
+        url: Url,
+        cookie: Cookie<'static>,
+        callback: Option<Box<dyn FnOnce()>>,
+    ) {
+        match callback {
+            None => {
+                self.public_resource_threads.set_cookie_for_url_sync(
+                    url.into(),
+                    cookie,
+                    CookieSource::HTTP,
+                );
+            },
+            Some(callback) => {
+                let id = self.next_operation_id();
+                self.pending_cookie_callbacks
+                    .borrow_mut()
+                    .insert(id, CookieOperationCallback::Done(callback));
+                self.public_resource_threads.set_cookie_for_url_async(
+                    id,
+                    url.into(),
+                    cookie,
+                    CookieSource::HTTP,
+                );
+            },
+        }
+    }
+
+    /// Handle a cookie operation response from the resource thread.
+    ///
+    /// This is called by the event loop when an embedder cookie response is received.
+    pub(crate) fn handle_cookie_response(
+        &self,
+        id: CookieOperationId,
+        response: CookieOperationResponse,
+    ) {
+        let Some(callback) = self.pending_cookie_callbacks.borrow_mut().remove(&id) else {
+            warn!("Received cookie response for unknown operation {id:?}");
+            return;
+        };
+        match (response, callback) {
+            (CookieOperationResponse::Cookies(cookies), CookieOperationCallback::Cookies(cb)) => {
+                cb(cookies);
+            },
+            (CookieOperationResponse::Done, CookieOperationCallback::Done(cb)) => {
+                cb();
+            },
+            (
+                CookieOperationResponse::Done,
+                CookieOperationCallback::DoneAfterResponses {
+                    remaining_responses,
+                    callback,
+                },
+            ) => {
+                if remaining_responses > 1 {
+                    self.pending_cookie_callbacks.borrow_mut().insert(
+                        id,
+                        CookieOperationCallback::DoneAfterResponses {
+                            remaining_responses: remaining_responses - 1,
+                            callback,
+                        },
+                    );
+                } else {
+                    callback();
+                }
+            },
+            _ => {
+                warn!("Cookie response type mismatch for operation {id:?}");
+            },
+        }
+    }
+
+    fn next_operation_id(&self) -> CookieOperationId {
+        let id = CookieOperationId(self.next_cookie_op_id.get());
+        self.next_cookie_op_id.set(id.0 + 1);
+        id
     }
 }

@@ -6,13 +6,15 @@
 // web pages.
 [Exposed=DebuggerGlobalScope]
 interface DebuggerGetEnvironmentEvent : Event {
-    readonly attribute DOMString frameActorId;
+    readonly attribute DOMString? frameActorId;
+    readonly attribute PipelineId? pipelineId;
 };
 
 partial interface DebuggerGlobalScope {
     DOMString? registerEnvironmentActor(
         EnvironmentInfo result,
-        DOMString? parent
+        DOMString? parent,
+        optional DOMString? actor = null
     );
     undefined getEnvironmentResult(
         DOMString environmentActorId
@@ -23,5 +25,6 @@ dictionary EnvironmentInfo {
     DOMString type_;
     DOMString scopeKind;
     DOMString functionDisplayName;
-    record<DOMString, DOMString> bindingVariables;
+    required DOMString serializedBindings;
+    DOMString serializedObject;
 };

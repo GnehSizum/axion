@@ -38,12 +38,11 @@ use crate::dom::html::htmlformelement::{FormControlElementHelpers, HTMLFormEleme
 use crate::dom::html::htmlscriptelement::HTMLScriptElement;
 use crate::dom::html::htmltemplateelement::HTMLTemplateElement;
 use crate::dom::node::Node;
+use crate::dom::node::virtualmethods::vtable_for;
 use crate::dom::processinginstruction::ProcessingInstruction;
 use crate::dom::servoparser::{
     ElementAttribute, ParsingAlgorithm, attach_declarative_shadow_inner, create_element_for_token,
 };
-use crate::dom::virtualmethods::vtable_for;
-use crate::script_runtime::CanGc;
 
 type ParseNodeId = usize;
 
@@ -374,9 +373,9 @@ impl Tokenizer {
                 FromParserThreadMsg::ProcessOperation(parse_op) => {
                     self.process_operation(parse_op, cx);
                 },
-                FromParserThreadMsg::TokenizerResultDone { updated_input: _ }
-                | FromParserThreadMsg::TokenizerResultScript { .. }
-                | FromParserThreadMsg::EncodingIndicator { .. } => continue,
+                FromParserThreadMsg::TokenizerResultDone { updated_input: _ } |
+                FromParserThreadMsg::TokenizerResultScript { .. } |
+                FromParserThreadMsg::EncodingIndicator { .. } => continue,
                 FromParserThreadMsg::End => return,
             };
         }
@@ -476,10 +475,7 @@ impl Tokenizer {
                 let template = target
                     .downcast::<HTMLTemplateElement>()
                     .expect("Tried to extract contents from non-template element while parsing");
-                self.insert_node(
-                    contents,
-                    Dom::from_ref(template.Content(CanGc::from_cx(cx)).upcast()),
-                );
+                self.insert_node(contents, Dom::from_ref(template.Content(cx).upcast()));
             },
             ParseOperation::CreateElement {
                 node,
@@ -494,6 +490,7 @@ impl Tokenizer {
                     .map(|attr| ElementAttribute::new(attr.name, DOMString::from(attr.value)))
                     .collect();
                 let element = create_element_for_token(
+                    cx,
                     name,
                     attrs,
                     &self.document,
@@ -501,13 +498,11 @@ impl Tokenizer {
                     ParsingAlgorithm::Normal,
                     &self.custom_element_reaction_stack,
                     had_duplicate_attributes,
-                    cx,
                 );
                 self.insert_node(node, Dom::from_ref(element.upcast()));
             },
             ParseOperation::CreateComment { text, node } => {
-                let comment =
-                    Comment::new(DOMString::from(text), document, None, CanGc::from_cx(cx));
+                let comment = Comment::new(cx, DOMString::from(text), document, None);
                 self.insert_node(node, Dom::from_ref(comment.upcast()));
             },
             ParseOperation::AppendBeforeSibling { sibling, node } => {
@@ -533,11 +528,11 @@ impl Tokenizer {
                 system_id,
             } => {
                 let doctype = DocumentType::new(
+                    cx,
                     DOMString::from(name),
                     Some(DOMString::from(public_id)),
                     Some(DOMString::from(system_id)),
                     document,
-                    CanGc::from_cx(cx),
                 );
 
                 document
@@ -551,12 +546,7 @@ impl Tokenizer {
                     .downcast::<Element>()
                     .expect("tried to set attrs on non-Element in HTML parsing");
                 for attr in attrs {
-                    elem.set_attribute_from_parser(
-                        attr.name,
-                        DOMString::from(attr.value),
-                        None,
-                        CanGc::from_cx(cx),
-                    );
+                    elem.set_attribute_from_parser(cx, attr.name, DOMString::from(attr.value));
                 }
             },
             ParseOperation::RemoveFromParent { target } => {
@@ -604,18 +594,18 @@ impl Tokenizer {
                 let control = elem.and_then(|e| e.as_maybe_form_control());
 
                 if let Some(control) = control {
-                    control.set_form_owner_from_parser(&form, CanGc::from_cx(cx));
+                    control.set_form_owner_from_parser(cx, &form);
                 }
             },
             ParseOperation::Pop { node } => {
-                vtable_for(&self.get_node(&node)).pop();
+                vtable_for(&self.get_node(&node)).pop(cx);
             },
             ParseOperation::CreatePI { node, target, data } => {
                 let pi = ProcessingInstruction::new(
+                    cx,
                     DOMString::from(target),
                     DOMString::from(data),
                     document,
-                    CanGc::from_cx(cx),
                 );
                 self.insert_node(node, Dom::from_ref(pi.upcast()));
             },
@@ -847,9 +837,9 @@ impl TreeSink for Sink {
             let mut node_data = self.get_parse_node_data_mut(&node.id);
             node_data.is_integration_point = html_attrs.iter().any(|attr| {
                 let attr_value = &String::from(attr.value.clone());
-                (attr.name.local == local_name!("encoding") && attr.name.ns == ns!())
-                    && (attr_value.eq_ignore_ascii_case("text/html")
-                        || attr_value.eq_ignore_ascii_case("application/xhtml+xml"))
+                (attr.name.local == local_name!("encoding") && attr.name.ns == ns!()) &&
+                    (attr_value.eq_ignore_ascii_case("text/html") ||
+                        attr_value.eq_ignore_ascii_case("application/xhtml+xml"))
             });
         }
         let attrs = html_attrs

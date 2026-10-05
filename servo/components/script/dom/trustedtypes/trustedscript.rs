@@ -7,11 +7,11 @@ use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::jsapi::CompilationType;
 use js::rust::HandleValue;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 
 use crate::dom::bindings::codegen::Bindings::TrustedScriptBinding::TrustedScriptMethods;
 use crate::dom::bindings::codegen::UnionTypes::TrustedScriptOrString;
 use crate::dom::bindings::error::Fallible;
-use crate::dom::bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::csp::CspReporting;
@@ -87,8 +87,7 @@ impl TrustedScript {
         };
         // Step 2.2. Let isTrusted be true if bodyArg implements TrustedScript,
         // and false otherwise.
-        let mut is_trusted = match TrustedTypePolicyFactory::is_trusted_script(cx.into(), body_arg)
-        {
+        let mut is_trusted = match TrustedTypePolicyFactory::is_trusted_script(cx, body_arg) {
             // Step 2.3. If isTrusted is true then:
             Ok(trusted_script) => {
                 // Step 2.3.1. If bodyString is not equal to bodyArg’s data, set isTrusted to false.
@@ -151,7 +150,7 @@ impl TrustedScript {
         };
         global
             .get_csp_list()
-            .is_js_evaluation_allowed(global, &source_string.str())
+            .is_js_evaluation_allowed(cx, global, &source_string.str())
     }
 }
 

@@ -8,27 +8,27 @@ use std::cell::Cell;
 use std::cmp;
 
 use dom_struct::dom_struct;
-use script_bindings::reflector::DomObject as _;
+use js::context::JSContext;
+use script_bindings::cell::DomRefCell;
+use script_bindings::reflector::{DomObject as _, reflect_dom_object_with_cx};
+use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
     TexDataType, TexFormat, TexParameter, TexParameterBool, TexParameterInt, WebGLCommand,
     WebGLError, WebGLResult, WebGLTextureId, WebGLVersion, webgl_channel,
 };
 
-use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::EXTTextureFilterAnisotropicBinding::EXTTextureFilterAnisotropicConstants;
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{DomGlobal, reflect_dom_object};
-#[cfg(feature = "webxr")]
-use crate::dom::bindings::root::Dom;
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::webgl::validations::types::TexImageTarget;
 use crate::dom::webgl::webglframebuffer::WebGLFramebuffer;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
+use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
 #[cfg(feature = "webxr")]
 use crate::dom::xrsession::XRSession;
-use crate::script_runtime::CanGc;
 
 pub(crate) enum TexParameterValue {
     Float(f32),
@@ -43,21 +43,75 @@ pub(crate) enum TexParameterValue {
 enum WebGLTextureOwner {
     WebGL,
     #[cfg(feature = "webxr")]
-    WebXR(Dom<XRSession>),
+    WebXR(WeakRef<XRSession>),
 }
 
 const MAX_LEVEL_COUNT: usize = 31;
 const MAX_FACE_COUNT: usize = 6;
 
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+#[derive(JSTraceable, MallocSizeOf)]
+struct DroppableWebGLTexture {
+    context: WeakRef<WebGLRenderingContext>,
+    #[no_trace]
+    id: WebGLTextureId,
+    is_deleted: Cell<bool>,
+    owner: WebGLTextureOwner,
+}
+
+impl DroppableWebGLTexture {
+    fn send_with_fallibility(&self, command: WebGLCommand, fallibility: Operation) {
+        if let Some(root) = self.context.root() {
+            let result = root.sender().send(command, capture_webgl_backtrace());
+            if matches!(fallibility, Operation::Infallible) {
+                result.expect("Operation failed");
+            }
+        }
+    }
+
+    fn delete(&self, operation_fallibility: Operation) {
+        if !self.is_deleted.get() {
+            self.is_deleted.set(true);
+
+            /*
+            If a texture object is deleted while its image is attached to one or more attachment
+            points in a currently bound framebuffer, then it is as if FramebufferTexture had been
+            called, with a texture of zero, for each attachment point to which this im-age was
+            attached in that framebuffer. In other words, this texture image is firstdetached from
+            all attachment points in a currently bound framebuffer.
+            - GLES 3.0, 4.4.2.3, "Attaching Texture Images to a Framebuffer"
+            */
+            if let Some(context) = self.context.root() {
+                if let Some(fb) = context.get_draw_framebuffer_slot().get() {
+                    let _ = fb.detach_texture(self.id);
+                }
+                if let Some(fb) = context.get_read_framebuffer_slot().get() {
+                    let _ = fb.detach_texture(self.id);
+                }
+            }
+
+            // We don't delete textures owned by WebXR
+            #[cfg(feature = "webxr")]
+            if let WebGLTextureOwner::WebXR(_) = self.owner {
+                return;
+            }
+
+            self.send_with_fallibility(WebGLCommand::DeleteTexture(self.id), operation_fallibility);
+        }
+    }
+}
+
+impl Drop for DroppableWebGLTexture {
+    fn drop(&mut self) {
+        self.delete(Operation::Fallible);
+    }
+}
+
 #[dom_struct(associated_memory)]
 pub(crate) struct WebGLTexture {
     webgl_object: WebGLObject,
-    #[no_trace]
-    id: WebGLTextureId,
     /// The target to which this texture was bound the first time
     target: Cell<Option<u32>>,
-    is_deleted: Cell<bool>,
-    owner: WebGLTextureOwner,
     /// Stores information about mipmap levels and cubemap faces.
     #[ignore_malloc_size_of = "Arrays are cumbersome"]
     image_info_array: DomRefCell<[Option<ImageInfo>; MAX_LEVEL_COUNT * MAX_FACE_COUNT]>,
@@ -71,6 +125,7 @@ pub(crate) struct WebGLTexture {
     attached_framebuffer: MutNullableDom<WebGLFramebuffer>,
     /// Number of immutable levels.
     immutable_levels: Cell<Option<u32>>,
+    droppable: DroppableWebGLTexture,
 }
 
 impl WebGLTexture {
@@ -81,15 +136,7 @@ impl WebGLTexture {
     ) -> Self {
         Self {
             webgl_object: WebGLObject::new_inherited(context),
-            id,
             target: Cell::new(None),
-            is_deleted: Cell::new(false),
-            #[cfg(feature = "webxr")]
-            owner: owner
-                .map(|session| WebGLTextureOwner::WebXR(Dom::from_ref(session)))
-                .unwrap_or(WebGLTextureOwner::WebGL),
-            #[cfg(not(feature = "webxr"))]
-            owner: WebGLTextureOwner::WebGL,
             immutable_levels: Cell::new(None),
             face_count: Cell::new(0),
             base_mipmap_level: 0,
@@ -97,24 +144,38 @@ impl WebGLTexture {
             mag_filter: Cell::new(constants::LINEAR),
             image_info_array: DomRefCell::new([None; MAX_LEVEL_COUNT * MAX_FACE_COUNT]),
             attached_framebuffer: Default::default(),
+            droppable: DroppableWebGLTexture {
+                context: WeakRef::new(context),
+                id,
+                is_deleted: Cell::new(false),
+                #[cfg(feature = "webxr")]
+                owner: owner
+                    .map(|session| WebGLTextureOwner::WebXR(WeakRef::new(session)))
+                    .unwrap_or(WebGLTextureOwner::WebGL),
+                #[cfg(not(feature = "webxr"))]
+                owner: WebGLTextureOwner::WebGL,
+            },
         }
     }
 
-    pub(crate) fn maybe_new(context: &WebGLRenderingContext) -> Option<DomRoot<Self>> {
+    pub(crate) fn maybe_new(
+        cx: &mut JSContext,
+        context: &WebGLRenderingContext,
+    ) -> Option<DomRoot<Self>> {
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::CreateTexture(sender));
         receiver
             .recv()
             .unwrap()
-            .map(|id| WebGLTexture::new(context, id, CanGc::note()))
+            .map(|id| WebGLTexture::new(cx, context, id))
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         context: &WebGLRenderingContext,
         id: WebGLTextureId,
-        can_gc: CanGc,
     ) -> DomRoot<Self> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(WebGLTexture::new_inherited(
                 context,
                 id,
@@ -122,28 +183,28 @@ impl WebGLTexture {
                 None,
             )),
             &*context.global(),
-            can_gc,
+            cx,
         )
     }
 
     #[cfg(feature = "webxr")]
     pub(crate) fn new_webxr(
+        cx: &mut JSContext,
         context: &WebGLRenderingContext,
         id: WebGLTextureId,
         session: &XRSession,
-        can_gc: CanGc,
     ) -> DomRoot<Self> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(WebGLTexture::new_inherited(context, id, Some(session))),
             &*context.global(),
-            can_gc,
+            cx,
         )
     }
 }
 
 impl WebGLTexture {
     pub(crate) fn id(&self) -> WebGLTextureId {
-        self.id
+        self.droppable.id
     }
 
     // NB: Only valid texture targets come here
@@ -168,7 +229,7 @@ impl WebGLTexture {
         }
 
         self.upcast()
-            .send_command(WebGLCommand::BindTexture(target, Some(self.id)));
+            .send_command(WebGLCommand::BindTexture(target, Some(self.id())));
 
         Ok(())
     }
@@ -240,47 +301,19 @@ impl WebGLTexture {
     }
 
     pub(crate) fn delete(&self, operation_fallibility: Operation) {
-        if !self.is_deleted.get() {
-            self.is_deleted.set(true);
-
-            /*
-            If a texture object is deleted while its image is attached to one or more attachment
-            points in a currently bound framebuffer, then it is as if FramebufferTexture had been
-            called, with a texture of zero, for each attachment point to which this im-age was
-            attached in that framebuffer. In other words, this texture image is firstdetached from
-            all attachment points in a currently bound framebuffer.
-            - GLES 3.0, 4.4.2.3, "Attaching Texture Images to a Framebuffer"
-            */
-            let webgl_object = self.upcast();
-            if let Some(context) = webgl_object.context() {
-                if let Some(fb) = context.get_draw_framebuffer_slot().get() {
-                    let _ = fb.detach_texture(self);
-                }
-                if let Some(fb) = context.get_read_framebuffer_slot().get() {
-                    let _ = fb.detach_texture(self);
-                }
-            }
-
-            // We don't delete textures owned by WebXR
-            #[cfg(feature = "webxr")]
-            if let WebGLTextureOwner::WebXR(_) = self.owner {
-                return;
-            }
-
-            webgl_object
-                .send_with_fallibility(WebGLCommand::DeleteTexture(self.id), operation_fallibility);
-        }
+        self.droppable.delete(operation_fallibility);
     }
 
     pub(crate) fn is_invalid(&self) -> bool {
         // https://immersive-web.github.io/layers/#xrwebglsubimagetype
         #[cfg(feature = "webxr")]
-        if let WebGLTextureOwner::WebXR(ref session) = self.owner {
-            if session.is_outside_raf() {
-                return true;
-            }
+        if let WebGLTextureOwner::WebXR(ref session) = self.droppable.owner &&
+            let Some(xr) = session.root() &&
+            xr.is_outside_raf()
+        {
+            return true;
         }
-        self.is_deleted.get()
+        self.droppable.is_deleted.get()
     }
 
     pub(crate) fn is_immutable(&self) -> bool {
@@ -334,14 +367,14 @@ impl WebGLTexture {
                     return Ok(());
                 },
                 constants::TEXTURE_COMPARE_FUNC => match int_value as u32 {
-                    constants::LEQUAL
-                    | constants::GEQUAL
-                    | constants::LESS
-                    | constants::GREATER
-                    | constants::EQUAL
-                    | constants::NOTEQUAL
-                    | constants::ALWAYS
-                    | constants::NEVER => {
+                    constants::LEQUAL |
+                    constants::GEQUAL |
+                    constants::LESS |
+                    constants::GREATER |
+                    constants::EQUAL |
+                    constants::NOTEQUAL |
+                    constants::ALWAYS |
+                    constants::NEVER => {
                         context.send_command(WebGLCommand::TexParameteri(target, param, int_value));
                         return Ok(());
                     },
@@ -371,12 +404,12 @@ impl WebGLTexture {
         }
         match param {
             constants::TEXTURE_MIN_FILTER => match int_value as u32 {
-                constants::NEAREST
-                | constants::LINEAR
-                | constants::NEAREST_MIPMAP_NEAREST
-                | constants::LINEAR_MIPMAP_NEAREST
-                | constants::NEAREST_MIPMAP_LINEAR
-                | constants::LINEAR_MIPMAP_LINEAR => update_filter(&self.min_filter),
+                constants::NEAREST |
+                constants::LINEAR |
+                constants::NEAREST_MIPMAP_NEAREST |
+                constants::LINEAR_MIPMAP_NEAREST |
+                constants::NEAREST_MIPMAP_LINEAR |
+                constants::LINEAR_MIPMAP_LINEAR => update_filter(&self.min_filter),
                 _ => Err(WebGLError::InvalidEnum),
             },
             constants::TEXTURE_MAG_FILTER => match int_value as u32 {
@@ -415,10 +448,10 @@ impl WebGLTexture {
         filters.iter().any(|filter| {
             matches!(
                 *filter,
-                constants::LINEAR
-                    | constants::NEAREST_MIPMAP_LINEAR
-                    | constants::LINEAR_MIPMAP_NEAREST
-                    | constants::LINEAR_MIPMAP_LINEAR
+                constants::LINEAR |
+                    constants::NEAREST_MIPMAP_LINEAR |
+                    constants::LINEAR_MIPMAP_NEAREST |
+                    constants::LINEAR_MIPMAP_LINEAR
             )
         })
     }
@@ -476,9 +509,9 @@ impl WebGLTexture {
             };
 
             // Compares height with width to enforce square dimensions
-            if current_image_info.internal_format != ref_format
-                || current_image_info.width != ref_width
-                || current_image_info.height != ref_width
+            if current_image_info.internal_format != ref_format ||
+                current_image_info.width != ref_width ||
+                current_image_info.height != ref_width
             {
                 return false;
             }
@@ -605,12 +638,6 @@ impl WebGLTexture {
     }
 }
 
-impl Drop for WebGLTexture {
-    fn drop(&mut self) {
-        self.delete(Operation::Fallible);
-    }
-}
-
 #[derive(Clone, Copy, Debug, JSTraceable, MallocSizeOf, PartialEq)]
 pub(crate) struct ImageInfo {
     width: u32,
@@ -640,9 +667,9 @@ impl ImageInfo {
     }
 
     fn is_power_of_two(&self) -> bool {
-        self.width.is_power_of_two()
-            && self.height.is_power_of_two()
-            && self.depth.is_power_of_two()
+        self.width.is_power_of_two() &&
+            self.height.is_power_of_two() &&
+            self.depth.is_power_of_two()
     }
 
     fn get_max_mimap_levels(&self) -> u32 {
@@ -660,10 +687,10 @@ impl ImageInfo {
 
     /// Returns approximate physical size
     pub(crate) fn physical_size(&self) -> usize {
-        self.width as usize
-            * self.height as usize
-            * self.depth as usize
-            * self.internal_format.components() as usize
+        self.width as usize *
+            self.height as usize *
+            self.depth as usize *
+            self.internal_format.components() as usize
     }
 }
 

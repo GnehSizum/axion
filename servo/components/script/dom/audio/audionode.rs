@@ -5,15 +5,16 @@
 use std::cell::Cell;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use log::warn;
 use script_bindings::codegen::InheritTypes::{
     AudioNodeTypeId, AudioScheduledSourceNodeTypeId, EventTargetTypeId,
 };
-use servo_media::audio::graph::NodeId;
-use servo_media::audio::node::{
+use servo_media::audio::audio_node::{
     AudioNodeInit, AudioNodeMessage, ChannelCountMode as ServoMediaChannelCountMode, ChannelInfo,
     ChannelInterpretation as ServoMediaChannelInterpretation,
 };
+use servo_media::audio::graph::NodeId;
 
 use crate::conversions::Convert;
 use crate::dom::audio::audioparam::AudioParam;
@@ -36,7 +37,6 @@ pub(crate) const MAX_CHANNEL_COUNT: u32 = 32;
 #[dom_struct]
 pub(crate) struct AudioNode {
     eventtarget: EventTarget,
-    #[ignore_malloc_size_of = "servo_media"]
     #[no_trace]
     node_id: Option<NodeId>,
     context: Dom<BaseAudioContext>,
@@ -49,6 +49,7 @@ pub(crate) struct AudioNode {
 
 impl AudioNode {
     pub(crate) fn new_inherited(
+        cx: &mut JSContext,
         node_type: AudioNodeInit,
         context: &BaseAudioContext,
         options: UnwrappedAudioNodeOptions,
@@ -75,7 +76,7 @@ impl AudioNode {
             const MESSAGE: &str =
                 "Failed to create an AudioNode backend. The constructed AudioNode will be inert.";
             warn!("{MESSAGE}");
-            Console::internal_warn(&context.global(), MESSAGE.to_string());
+            Console::internal_warn(cx, &context.global(), MESSAGE.to_string());
         }
 
         Ok(AudioNode::new_inherited_for_id(
@@ -303,17 +304,13 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
                     return Err(Error::IndexSize(None));
                 }
             },
-            EventTargetTypeId::AudioNode(AudioNodeTypeId::PannerNode) => {
-                if value > 2 {
-                    return Err(Error::NotSupported(None));
-                }
+            EventTargetTypeId::AudioNode(AudioNodeTypeId::PannerNode) if value > 2 => {
+                return Err(Error::NotSupported(None));
             },
             EventTargetTypeId::AudioNode(AudioNodeTypeId::AudioScheduledSourceNode(
                 AudioScheduledSourceNodeTypeId::StereoPannerNode,
-            )) => {
-                if value > 2 {
-                    return Err(Error::NotSupported(None));
-                }
+            )) if value > 2 => {
+                return Err(Error::NotSupported(None));
             },
             EventTargetTypeId::AudioNode(AudioNodeTypeId::ChannelMergerNode) => {
                 return Err(Error::InvalidState(None));
@@ -349,22 +346,20 @@ impl AudioNodeMethods<crate::DomTypeHolder> for AudioNode {
         }
 
         match self.upcast::<EventTarget>().type_id() {
-            EventTargetTypeId::AudioNode(AudioNodeTypeId::AudioDestinationNode) => {
-                if self.context.is_offline() {
-                    return Err(Error::InvalidState(None));
-                }
+            EventTargetTypeId::AudioNode(AudioNodeTypeId::AudioDestinationNode)
+                if self.context.is_offline() =>
+            {
+                return Err(Error::InvalidState(None));
             },
-            EventTargetTypeId::AudioNode(AudioNodeTypeId::PannerNode) => {
-                if value == ChannelCountMode::Max {
-                    return Err(Error::NotSupported(None));
-                }
+            EventTargetTypeId::AudioNode(AudioNodeTypeId::PannerNode)
+                if value == ChannelCountMode::Max =>
+            {
+                return Err(Error::NotSupported(None));
             },
             EventTargetTypeId::AudioNode(AudioNodeTypeId::AudioScheduledSourceNode(
                 AudioScheduledSourceNodeTypeId::StereoPannerNode,
-            )) => {
-                if value == ChannelCountMode::Max {
-                    return Err(Error::NotSupported(None));
-                }
+            )) if value == ChannelCountMode::Max => {
+                return Err(Error::NotSupported(None));
             },
             EventTargetTypeId::AudioNode(AudioNodeTypeId::ChannelMergerNode) => {
                 return Err(Error::InvalidState(None));

@@ -1,42 +1,42 @@
 # Versioning Policy
 
-Axion uses a four-part public release version and a three-part Cargo package version.
+Axion public releases and Cargo workspace packages use matching three-part SemVer versions.
 
 ## Public Release Version
 
 Public releases and Git tags use this format:
 
 ```text
-v<servo-major>.<servo-minor>.<feature>.<bugfix>
+v<major>.<minor>.<patch>
 ```
 
-Example: `v0.1.33.0`.
+Example: `v0.6.0`.
 
-- `servo-major.servo-minor`: follows the vendored Servo baseline tracked by Axion.
-- `feature`: increments when Axion adds user-visible framework capabilities.
-- `bugfix`: increments for compatible fixes that do not add new features.
-
-The current release metadata is recorded in `Cargo.toml` under `[workspace.metadata.axion]`.
+The public version does not append the internal Axion feature milestone or a separate bugfix component. The Servo baseline and internal feature milestone are recorded separately in `Cargo.toml` under `[workspace.metadata.axion]`.
 
 ## Cargo Package Version
 
-Rust crates in this workspace use Cargo-compatible SemVer:
+Rust crates in this workspace use the same version without the `v` prefix:
 
 ```text
-<servo-major>.<servo-minor>.<feature>
+<major>.<minor>.<patch>
 ```
 
-For public release `v0.1.33.0`, workspace crates use Cargo version `0.1.33`. Bugfix releases keep the same public feature prefix and update the public bugfix component. If crates are published externally, decide per bugfix release whether the Cargo patch version also needs to move.
+For public release `v0.6.0`, workspace crates use Cargo version `0.6.0`.
 
 ## Current Release Baseline
 
 The current release baseline is:
 
-- public release: `v0.1.33.0`
-- Cargo workspace version: `0.1.33`
-- Servo baseline: `0.1`
-- Axion feature version: `28`
-- Axion bugfix version: `0`
+- public release: `v0.6.0`
+- Cargo workspace version: `0.6.0`
+- Servo baseline: `0.6` (vendored engine release `0.6.0`)
+- internal Axion feature milestone: `33`
+- internal Axion bugfix milestone: `0`
+
+## Historical Versions
+
+Earlier releases used four-part public tags such as `v0.1.33.0`, with Cargo version `0.1.33`. Those tags describe historical releases and are not the current version format.
 
 ## Runtime Reporting
 

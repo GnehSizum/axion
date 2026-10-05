@@ -2,21 +2,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::collections::HashMap;
+
+use atomic_refcell::AtomicRefCell;
 use devtools_traits::{DebuggerValue, PropertyDescriptor};
 use malloc_size_of_derive::MallocSizeOf;
 use serde::Serialize;
-use serde_json::{Map, Number, Value};
+use serde_json::{Map, Value};
 
-use crate::StreamId;
-use crate::actor::{Actor, ActorEncode, ActorError, ActorRegistry};
-use crate::actors::property_iterator::PropertyIteratorActor;
+use crate::actor::{Actor, ActorEncode, ActorError, ActorRegistry, new_actor_name};
+use crate::actors::property_iterator::{PropertyIteratorActor, PropertyIteratorEntry};
+use crate::actors::symbol_iterator::SymbolIteratorActor;
 use crate::protocol::ClientRequest;
-
-#[derive(Serialize)]
-pub(crate) struct ObjectPreview {
-    kind: String,
-    url: String,
-}
+use crate::{StreamId, debugger_value_to_json};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,88 +45,102 @@ struct PrototypeReply {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ObjectPreview {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entries: Option<Vec<(Value, Value)>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub own_properties: Option<HashMap<String, ObjectPropertyDescriptor>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub own_properties_length: Option<u32>,
+    #[serde(flatten)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<FunctionPreview>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub length: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<Value>>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionPreview {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub parameter_names: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_async: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_generator: Option<bool>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ObjectActorMsg {
     actor: String,
     #[serde(rename = "type")]
     type_: String,
     class: String,
-    own_property_length: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    own_property_length: Option<u32>,
     extensible: bool,
     frozen: bool,
     sealed: bool,
-    is_error: bool,
-    preview: ObjectPreview,
+    #[serde(flatten)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function: Option<FunctionPreview>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<ObjectPreview>,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ObjectPropertyDescriptor {
-    pub configurable: bool,
-    pub enumerable: bool,
-    pub writable: bool,
     pub value: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configurable: Option<bool>,
+    pub enumerable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub writable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_accessor: Option<bool>,
 }
 
-impl From<&PropertyDescriptor> for ObjectPropertyDescriptor {
-    fn from(prop: &PropertyDescriptor) -> Self {
+impl ObjectPropertyDescriptor {
+    pub(crate) fn from_property_descriptor(
+        registry: &ActorRegistry,
+        prop: &PropertyDescriptor,
+    ) -> Self {
         Self {
-            configurable: prop.configurable,
+            value: debugger_value_to_json(registry, prop.value.clone()),
+            configurable: Some(prop.configurable),
             enumerable: prop.enumerable,
-            writable: prop.writable,
-            value: debugger_value_to_json(&prop.value, &prop.name),
+            writable: Some(prop.writable),
+            is_accessor: Some(prop.is_accessor),
         }
     }
 }
 
-/// <https://searchfox.org/mozilla-central/source/devtools/server/actors/object/utils.js#148>
-fn debugger_value_to_json(value: &DebuggerValue, name: &str) -> Value {
-    match value {
-        DebuggerValue::VoidValue => {
-            let mut v = Map::new();
-            v.insert("type".to_owned(), Value::String("undefined".to_owned()));
-            Value::Object(v)
-        },
-        DebuggerValue::NullValue => Value::Null,
-        DebuggerValue::BooleanValue(boolean) => Value::Bool(*boolean),
-        DebuggerValue::NumberValue(num) => {
-            if num.is_nan() {
-                let mut v = Map::new();
-                v.insert("type".to_owned(), Value::String("NaN".to_owned()));
-                Value::Object(v)
-            } else if num.is_infinite() {
-                let mut v = Map::new();
-                let type_str = if num.is_sign_positive() {
-                    "Infinity"
-                } else {
-                    "-Infinity"
-                };
-                v.insert("type".to_owned(), Value::String(type_str.to_owned()));
-                Value::Object(v)
-            } else {
-                Value::Number(Number::from_f64(*num).unwrap_or(Number::from(0)))
-            }
-        },
-        DebuggerValue::StringValue(str) => Value::String(str.clone()),
-        DebuggerValue::ObjectValue { class, .. } => {
-            let mut v = Map::new();
-            v.insert("type".to_owned(), Value::String("object".to_owned()));
-            v.insert("class".to_owned(), Value::String(class.clone()));
-            v.insert("name".to_owned(), Value::String(name.into()));
-            Value::Object(v)
-        },
-    }
+#[derive(Clone, MallocSizeOf)]
+struct ObjectActorData {
+    class: String,
+    own_property_length: Option<u32>,
+    preview: Option<devtools_traits::ObjectPreview>,
 }
 
 #[derive(MallocSizeOf)]
 pub(crate) struct ObjectActor {
     name: String,
-    _uuid: Option<String>,
-    class: String,
-    properties: Vec<PropertyDescriptor>,
+    data: AtomicRefCell<ObjectActorData>,
 }
 
 impl Actor for ObjectActor {
-    fn name(&self) -> String {
-        self.name.clone()
+    fn name(&self) -> &str {
+        &self.name
     }
 
     // https://searchfox.org/firefox-main/source/devtools/shared/specs/object.js
@@ -142,42 +154,82 @@ impl Actor for ObjectActor {
     ) -> Result<(), ActorError> {
         match msg_type {
             "enumProperties" => {
-                let property_iterator_name =
-                    PropertyIteratorActor::register(registry, self.properties.clone());
-                let property_iterator =
-                    registry.find::<PropertyIteratorActor>(&property_iterator_name);
-                let count = property_iterator.count();
-                let msg = EnumReply {
-                    from: self.name(),
-                    iterator: EnumIterator {
-                        actor: property_iterator_name,
-                        type_: EnumIteratorType::PropertyIterator,
-                        count,
-                    },
-                };
+                let preview = self.data.borrow().preview.clone();
+                let properties = preview.as_ref().map_or_else(Vec::new, |preview| {
+                    if preview.kind == "ArrayLike" {
+                        // For arrays, convert items to indexed properties
+                        // <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/getOwnPropertyDescriptor#description>
+                        let mut props: Vec<PropertyDescriptor> = preview
+                            .items
+                            .as_ref()
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, value)| PropertyDescriptor {
+                                        name: index.to_string(),
+                                        value: value.clone(),
+                                        configurable: true,
+                                        enumerable: true,
+                                        writable: true,
+                                        is_accessor: false,
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        // Add length property
+                        if let Some(length) = preview.array_length {
+                            // <https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/length#value>
+                            props.push(PropertyDescriptor {
+                                name: "length".to_string(),
+                                value: DebuggerValue::NumberValue(length as f64),
+                                configurable: false,
+                                enumerable: false,
+                                writable: true,
+                                is_accessor: false,
+                            });
+                        }
+                        props
+                    } else {
+                        preview.own_properties.clone().unwrap_or_default()
+                    }
+                });
+                let entries = properties
+                    .into_iter()
+                    .map(PropertyIteratorEntry::Property)
+                    .collect();
+                self.reply_property_iterator(request, registry, entries)?
+            },
 
-                request.reply_final(&msg)?
+            "enumEntries" => {
+                let mut entries = Vec::new();
+                let preview = self.data.borrow().preview.clone();
+                if let Some(preview) = preview &&
+                    let Some(map_entries) = preview.entries
+                {
+                    for (key, value) in map_entries {
+                        entries.push(PropertyIteratorEntry::MapEntry(key, value));
+                    }
+                }
+                self.reply_property_iterator(request, registry, entries)?
             },
 
             "enumSymbols" => {
-                let symbol_iterator = SymbolIteratorActor {
-                    name: registry.new_name::<SymbolIteratorActor>(),
-                };
+                let symbol_iterator_actor = SymbolIteratorActor::register(registry);
                 let msg = EnumReply {
-                    from: self.name(),
+                    from: self.name().into(),
                     iterator: EnumIterator {
-                        actor: symbol_iterator.name(),
+                        actor: symbol_iterator_actor.name().into(),
                         type_: EnumIteratorType::SymbolIterator,
                         count: 0,
                     },
                 };
-                registry.register(symbol_iterator);
                 request.reply_final(&msg)?
             },
 
             "prototype" => {
                 let msg = PrototypeReply {
-                    from: self.name(),
+                    from: self.name().into(),
                     prototype: self.encode(registry),
                 };
                 request.reply_final(&msg)?
@@ -190,72 +242,129 @@ impl Actor for ObjectActor {
 }
 
 impl ObjectActor {
-    pub fn register(registry: &ActorRegistry, uuid: Option<String>, class: String) -> String {
-        Self::register_with_properties(registry, uuid, class, Vec::new())
+    fn reply_property_iterator(
+        &self,
+        request: ClientRequest,
+        registry: &ActorRegistry,
+        entries: Vec<PropertyIteratorEntry>,
+    ) -> Result<(), ActorError> {
+        let property_iterator_actor = PropertyIteratorActor::register(registry, entries);
+        let msg = EnumReply {
+            from: self.name().into(),
+            iterator: EnumIterator {
+                actor: property_iterator_actor.name().into(),
+                type_: EnumIteratorType::PropertyIterator,
+                count: property_iterator_actor.count(),
+            },
+        };
+        request.reply_final(&msg)
     }
 
-    pub fn register_with_properties(
+    pub fn register(
         registry: &ActorRegistry,
-        uuid: Option<String>,
+        actor_name: Option<String>,
         class: String,
-        properties: Vec<PropertyDescriptor>,
+        own_property_length: Option<u32>,
+        preview: Option<devtools_traits::ObjectPreview>,
     ) -> String {
-        let Some(uuid) = uuid else {
-            let name = registry.new_name::<Self>();
-            let actor = ObjectActor {
-                name: name.clone(),
-                _uuid: None,
-                class,
-                properties,
-            };
-            registry.register(actor);
+        if let Some(name) = actor_name {
+            let actor = registry.find::<Self>(&name);
+            let mut data = actor.data.borrow_mut();
+
+            data.class = class;
+            data.own_property_length = own_property_length;
+
+            if preview.is_some() || data.preview.is_none() {
+                data.preview = preview;
+            }
+
             return name;
-        };
-        if !registry.script_actor_registered(uuid.clone()) {
-            let name = registry.new_name::<Self>();
-            let actor = ObjectActor {
-                name: name.clone(),
-                _uuid: Some(uuid.clone()),
-                class,
-                properties,
-            };
-
-            registry.register_script_actor(uuid, name.clone());
-            registry.register(actor);
-
-            name
-        } else {
-            registry.script_to_actor(uuid)
         }
+
+        let name = new_actor_name::<Self>();
+        let actor = ObjectActor {
+            name: name.clone(),
+            data: AtomicRefCell::new(ObjectActorData {
+                class,
+                own_property_length,
+                preview,
+            }),
+        };
+        registry.register(actor);
+        name
     }
 }
 
 impl ActorEncode<ObjectActorMsg> for ObjectActor {
-    fn encode(&self, _: &ActorRegistry) -> ObjectActorMsg {
-        ObjectActorMsg {
-            actor: self.name(),
+    fn encode(&self, registry: &ActorRegistry) -> ObjectActorMsg {
+        let data = self.data.borrow().clone();
+        let mut msg = ObjectActorMsg {
+            actor: self.name().into(),
             type_: "object".into(),
-            class: self.class.clone(),
-            own_property_length: self.properties.len() as i32,
+            class: data.class.clone(),
             extensible: true,
             frozen: false,
             sealed: false,
-            is_error: false,
-            preview: ObjectPreview {
-                kind: "ObjectWithURL".into(),
-                url: "".into(), // TODO: Use the correct url
-            },
+            function: None,
+            preview: None,
+            own_property_length: data.own_property_length,
+        };
+
+        // Build preview
+        // <https://searchfox.org/firefox-main/source/devtools/server/actors/object/previewers.js#849>
+        let Some(preview) = data.preview.clone() else {
+            return msg;
+        };
+
+        let function = preview.function.map(|function| FunctionPreview {
+            name: function.name.clone(),
+            display_name: function.display_name.clone(),
+            parameter_names: function.parameter_names.clone(),
+            is_async: function.is_async,
+            is_generator: function.is_generator,
+        });
+
+        if data.class == "Function" {
+            msg.function = function.clone();
         }
-    }
-}
 
-#[derive(MallocSizeOf)]
-struct SymbolIteratorActor {
-    name: String,
-}
+        let preview = ObjectPreview {
+            kind: preview.kind.clone(),
+            size: preview.size,
+            entries: preview.entries.map(|entries| {
+                entries
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            debugger_value_to_json(registry, key.clone()),
+                            debugger_value_to_json(registry, value.clone()),
+                        )
+                    })
+                    .collect()
+            }),
+            own_properties: preview.own_properties.map(|own_properties| {
+                own_properties
+                    .iter()
+                    .map(|prop| {
+                        (
+                            prop.name.clone(),
+                            ObjectPropertyDescriptor::from_property_descriptor(registry, prop),
+                        )
+                    })
+                    .collect()
+            }),
+            own_properties_length: preview.own_properties_length,
+            function,
+            length: preview.array_length,
+            items: preview.items.map(|items| {
+                items
+                    .iter()
+                    .map(|item| debugger_value_to_json(registry, item.clone()))
+                    .collect()
+            }),
+        };
 
-impl Actor for SymbolIteratorActor {
-    fn name(&self) -> String {
-        self.name.clone()
+        msg.preview = Some(preview);
+        msg
     }
 }

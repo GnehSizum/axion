@@ -7,7 +7,7 @@ Use this flow when a repository wants machine-readable Axion validation without 
 Run formatting, tests, lints, and the lightweight app check:
 
 ```sh
-cargo fmt --all --check
+cargo fmt --check
 cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo run -p axion-cli -- check \
@@ -18,6 +18,8 @@ cargo run -p axion-cli -- check \
   --report-path target/axion/reports/check.json
 ```
 
+`cargo fmt --check` checks the Axion workspace. Avoid `--all` here: it also formats local path dependencies, including the vendored Servo workspace with its own upstream formatting configuration.
+
 Upload `target/axion/reports/check.json` as the primary readiness artifact. The report uses `axion.check-report.v1` and includes `failure_phase`, `next_step`, `next_actions[]`, `artifacts[]`, `dev_preflight`, and `bundle_preflight`.
 
 The checked-in `.github/workflows/ci.yml` runs this lightweight check for `examples/hello-axion` and uploads `target/axion/reports/*.json` with the diagnostics artifacts.
@@ -25,6 +27,8 @@ The checked-in `.github/workflows/ci.yml` runs this lightweight check for `examp
 ## Optional GUI Smoke
 
 Run GUI smoke on manual or platform-specific runners where Servo window startup is available:
+
+The optional Ubuntu GUI job installs `clang-19` and `libclang-19-dev`, explicitly selects the Clang 19 compilers, and points `LIBCLANG_PATH` at `/usr/lib/llvm-19/lib` to meet Servo 0.6.0's native compiler requirement.
 
 ```sh
 cargo run -p axion-cli -- gui-smoke \

@@ -10,11 +10,11 @@ use std::fmt::Debug;
 use std::rc::Rc;
 
 use html5ever::{LocalName, Namespace, Prefix};
+use js::context::JSContext;
 use script_bindings::callback::ExceptionHandling;
 use script_bindings::codegen::GenericBindings::AttrBinding::AttrMethods;
 use script_bindings::codegen::GenericBindings::NodeBinding::{GetRootNodeOptions, NodeMethods};
 use script_bindings::root::Dom;
-use script_bindings::script_runtime::CanGc;
 use script_bindings::str::DOMString;
 use style::Atom;
 use style::dom::OpaqueNode;
@@ -27,7 +27,9 @@ use crate::dom::bindings::root::DomRoot;
 use crate::dom::comment::Comment;
 use crate::dom::document::Document;
 use crate::dom::element::Element;
-use crate::dom::node::{Node, NodeTraits, PrecedingNodeIterator, ShadowIncluding};
+use crate::dom::element::attributes::storage::AttributeStorage;
+use crate::dom::iterators::{PrecedingNodeIterator, ShadowIncluding};
+use crate::dom::node::{Node, NodeTraits};
 use crate::dom::processinginstruction::ProcessingInstruction;
 use crate::dom::text::Text;
 
@@ -41,11 +43,13 @@ pub(crate) struct XPathWrapper<T>(pub T);
 pub(crate) struct XPathImplementation;
 
 impl xpath::Dom for XPathImplementation {
+    type Context = JSContext;
     type Node = XPathWrapper<DomRoot<Node>>;
     type NamespaceResolver = XPathWrapper<Rc<XPathNSResolver>>;
 }
 
 impl xpath::Node for XPathWrapper<DomRoot<Node>> {
+    type Context = JSContext;
     type ProcessingInstruction = XPathWrapper<DomRoot<ProcessingInstruction>>;
     type Document = XPathWrapper<DomRoot<Document>>;
     type Attribute = XPathWrapper<DomRoot<Attr>>;
@@ -116,11 +120,11 @@ impl xpath::Node for XPathWrapper<DomRoot<Node>> {
         let owner_document = self.0.owner_document();
         let next_non_descendant_node = self
             .0
-            .following_nodes(owner_document.upcast())
+            .following_nodes(owner_document.upcast(), ShadowIncluding::No)
             .next_skipping_children();
         let following_nodes = next_non_descendant_node
             .clone()
-            .map(|node| node.following_nodes(owner_document.upcast()))
+            .map(|node| node.following_nodes(owner_document.upcast(), ShadowIncluding::No))
             .into_iter()
             .flatten();
         next_non_descendant_node
@@ -176,6 +180,7 @@ impl xpath::Document for XPathWrapper<DomRoot<Document>> {
 
     fn get_elements_with_id(
         &self,
+        cx: &mut JSContext,
         id: &str,
     ) -> impl Iterator<Item = XPathWrapper<DomRoot<Element>>> {
         struct ElementIterator<'a> {
@@ -194,13 +199,14 @@ impl xpath::Document for XPathWrapper<DomRoot<Document>> {
         }
 
         ElementIterator {
-            elements: self.0.get_elements_with_id(&Atom::from(id)),
+            elements: self.0.get_elements_with_id(cx, &Atom::from(id)),
             position: 0,
         }
     }
 }
 
 impl xpath::Element for XPathWrapper<DomRoot<Element>> {
+    type Context = JSContext;
     type Node = XPathWrapper<DomRoot<Node>>;
     type Attribute = XPathWrapper<DomRoot<Attr>>;
 
@@ -208,9 +214,9 @@ impl xpath::Element for XPathWrapper<DomRoot<Element>> {
         DomRoot::from_ref(self.0.upcast::<Node>()).into()
     }
 
-    fn attributes(&self) -> impl Iterator<Item = Self::Attribute> {
+    fn attributes(&self, cx: &mut JSContext) -> impl Iterator<Item = Self::Attribute> {
         struct AttributeIterator<'a> {
-            attributes: Ref<'a, [Dom<Attr>]>,
+            attributes: &'a AttributeStorage,
             position: usize,
         }
 
@@ -218,19 +224,21 @@ impl xpath::Element for XPathWrapper<DomRoot<Element>> {
             type Item = XPathWrapper<DomRoot<Attr>>;
 
             fn next(&mut self) -> Option<Self::Item> {
-                let attribute = self.attributes.get(self.position)?;
+                let entries = self.attributes.borrow();
+                let entry = entries.get(self.position)?;
                 self.position += 1;
-                Some(attribute.as_rooted().into())
+                Some(DomRoot::from_ref(entry.as_attr().unwrap()).into())
             }
 
             fn size_hint(&self) -> (usize, Option<usize>) {
-                let exact_length = self.attributes.len() - self.position;
+                let exact_length = self.attributes.borrow().len() - self.position;
                 (exact_length, Some(exact_length))
             }
         }
 
+        // XPath needs full DOM attribute nodes.
         AttributeIterator {
-            attributes: self.0.attrs(),
+            attributes: self.0.dom_attrs(cx),
             position: 0,
         }
     }
@@ -273,13 +281,11 @@ impl xpath::Attribute for XPathWrapper<DomRoot<Attr>> {
 }
 
 impl xpath::NamespaceResolver for XPathWrapper<Rc<XPathNSResolver>> {
-    fn resolve_namespace_prefix(&self, prefix: &str) -> Option<String> {
+    type Context = JSContext;
+
+    fn resolve_namespace_prefix(&self, cx: &mut JSContext, prefix: &str) -> Option<String> {
         self.0
-            .LookupNamespaceURI__(
-                Some(DOMString::from(prefix)),
-                ExceptionHandling::Report,
-                CanGc::note(),
-            )
+            .LookupNamespaceURI__(cx, Some(DOMString::from(prefix)), ExceptionHandling::Report)
             .ok()
             .flatten()
             .map(String::from)
@@ -298,22 +304,21 @@ impl<T> From<T> for XPathWrapper<T> {
     }
 }
 
-impl<T> XPathWrapper<T> {
-    pub(crate) fn into_inner(self) -> T {
-        self.0
-    }
-}
-
 pub(crate) fn parse_expression(
+    cx: &mut JSContext,
     expression: &str,
     resolver: Option<Rc<XPathNSResolver>>,
     is_in_html_document: bool,
 ) -> Fallible<xpath::Expression> {
-    xpath::parse(expression, resolver.map(XPathWrapper), is_in_html_document).map_err(|error| {
-        match error {
-            xpath::ParserError::FailedToResolveNamespacePrefix => Error::Namespace(None),
-            _ => Error::Syntax(Some(format!("Failed to parse XPath expression: {error:?}"))),
-        }
+    xpath::parse(
+        cx,
+        expression,
+        resolver.map(XPathWrapper),
+        is_in_html_document,
+    )
+    .map_err(|error| match error {
+        xpath::ParserError::FailedToResolveNamespacePrefix => Error::Namespace(None),
+        _ => Error::Syntax(Some(format!("Failed to parse XPath expression: {error:?}"))),
     })
 }
 

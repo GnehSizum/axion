@@ -5,19 +5,17 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-#[cfg(feature = "gamepad")]
-use embedder_traits::GamepadHapticEffectType;
 use embedder_traits::{
     AlertResponse, AllowOrDeny, AuthenticationResponse, BluetoothDeviceDescription,
     ConfirmResponse, ConsoleLogLevel, ContextMenuAction, ContextMenuElementInformation,
     ContextMenuItem, Cursor, EmbedderControlId, EmbedderControlResponse, FilePickerRequest,
     FilterPattern, InputEventId, InputEventResult, InputMethodType, LoadStatus, MediaSessionEvent,
     NewWebViewDetails, Notification, PermissionFeature, PromptResponse, RgbColor, ScreenGeometry,
-    SelectElementOptionOrOptgroup, SimpleDialogRequest, TraversalId, WebResourceRequest,
-    WebResourceResponse, WebResourceResponseMsg,
+    SelectElementOptionOrOptgroup, SelectElementRequest, SimpleDialogRequest, TraversalId,
+    WebResourceRequest, WebResourceResponse, WebResourceResponseMsg,
 };
 use paint_api::rendering_context::RenderingContext;
-use servo_base::generic_channel::{GenericSender, SendError};
+use servo_base::generic_channel::{GenericCallback, GenericSender, SendError};
 use servo_base::id::PipelineId;
 use servo_constellation_traits::EmbedderToConstellationMessage;
 use tokio::sync::mpsc::UnboundedSender as TokioSender;
@@ -39,6 +37,7 @@ pub struct NavigationRequest {
 }
 
 impl NavigationRequest {
+    /// Allow this navigation request to proceed.
     pub fn allow(mut self) {
         self.constellation_proxy
             .send(EmbedderToConstellationMessage::AllowNavigationResponse(
@@ -48,6 +47,7 @@ impl NavigationRequest {
         self.response_sent = true;
     }
 
+    /// Deny this navigation request, preventing the navigation from proceeding.
     pub fn deny(mut self) {
         self.constellation_proxy
             .send(EmbedderToConstellationMessage::AllowNavigationResponse(
@@ -70,7 +70,7 @@ impl Drop for NavigationRequest {
     }
 }
 
-/// A permissions request for a [`WebView`] The embedder should allow or deny the request,
+/// A permissions request for a [`WebView`]. The embedder should allow or deny the request,
 /// either by reading a cached value or querying the user for permission via the user
 /// interface.
 pub struct PermissionRequest {
@@ -79,19 +79,26 @@ pub struct PermissionRequest {
 }
 
 impl PermissionRequest {
+    /// Get the [`PermissionFeature`] for which permission is being requested by page content.
     pub fn feature(&self) -> PermissionFeature {
         self.requested_feature
     }
 
+    /// Grant permission to the web content to access the requested feature.
     pub fn allow(self) {
         self.allow_deny_request.allow();
     }
 
+    /// Deny permission to the web content to access the requested feature.
     pub fn deny(self) {
         self.allow_deny_request.deny();
     }
 }
 
+/// A type used for communicating an allow-or-deny decision from the embedder
+/// to Servo. This is used as a part of requests from Servo to the embedder
+/// to perform certain actions and the request can either be allowed or denied
+/// by the embedder.
 pub struct AllowOrDenyRequest(IpcResponder<AllowOrDeny>, ServoErrorSender);
 
 impl AllowOrDenyRequest {
@@ -106,12 +113,25 @@ impl AllowOrDenyRequest {
         )
     }
 
+    pub(crate) fn new_from_callback(
+        callback: GenericCallback<AllowOrDeny>,
+        default_response: AllowOrDeny,
+        error_sender: ServoErrorSender,
+    ) -> Self {
+        Self(
+            IpcResponder::new_same_process(Box::new(callback), default_response),
+            error_sender,
+        )
+    }
+
+    /// Allow the action requested by Servo.
     pub fn allow(mut self) {
         if let Err(error) = self.0.send(AllowOrDeny::Allow) {
             self.1.raise_response_send_error(error);
         }
     }
 
+    /// Deny the action requested by Servo.
     pub fn deny(mut self) {
         if let Err(error) = self.0.send(AllowOrDeny::Deny) {
             self.1.raise_response_send_error(error);
@@ -119,10 +139,18 @@ impl AllowOrDenyRequest {
     }
 }
 
+/// A request to register or unregister a custom handler for a scheme.
+/// See <https://html.spec.whatwg.org/multipage/#custom-handlers>
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolHandlerRegistration {
+    /// The scheme for which the hander is being registered or unregistered.
     pub scheme: String,
+    /// The URL to navigate to when loading resources for the given 'scheme'.
+    /// The string "%s" in this URL is used as a placeholder. It will be replaced
+    /// by the URL of the resource to be handled.
     pub url: Url,
+    /// Whether this request is for a new registration or unregistering
+    /// a previously registered handler.
     pub register_or_unregister: RegisterOrUnregister,
 }
 
@@ -235,6 +263,7 @@ impl WebResourceLoad {
     pub fn request(&self) -> &WebResourceRequest {
         &self.request
     }
+
     /// Intercept this [`WebResourceLoad`] and control the response via the returned
     /// [`InterceptedWebResourceLoad`].
     pub fn intercept(mut self, response: WebResourceResponse) -> InterceptedWebResourceLoad {
@@ -297,13 +326,12 @@ impl InterceptedWebResourceLoad {
 
 impl Drop for InterceptedWebResourceLoad {
     fn drop(&mut self) {
-        if !self.finished {
-            if let Err(error) = self
+        if !self.finished &&
+            let Err(error) = self
                 .response_sender
                 .send(WebResourceResponseMsg::FinishLoad)
-            {
-                self.error_sender.raise_response_send_error(error);
-            }
+        {
+            self.error_sender.raise_response_send_error(error);
         }
     }
 }
@@ -331,6 +359,7 @@ pub enum EmbedderControl {
 }
 
 impl EmbedderControl {
+    /// Return the unique identifier for this embedder control.
     pub fn id(&self) -> EmbedderControlId {
         match self {
             EmbedderControl::SelectElement(select_element) => select_element.id,
@@ -413,10 +442,9 @@ impl Drop for ContextMenu {
 /// Represents a dialog triggered by clicking a `<select>` element.
 pub struct SelectElement {
     pub(crate) id: EmbedderControlId,
-    pub(crate) options: Vec<SelectElementOptionOrOptgroup>,
-    pub(crate) selected_option: Option<usize>,
     pub(crate) position: DeviceIntRect,
     pub(crate) constellation_proxy: ConstellationProxy,
+    pub(crate) select_element_request: SelectElementRequest,
     pub(crate) response_sent: bool,
 }
 
@@ -434,30 +462,39 @@ impl SelectElement {
     }
 
     /// Consecutive `<option>` elements outside of an `<optgroup>` will be combined
-    /// into a single anonymous group, whose [`label`](SelectElementGroup::label) is `None`.
+    /// into a single anonymous group without a label.
     pub fn options(&self) -> &[SelectElementOptionOrOptgroup] {
-        &self.options
+        &self.select_element_request.options
     }
 
-    /// Mark a single option as selected.
+    /// Set the options that are selected.
     ///
-    /// If there is already a selected option and the `<select>` element does not
-    /// support selecting multiple options, then the previous option will be unselected.
-    pub fn select(&mut self, id: Option<usize>) {
-        self.selected_option = id;
+    /// `selected_options` is a vector of indices into the array returned by [`Self::options`].
+    ///
+    /// If other options have previously been selected, this set of options
+    /// will replace them.
+    pub fn select(&mut self, selected_options: Vec<usize>) {
+        self.select_element_request.selected_options = selected_options
     }
 
-    pub fn selected_option(&self) -> Option<usize> {
-        self.selected_option
+    /// Get the currently selected options, represented by indices into the array
+    /// returned by [`Self::options`].
+    pub fn selected_options(&self) -> Vec<usize> {
+        self.select_element_request.selected_options.clone()
     }
 
-    /// Resolve the prompt with the options that have been selected by calling [select] previously.
+    /// Whether this `<select>` supports selecting multiple options.
+    pub fn allow_select_multiple(&self) -> bool {
+        self.select_element_request.allow_select_multiple
+    }
+
+    /// Resolve the prompt with the options that have been selected by calling [`Self::select`] previously.
     pub fn submit(mut self) {
         self.response_sent = true;
         self.constellation_proxy
             .send(EmbedderToConstellationMessage::EmbedderControlResponse(
                 self.id,
-                EmbedderControlResponse::SelectElement(self.selected_option()),
+                EmbedderControlResponse::SelectElement(self.selected_options()),
             ));
     }
 }
@@ -468,7 +505,7 @@ impl Drop for SelectElement {
             self.constellation_proxy
                 .send(EmbedderToConstellationMessage::EmbedderControlResponse(
                     self.id,
-                    EmbedderControlResponse::SelectElement(self.selected_option()),
+                    EmbedderControlResponse::SelectElement(self.selected_options()),
                 ));
         }
     }
@@ -502,11 +539,13 @@ impl ColorPicker {
         self.current_color
     }
 
+    /// Set the selected color for this [`ColorPicker`]. Passing `None` behaves as if the default
+    /// color was selected.
     pub fn select(&mut self, color: Option<RgbColor>) {
         self.current_color = color;
     }
 
-    /// Resolve the prompt with the options that have been selected by calling [select] previously.
+    /// Resolve the prompt with the options that have been selected by calling [`Self::select`] previously.
     pub fn submit(mut self) {
         self.response_sent = true;
         self.constellation_proxy
@@ -529,7 +568,7 @@ impl Drop for ColorPicker {
     }
 }
 
-/// Represents a dialog triggered by clicking a `<input type=color>` element.
+/// Represents a dialog triggered by clicking a `<input type=file>` element.
 pub struct FilePicker {
     pub(crate) id: EmbedderControlId,
     pub(crate) file_picker_request: FilePickerRequest,
@@ -542,10 +581,13 @@ impl FilePicker {
         self.id
     }
 
+    /// Get the file filter patterns for this [`FilePicker`], which specify the types
+    /// of files that are displayed in the dialog.
     pub fn filter_patterns(&self) -> &[FilterPattern] {
         &self.file_picker_request.filter_patterns
     }
 
+    /// Whether or not this file picker allows selecting multiple files at once.
     pub fn allow_select_multiple(&self) -> bool {
         self.file_picker_request.allow_select_multiple
     }
@@ -556,11 +598,12 @@ impl FilePicker {
         &self.file_picker_request.current_paths
     }
 
+    /// Set the selected files for this [`FilePicker`].
     pub fn select(&mut self, paths: &[PathBuf]) {
         self.file_picker_request.current_paths = paths.to_owned();
     }
 
-    /// Resolve the prompt with the options that have been selected by calling [select] previously.
+    /// Resolve the prompt with the files that have been selected by calling [`Self::select`] previously.
     pub fn submit(mut self) {
         if let Some(sender) = self.response_sender.take() {
             let _ = sender.send(Some(std::mem::take(
@@ -649,6 +692,7 @@ pub enum SimpleDialog {
 }
 
 impl SimpleDialog {
+    #[doc(hidden)]
     pub fn message(&self) -> &str {
         match self {
             SimpleDialog::Alert(alert_dialog) => alert_dialog.message(),
@@ -657,6 +701,7 @@ impl SimpleDialog {
         }
     }
 
+    #[doc(hidden)]
     pub fn confirm(self) {
         match self {
             SimpleDialog::Alert(alert_dialog) => alert_dialog.confirm(),
@@ -665,6 +710,7 @@ impl SimpleDialog {
         }
     }
 
+    #[doc(hidden)]
     pub fn dismiss(self) {
         match self {
             SimpleDialog::Alert(alert_dialog) => alert_dialog.confirm(),
@@ -743,6 +789,7 @@ impl Drop for AlertDialog {
 }
 
 impl AlertDialog {
+    /// Get the message text of this [`AlertDialog`], which is set by web content.
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -766,6 +813,7 @@ pub struct ConfirmDialog {
 }
 
 impl ConfirmDialog {
+    /// Get the message text of this [`ConfirmDialog`], which is set by web content.
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -793,10 +841,10 @@ impl Drop for ConfirmDialog {
 
 /// A [`prompt()`](https://html.spec.whatwg.org/multipage/#dom-prompt).
 ///
-/// The prompt dialog is expected to be represented by a mesage, a text entry field, and
+/// The prompt dialog is expected to be represented by a message, a text entry field, and
 /// an "Ok" and "Cancel" buttons. When "Ok" is selected the current prompt value is sent
 /// as the response to the DOM API. A default value may be sent with the [`PromptDialog`],
-/// which be be retrieved by calling [`Self::current_value`]. Before calling [`Self::ok`]
+/// which be be retrieved by calling [`Self::current_value`]. Before calling [`Self::confirm`]
 /// or as the prompt field changes, the embedder is expected to call
 /// [`Self::set_current_value`].
 pub struct PromptDialog {
@@ -816,14 +864,17 @@ impl Drop for PromptDialog {
 }
 
 impl PromptDialog {
+    /// Get the message text of this [`PromptDialog`], which is set by web content.
     pub fn message(&self) -> &str {
         &self.message
     }
 
+    /// Get the current value of the prompt's text entry field.
     pub fn current_value(&self) -> &str {
         &self.current_value
     }
 
+    /// Set the current value of the prompt's text entry field.
     pub fn set_current_value(&mut self, new_value: &str) {
         self.current_value = new_value.to_owned()
     }
@@ -844,17 +895,26 @@ impl PromptDialog {
     }
 }
 
+/// A request from Servo to embedder to open a new auxiliary [`WebView`], typically
+/// triggered by page content calling DOM APIs like `window.open()`.
+///
+/// Refer to the documentation of [`WebViewDelegate::request_create_new`] for more information.
 pub struct CreateNewWebViewRequest {
     pub(crate) servo: Servo,
     pub(crate) responder: IpcResponder<Option<NewWebViewDetails>>,
 }
 
 impl CreateNewWebViewRequest {
+    /// Returns a [`WebViewBuilder`] that can be used to create a new auxiliary [`WebView`].
     pub fn builder(self, rendering_context: Rc<dyn RenderingContext>) -> WebViewBuilder {
         WebViewBuilder::new_for_create_request(&self.servo, rendering_context, self.responder)
     }
 }
 
+/// A trait that the embedder can implement to customize the behaviour of a [`WebView`] or to
+/// listen to events from a [`WebView`]. Multiple [`WebView`]s can share the same delegate
+/// instance. A [`WebView`]'s delegate needs to be set at the time of creation using
+/// [`WebViewBuilder::delegate`].
 pub trait WebViewDelegate {
     /// Get the [`ScreenGeometry`] for this [`WebView`]. If this is unimplemented or returns `None`
     /// the screen will have the size of the [`WebView`]'s `RenderingContext` and `WebView` will be
@@ -884,9 +944,9 @@ pub trait WebViewDelegate {
     fn notify_load_status_changed(&self, _webview: WebView, _status: LoadStatus) {}
     /// The [`Cursor`] of the currently loaded page in this [`WebView`] has changed. The new
     /// cursor can accessed via [`WebView::cursor`].
-    fn notify_cursor_changed(&self, _webview: WebView, _: Cursor) {}
+    fn notify_cursor_changed(&self, _webview: WebView, _cursor: Cursor) {}
     /// The favicon of the currently loaded page in this [`WebView`] has changed. The new
-    /// favicon [`Image`] can accessed via [`WebView::favicon`].
+    /// favicon [`Image`](embedder_traits::Image) can accessed via [`WebView::favicon`].
     fn notify_favicon_changed(&self, _webview: WebView) {}
     /// Notify the embedder that it needs to present a new frame.
     fn notify_new_frame_ready(&self, _webview: WebView) {}
@@ -895,7 +955,7 @@ pub trait WebViewDelegate {
     /// back navigation, and forward navigation modify this index.
     fn notify_history_changed(&self, _webview: WebView, _entries: Vec<Url>, _current: usize) {}
     /// A history traversal operation is complete.
-    fn notify_traversal_complete(&self, _webview: WebView, _: TraversalId) {}
+    fn notify_traversal_complete(&self, _webview: WebView, _traversal_id: TraversalId) {}
     /// Page content has closed this [`WebView`] via `window.close()`. It's the embedder's
     /// responsibility to remove the [`WebView`] from the interface when this notification
     /// occurs.
@@ -904,7 +964,13 @@ pub trait WebViewDelegate {
     /// An input event passed to this [`WebView`] via [`WebView::notify_input_event`] has been handled
     /// by Servo. This allows post-procesing of input events, such as chaining up unhandled events
     /// to parent UI elements.
-    fn notify_input_event_handled(&self, _webview: WebView, _: InputEventId, _: InputEventResult) {}
+    fn notify_input_event_handled(
+        &self,
+        _webview: WebView,
+        _event_id: InputEventId,
+        _result: InputEventResult,
+    ) {
+    }
     /// A pipeline in the webview panicked. First string is the reason, second one is the backtrace.
     fn notify_crashed(&self, _webview: WebView, _reason: String, _backtrace: Option<String>) {}
     /// Notifies the embedder about media session events
@@ -915,7 +981,7 @@ pub trait WebViewDelegate {
     /// mode and to show or hide extra UI elements. Regardless of how the notification is handled,
     /// the page will enter or leave fullscreen state internally according to the [Fullscreen
     /// API](https://fullscreen.spec.whatwg.org/).
-    fn notify_fullscreen_state_changed(&self, _webview: WebView, _: bool) {}
+    fn notify_fullscreen_state_changed(&self, _webview: WebView, _is_fullscreen: bool) {}
 
     /// Whether or not to allow a [`WebView`] to load a URL in its main frame or one of its
     /// nested `<iframe>`s. [`NavigationRequest`]s are accepted by default.
@@ -924,7 +990,7 @@ pub trait WebViewDelegate {
     /// of its nested `<iframe>`s. By default, unloads are allowed.
     fn request_unload(&self, _webview: WebView, _unload_request: AllowOrDenyRequest) {}
     /// Move the window to a point.
-    fn request_move_to(&self, _webview: WebView, _: DeviceIntPoint) {}
+    fn request_move_to(&self, _webview: WebView, _point: DeviceIntPoint) {}
     /// Whether or not to allow a [`WebView`] to (un)register a protocol handler (e.g. `mailto:`).
     /// Typically an embedder application will show a permissions prompt when this happens
     /// to confirm a protocol handler is allowed. By default, requests are denied.
@@ -948,7 +1014,7 @@ pub trait WebViewDelegate {
     /// ignored, no new `WebView` will be opened. Embedders can handle this method by
     /// using the provided [`CreateNewWebViewRequest`] to build a new `WebView`.
     ///
-    /// ```rust
+    /// ```ignore
     /// fn request_create_new(&self, parent_webview: WebView, request: CreateNewWebViewRequest) {
     ///     let webview = request
     ///         .builder(self.rendering_context())
@@ -962,12 +1028,13 @@ pub trait WebViewDelegate {
     /// it will be immediately destroyed.
     ///
     /// [`window.open`]: https://developer.mozilla.org/en-US/docs/Web/API/Window/open
-    fn request_create_new(&self, _parent_webview: WebView, _: CreateNewWebViewRequest) {}
+    fn request_create_new(&self, _parent_webview: WebView, _request: CreateNewWebViewRequest) {}
     /// Content in a [`WebView`] is requesting permission to access a feature requiring
     /// permission from the user. The embedder should allow or deny the request, either by
     /// reading a cached value or querying the user for permission via the user interface.
-    fn request_permission(&self, _webview: WebView, _: PermissionRequest) {}
+    fn request_permission(&self, _webview: WebView, _request: PermissionRequest) {}
 
+    /// Request that the embedder supply credentials to use for HTTP authentication.
     fn request_authentication(
         &self,
         _webview: WebView,
@@ -976,7 +1043,12 @@ pub trait WebViewDelegate {
     }
 
     /// Open dialog to select bluetooth device.
-    fn show_bluetooth_device_dialog(&self, _webview: WebView, _: BluetoothDeviceSelectionRequest) {}
+    fn show_bluetooth_device_dialog(
+        &self,
+        _webview: WebView,
+        _request: BluetoothDeviceSelectionRequest,
+    ) {
+    }
 
     /// Request that the embedder show UI elements for form controls that are not integrated
     /// into page content, such as dropdowns for `<select>` elements.
@@ -987,24 +1059,6 @@ pub trait WebViewDelegate {
     ///
     /// After this point, any further responses to that request will be ignored.
     fn hide_embedder_control(&self, _webview: WebView, _control_id: EmbedderControlId) {}
-
-    /// Request to play a haptic effect on a connected gamepad. The embedder is expected to
-    /// call the provided callback when the effect is complete with `true` for success
-    /// and `false` for failure.
-    #[cfg(feature = "gamepad")]
-    fn play_gamepad_haptic_effect(
-        &self,
-        _webview: WebView,
-        _: usize,
-        _: GamepadHapticEffectType,
-        _: Box<dyn FnOnce(bool)>,
-    ) {
-    }
-    /// Request to stop a haptic effect on a connected gamepad. The embedder is expected to
-    /// call the provided callback when the effect is complete with `true` for success
-    /// and `false` for failure.
-    #[cfg(feature = "gamepad")]
-    fn stop_gamepad_haptic_effect(&self, _webview: WebView, _: usize, _: Box<dyn FnOnce(bool)>) {}
 
     /// Triggered when this [`WebView`] will load a web (HTTP/HTTPS) resource. The load may be
     /// intercepted and alternate contents can be loaded by the client by calling
@@ -1166,6 +1220,8 @@ mod test {
             method: Method::GET,
             headers: HeaderMap::default(),
             url: Url::parse("https://example.com").expect("Guaranteed by argument"),
+            destination: content_security_policy::Destination::Document,
+            referrer_url: None,
             is_for_main_frame: false,
             is_redirect: false,
         };

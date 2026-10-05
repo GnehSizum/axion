@@ -113,12 +113,12 @@ impl Path {
     /// <https://html.spec.whatwg.org/multipage/#dom-context-2d-beziercurveto>
     pub fn bezier_curve_to(&mut self, cp1x: f64, cp1y: f64, cp2x: f64, cp2y: f64, x: f64, y: f64) {
         // Step 1. If any of the arguments are infinite or NaN, then return.
-        if !(cp1x.is_finite()
-            && cp1y.is_finite()
-            && cp2x.is_finite()
-            && cp2y.is_finite()
-            && x.is_finite()
-            && y.is_finite())
+        if !(cp1x.is_finite() &&
+            cp1y.is_finite() &&
+            cp2x.is_finite() &&
+            cp2y.is_finite() &&
+            x.is_finite() &&
+            y.is_finite())
         {
             return;
         }
@@ -142,11 +142,11 @@ impl Path {
         radius: f64,
     ) -> Result<(), IndexSizeError> {
         // Step 1. If any of the arguments are infinite or NaN, then return.
-        if !(x1.is_finite()
-            && y1.is_finite()
-            && x2.is_finite()
-            && y2.is_finite()
-            && radius.is_finite())
+        if !(x1.is_finite() &&
+            y1.is_finite() &&
+            x2.is_finite() &&
+            y2.is_finite() &&
+            radius.is_finite())
         {
             return Ok(());
         }
@@ -264,13 +264,13 @@ impl Path {
         counterclockwise: bool,
     ) -> Result<(), IndexSizeError> {
         // Step 1. If any of the arguments are infinite or NaN, then return.
-        if !(x.is_finite()
-            && y.is_finite()
-            && radius_x.is_finite()
-            && radius_y.is_finite()
-            && rotation_angle.is_finite()
-            && start_angle.is_finite()
-            && end_angle.is_finite())
+        if !(x.is_finite() &&
+            y.is_finite() &&
+            radius_x.is_finite() &&
+            radius_y.is_finite() &&
+            rotation_angle.is_finite() &&
+            start_angle.is_finite() &&
+            end_angle.is_finite())
         {
             return Ok(());
         }
@@ -284,8 +284,8 @@ impl Path {
         let mut end = Angle::radians(end_angle);
 
         // Wrap angles mod 2 * PI if necessary
-        if !counterclockwise && start > end + Angle::two_pi()
-            || counterclockwise && end > start + Angle::two_pi()
+        if !counterclockwise && start > end + Angle::two_pi() ||
+            counterclockwise && end > start + Angle::two_pi()
         {
             start = start.positive();
             end = end.positive();
@@ -437,16 +437,14 @@ pub struct LineOptions {
     pub dash_offset: f64,
 }
 
-#[expect(clippy::large_enum_variant)]
-#[derive(Debug, Deserialize, Serialize)]
-pub enum CanvasMsg {
-    Canvas2d(Canvas2dMsg, CanvasId),
-    Recreate(Option<Size2D<u64>>, CanvasId),
-    Close(CanvasId),
-}
+pub type CanvasMsg = (CanvasId, CanvasCommand);
 
 #[derive(Debug, Deserialize, Serialize, Display)]
-pub enum Canvas2dMsg {
+pub enum CanvasCommand {
+    /// This is used for resizing (when size is provided) or just clearing the canvas (when size is `None`).
+    Recreate(Option<Size2D<u64>>),
+    /// Destroy the canvas (its id will be invalidated).
+    Destroy,
     SetImageKey(ImageKey),
     DrawImage(
         SharedSnapshot,
@@ -528,6 +526,7 @@ pub enum Canvas2dMsg {
         Transform2D<f64>,
     ),
     UpdateImage(Option<Epoch>),
+    ProcessBatchMessages(Vec<CanvasCommand>),
 }
 
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]

@@ -10,17 +10,17 @@ use embedder_traits::{
     EmbedderControlRequest, EmbedderControlResponse, EmbedderMsg,
 };
 use euclid::{Point2D, Rect, Size2D};
-use js::context::JSContext;
+use js::context::{JSContext, NoGC};
 use net_traits::CoreResourceMsg;
 use net_traits::filemanager_thread::FileManagerThreadMsg;
 use rustc_hash::FxHashMap;
+use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::HTMLAnchorElementBinding::HTMLAnchorElementMethods;
 use script_bindings::codegen::GenericBindings::HTMLImageElementBinding::HTMLImageElementMethods;
 use script_bindings::codegen::GenericBindings::HistoryBinding::HistoryMethods;
 use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
 use script_bindings::inheritance::Castable;
 use script_bindings::root::{Dom, DomRoot};
-use script_bindings::script_runtime::CanGc;
 use servo_base::Epoch;
 use servo_base::generic_channel::GenericSend;
 use servo_constellation_traits::{LoadData, NavigationHistoryBehavior};
@@ -28,12 +28,12 @@ use servo_url::ServoUrl;
 use webrender_api::units::{DeviceIntRect, DevicePoint};
 
 use crate::dom::activation::Activatable;
-use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::trace::NoTrace;
+use crate::dom::html::form_controls::text_control::TextControlElement;
 use crate::dom::inputevent::HitTestResult;
-use crate::dom::node::{Node, NodeTraits, ShadowIncluding};
-use crate::dom::textcontrol::TextControlElement;
+use crate::dom::iterators::ShadowIncluding;
+use crate::dom::node::{Node, NodeTraits};
 use crate::dom::types::{
     Element, HTMLAnchorElement, HTMLElement, HTMLImageElement, HTMLInputElement, HTMLSelectElement,
     HTMLTextAreaElement, Window,
@@ -42,11 +42,12 @@ use crate::messaging::MainThreadScriptMsg;
 use crate::navigation::navigate;
 
 #[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 pub(crate) enum ControlElement {
-    Select(DomRoot<HTMLSelectElement>),
-    ColorInput(DomRoot<HTMLInputElement>),
-    FileInput(DomRoot<HTMLInputElement>),
-    Ime(DomRoot<HTMLElement>),
+    Select(Dom<HTMLSelectElement>),
+    ColorInput(Dom<HTMLInputElement>),
+    FileInput(Dom<HTMLInputElement>),
+    Ime(Dom<HTMLElement>),
     ContextMenu(ContextMenuNodes),
 }
 
@@ -62,8 +63,10 @@ impl ControlElement {
     }
 }
 
+impl js::gc::Rootable for ControlElement {}
+
 #[derive(JSTraceable, MallocSizeOf)]
-#[cfg_attr(crown, expect(crown::unrooted_must_root))]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 pub(crate) struct DocumentEmbedderControls {
     /// The [`Window`] element for this [`DocumentUserInterfaceElements`].
     window: Dom<Window>,
@@ -96,6 +99,7 @@ impl DocumentEmbedderControls {
         }
     }
 
+    #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn show_embedder_control(
         &self,
         element: ControlElement,
@@ -126,11 +130,21 @@ impl DocumentEmbedderControls {
             .borrow_mut()
             .insert(id.index.into(), element);
 
+        self.send_embedder_control_request(request, id, rect);
+        id
+    }
+
+    fn send_embedder_control_request(
+        &self,
+        request: EmbedderControlRequest,
+        id: EmbedderControlId,
+        rect: DeviceIntRect,
+    ) {
         match request {
-            EmbedderControlRequest::SelectElement(..)
-            | EmbedderControlRequest::ColorPicker(..)
-            | EmbedderControlRequest::InputMethod(..)
-            | EmbedderControlRequest::ContextMenu(..) => self
+            EmbedderControlRequest::SelectElement(..) |
+            EmbedderControlRequest::ColorPicker(..) |
+            EmbedderControlRequest::InputMethod(..) |
+            EmbedderControlRequest::ContextMenu(..) => self
                 .window
                 .send_to_embedder(EmbedderMsg::ShowEmbedderControl(id, rect, request)),
             EmbedderControlRequest::FilePicker(file_picker_request) => {
@@ -162,8 +176,6 @@ impl DocumentEmbedderControls {
                     .unwrap();
             },
         }
-
-        id
     }
 
     pub(crate) fn hide_embedder_control(&self, element: &Element) {
@@ -193,7 +205,9 @@ impl DocumentEmbedderControls {
         assert_eq!(self.window.pipeline_id(), id.pipeline_id);
         assert_eq!(self.window.webview_id(), id.webview_id);
 
-        let Some(element) = self.visible_elements.borrow_mut().remove(&id.index.into()) else {
+        rooted!(&in(cx) let visible_element = self.visible_elements.borrow_mut().remove(&id.index.into()));
+
+        let Some(element) = &*visible_element else {
             return;
         };
 
@@ -207,19 +221,19 @@ impl DocumentEmbedderControls {
                 ControlElement::Select(select_element),
                 EmbedderControlResponse::SelectElement(response),
             ) => {
-                select_element.handle_menu_response(cx, response);
+                select_element.handle_embedder_response(cx, response);
             },
             (
                 ControlElement::ColorInput(input_element),
                 EmbedderControlResponse::ColorPicker(response),
             ) => {
-                input_element.handle_color_picker_response(response, CanGc::from_cx(cx));
+                input_element.handle_color_picker_response(cx, response);
             },
             (
                 ControlElement::FileInput(input_element),
                 EmbedderControlResponse::FilePicker(response),
             ) => {
-                input_element.handle_file_picker_response(response, CanGc::from_cx(cx));
+                input_element.handle_file_picker_response(cx, response);
             },
             (
                 ControlElement::ContextMenu(context_menu_nodes),
@@ -233,7 +247,7 @@ impl DocumentEmbedderControls {
         }
     }
 
-    pub(crate) fn show_context_menu(&self, hit_test_result: &HitTestResult) {
+    pub(crate) fn show_context_menu(&self, no_gc: &NoGC, hit_test_result: &HitTestResult) {
         {
             let mut visible_elements = self.visible_elements.borrow_mut();
             visible_elements.retain(|index, control_element| {
@@ -259,24 +273,23 @@ impl DocumentEmbedderControls {
             .node
             .inclusive_ancestors(ShadowIncluding::Yes)
         {
-            if anchor_element.is_none() {
-                if let Some(candidate_anchor_element) = node.downcast::<HTMLAnchorElement>() {
-                    if candidate_anchor_element.is_instance_activatable() {
-                        anchor_element = Some(DomRoot::from_ref(candidate_anchor_element));
-                    }
-                }
+            if anchor_element.is_none() &&
+                let Some(candidate_anchor_element) = node.downcast::<HTMLAnchorElement>() &&
+                candidate_anchor_element.is_instance_activatable()
+            {
+                anchor_element = Some(DomRoot::from_ref(candidate_anchor_element));
             }
 
-            if image_element.is_none() {
-                if let Some(candidate_image_element) = node.downcast::<HTMLImageElement>() {
-                    image_element = Some(DomRoot::from_ref(candidate_image_element))
-                }
+            if image_element.is_none() &&
+                let Some(candidate_image_element) = node.downcast::<HTMLImageElement>()
+            {
+                image_element = Some(DomRoot::from_ref(candidate_image_element))
             }
 
-            if text_input_element.is_none() {
-                if let Some(candidate_text_input_element) = node.as_text_input() {
-                    text_input_element = Some(candidate_text_input_element);
-                }
+            if text_input_element.is_none() &&
+                let Some(candidate_text_input_element) = node.as_text_input()
+            {
+                text_input_element = Some(candidate_text_input_element);
             }
         }
 
@@ -285,7 +298,7 @@ impl DocumentEmbedderControls {
         if let Some(anchor_element) = anchor_element.as_ref() {
             info.flags.insert(ContextMenuElementInformationFlags::Link);
             info.link_url = anchor_element
-                .full_href_url_for_user_interface()
+                .full_href_url_for_user_interface(no_gc)
                 .map(ServoUrl::into_url);
 
             items.extend(vec![
@@ -377,15 +390,13 @@ impl DocumentEmbedderControls {
             },
         ]);
 
-        let context_menu_nodes = ContextMenuNodes {
-            node: hit_test_result.node.clone(),
-            anchor_element,
-            image_element,
-            text_input_element,
-        };
-
         self.show_embedder_control(
-            ControlElement::ContextMenu(context_menu_nodes),
+            ControlElement::ContextMenu(ContextMenuNodes {
+                node: hit_test_result.node.as_traced(),
+                anchor_element: anchor_element.map(|element| element.as_traced()),
+                image_element: image_element.map(|element| element.as_traced()),
+                text_input_element: text_input_element.map(|element| element.as_traced()),
+            }),
             EmbedderControlRequest::ContextMenu(ContextMenuRequest {
                 element_info: info,
                 items,
@@ -396,15 +407,16 @@ impl DocumentEmbedderControls {
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 pub(crate) struct ContextMenuNodes {
     /// The node that this menu was triggered on.
-    node: DomRoot<Node>,
+    node: Dom<Node>,
     /// The first inclusive ancestor of this node that is an `<a>` if one exists.
-    anchor_element: Option<DomRoot<HTMLAnchorElement>>,
+    anchor_element: Option<Dom<HTMLAnchorElement>>,
     /// The first inclusive ancestor of this node that is an `<img>` if one exists.
-    image_element: Option<DomRoot<HTMLImageElement>>,
+    image_element: Option<Dom<HTMLImageElement>>,
     /// The first inclusive ancestor of this node which is a text entry field.
-    text_input_element: Option<DomRoot<Element>>,
+    text_input_element: Option<Dom<Element>>,
 }
 
 impl ContextMenuNodes {
@@ -422,12 +434,12 @@ impl ContextMenuNodes {
             window.send_to_embedder(EmbedderMsg::SetClipboardText(window.webview_id(), string));
         };
 
-        let open_url_in_new_webview = |url: ServoUrl| {
+        let open_url_in_new_webview = |cx: &mut JSContext, url: ServoUrl| {
             let Some(browsing_context) = document.browsing_context() else {
                 return;
             };
-            let (browsing_context, new) = browsing_context
-                .choose_browsing_context("_blank".into(), true /* nooopener */);
+            let (browsing_context, new) =
+                browsing_context.choose_a_navigable(cx, "_blank".into(), true /* noopener */);
             let Some(browsing_context) = browsing_context else {
                 return;
             };
@@ -451,10 +463,10 @@ impl ContextMenuNodes {
 
         match action {
             ContextMenuAction::GoBack => {
-                let _ = window.History().Back();
+                let _ = window.History(cx).Back();
             },
             ContextMenuAction::GoForward => {
-                let _ = window.History().Forward();
+                let _ = window.History(cx).Forward();
             },
             ContextMenuAction::Reload => {
                 window.Location(cx).reload_without_origin_check(cx);
@@ -465,18 +477,18 @@ impl ContextMenuNodes {
                 };
 
                 let url_string = anchor_element
-                    .full_href_url_for_user_interface()
+                    .full_href_url_for_user_interface(cx.no_gc())
                     .as_ref()
                     .map(ServoUrl::to_string)
-                    .unwrap_or_else(|| anchor_element.Href().to_string());
+                    .unwrap_or_else(|| String::from(anchor_element.Href(cx.no_gc())));
                 set_clipboard_text(url_string);
             },
             ContextMenuAction::OpenLinkInNewWebView => {
                 let Some(anchor_element) = &self.anchor_element else {
                     return;
                 };
-                if let Some(url) = anchor_element.full_href_url_for_user_interface() {
-                    open_url_in_new_webview(url);
+                if let Some(url) = anchor_element.full_href_url_for_user_interface(cx.no_gc()) {
+                    open_url_in_new_webview(cx, url);
                 };
             },
             ContextMenuAction::CopyImageLink => {
@@ -487,7 +499,7 @@ impl ContextMenuNodes {
                     .full_image_url_for_user_interface()
                     .as_ref()
                     .map(ServoUrl::to_string)
-                    .unwrap_or_else(|| image_element.CurrentSrc().to_string());
+                    .unwrap_or_else(|| String::from(image_element.CurrentSrc()));
                 set_clipboard_text(url_string);
             },
             ContextMenuAction::OpenImageInNewView => {
@@ -495,28 +507,28 @@ impl ContextMenuNodes {
                     return;
                 };
                 if let Some(url) = image_element.full_image_url_for_user_interface() {
-                    open_url_in_new_webview(url);
+                    open_url_in_new_webview(cx, url);
                 }
             },
             ContextMenuAction::Cut => {
                 window.Document().event_handler().handle_editing_action(
-                    self.text_input_element.clone(),
+                    cx,
+                    self.text_input_element.as_deref().map(DomRoot::from_ref),
                     EditingActionEvent::Cut,
-                    CanGc::from_cx(cx),
                 );
             },
             ContextMenuAction::Copy => {
                 window.Document().event_handler().handle_editing_action(
-                    self.text_input_element.clone(),
+                    cx,
+                    self.text_input_element.as_deref().map(DomRoot::from_ref),
                     EditingActionEvent::Copy,
-                    CanGc::from_cx(cx),
                 );
             },
             ContextMenuAction::Paste => {
                 window.Document().event_handler().handle_editing_action(
-                    self.text_input_element.clone(),
+                    cx,
+                    self.text_input_element.as_deref().map(DomRoot::from_ref),
                     EditingActionEvent::Paste,
-                    CanGc::from_cx(cx),
                 );
             },
             ContextMenuAction::SelectAll => {
@@ -532,7 +544,7 @@ impl Node {
     fn as_text_input(&self) -> Option<DomRoot<Element>> {
         if let Some(input_element) = self
             .downcast::<HTMLInputElement>()
-            .filter(|input_element| input_element.renders_as_text_input_widget())
+            .filter(|input_element| input_element.is_textual_or_password())
         {
             return Some(DomRoot::from_ref(input_element.upcast::<Element>()));
         }

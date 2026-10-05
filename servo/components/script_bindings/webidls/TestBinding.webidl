@@ -246,6 +246,7 @@ interface TestBinding {
   (unsigned long or boolean)? receiveNullableUnion5();
   (ByteString or long)? receiveNullableUnion6();
   sequence<long>? receiveNullableSequence();
+  sequence<object> receiveObjectSequence();
   TestDictionary receiveTestDictionaryWithSuccessOnKeyword();
   boolean dictMatchesPassedValues(TestDictionary arg);
 
@@ -302,6 +303,19 @@ interface TestBinding {
   // https://github.com/servo/servo/pull/26154
   DOMString passOverloadedDict(Node arg);
   DOMString passOverloadedDict(TestURLLike arg);
+
+  DOMString passOverloadedUnionOfObjectAndString((object or DOMString) arg);
+  DOMString passOverloadedUnionOfObjectAndString(boolean arg);
+  DOMString passOverloadedUnionOfObjectAndNumber((object or long) arg);
+  DOMString passOverloadedUnionOfObjectAndNumber(boolean arg);
+  DOMString passOverloadedUnionOfObjectAndBoolean((object or boolean) arg);
+  DOMString passOverloadedUnionOfObjectAndBoolean(long arg);
+  DOMString passOverloadedUnionOfStringAndNumber((DOMString or long) arg);
+  DOMString passOverloadedUnionOfStringAndNumber(boolean arg);
+  DOMString passOverloadedUnionOfStringAndBoolean((DOMString or boolean) arg);
+  DOMString passOverloadedUnionOfStringAndBoolean(long arg);
+  DOMString passOverloadedUnionOfNumberAndBoolean((long or boolean) arg);
+  DOMString passOverloadedUnionOfNumberAndBoolean(DOMString arg);
 
   undefined passNullableBoolean(boolean? arg);
   undefined passNullableByte(byte? arg);
@@ -614,6 +628,7 @@ callback callbackWithOnlyOneOptionalArg = Promise<undefined> (optional any reaso
 namespace TestNS {
     const unsigned long ONE   = 1;
     const unsigned long TWO   = 0x2;
+    [SameObject] readonly attribute TestBinding testAttribute;
 };
 
 typedef Promise<undefined> PromiseUndefined;

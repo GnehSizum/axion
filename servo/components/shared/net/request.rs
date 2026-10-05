@@ -22,10 +22,12 @@ use tokio::sync::oneshot::Sender as TokioSender;
 use url::Position;
 use uuid::Uuid;
 
+use crate::ReferrerPolicy;
+use crate::blob_url_store::UrlWithBlobClaim;
 use crate::policy_container::{PolicyContainer, RequestPolicyContainer};
 use crate::pub_domains::is_same_site;
-use crate::response::{HttpsState, RedirectTaint, Response};
-use crate::{ReferrerPolicy, ResourceTimingType};
+use crate::resource_fetch_timing::ResourceTimingType;
+use crate::response::{RedirectTaint, Response};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, MallocSizeOf, PartialEq, Serialize)]
 /// An id to differentiate one network request from another.
@@ -133,6 +135,14 @@ pub enum ResponseTainting {
     Opaque,
 }
 
+/// Servo-internal to keep track of which requests originate from Servo internal implementation
+#[derive(Clone, Copy, Debug, Default, Deserialize, MallocSizeOf, PartialEq, Serialize)]
+pub enum InternalRequest {
+    Yes,
+    #[default]
+    No,
+}
+
 /// <https://html.spec.whatwg.org/multipage/#preload-key>
 #[derive(Clone, Debug, Eq, Hash, Deserialize, MallocSizeOf, Serialize, PartialEq)]
 pub struct PreloadKey {
@@ -149,7 +159,7 @@ pub struct PreloadKey {
 impl PreloadKey {
     pub fn new(request: &RequestBuilder) -> Self {
         Self {
-            url: request.url.clone(),
+            url: request.url.url(),
             destination: request.destination,
             mode: request.mode.clone(),
             credentials_mode: request.credentials_mode,
@@ -174,7 +184,6 @@ pub struct PreloadEntry {
     /// <https://html.spec.whatwg.org/multipage/#preload-response>
     pub response: Option<Response>,
     /// <https://html.spec.whatwg.org/multipage/#preload-on-response-available>
-    #[ignore_malloc_size_of = "Channels are hard"]
     pub on_response_available: Option<TokioSender<Response>>,
 }
 
@@ -207,13 +216,15 @@ pub struct RequestClient {
     /// <https://html.spec.whatwg.org/multipage/#map-of-preloaded-resources>
     pub preloaded_resources: PreloadedResources,
     /// <https://html.spec.whatwg.org/multipage/#concept-settings-object-policy-container>
-    pub policy_container: RequestPolicyContainer,
+    pub policy_container: PolicyContainer,
     /// <https://html.spec.whatwg.org/multipage/#concept-settings-object-origin>
     pub origin: Origin,
     /// <https://html.spec.whatwg.org/multipage/#nested-browsing-context>
     pub is_nested_browsing_context: bool,
     /// <https://w3c.github.io/webappsec-upgrade-insecure-requests/#insecure-requests-policy>
     pub insecure_requests_policy: InsecureRequestsPolicy,
+    /// <https://w3c.github.io/webappsec-secure-contexts/#potentially-trustworthy-origin>
+    pub has_trustworthy_ancestor_origin: bool,
 }
 
 /// <https://html.spec.whatwg.org/multipage/#system-visibility-state>
@@ -257,10 +268,10 @@ pub enum CorsSettings {
 impl CorsSettings {
     /// <https://html.spec.whatwg.org/multipage/#cors-settings-attribute>
     pub fn from_enumerated_attribute(value: &str) -> CorsSettings {
-        match value.to_ascii_lowercase().as_str() {
-            "anonymous" => CorsSettings::Anonymous,
-            "use-credentials" => CorsSettings::UseCredentials,
-            _ => CorsSettings::Anonymous,
+        if value.eq_ignore_ascii_case("use-credentials") {
+            CorsSettings::UseCredentials
+        } else {
+            CorsSettings::Anonymous
         }
     }
 }
@@ -318,7 +329,7 @@ pub enum BodyChunkRequest {
 #[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct RequestBody {
     /// Net's channel to communicate with script re this body.
-    #[ignore_malloc_size_of = "Channels are hard"]
+    #[conditional_malloc_size_of]
     body_chunk_request_channel: Arc<Mutex<Option<IpcSender<BodyChunkRequest>>>>,
     /// <https://fetch.spec.whatwg.org/#concept-body-source>
     source: BodySource,
@@ -427,18 +438,16 @@ pub struct RequestBuilder {
         deserialize_with = "::hyper_serde::deserialize",
         serialize_with = "::hyper_serde::serialize"
     )]
-    #[ignore_malloc_size_of = "Defined in hyper"]
     pub method: Method,
 
     /// <https://fetch.spec.whatwg.org/#concept-request-url>
-    pub url: ServoUrl,
+    pub url: UrlWithBlobClaim,
 
     /// <https://fetch.spec.whatwg.org/#concept-request-header-list>
     #[serde(
         deserialize_with = "::hyper_serde::deserialize",
         serialize_with = "::hyper_serde::serialize"
     )]
-    #[ignore_malloc_size_of = "Defined in hyper"]
     pub headers: HeaderMap,
 
     /// <https://fetch.spec.whatwg.org/#unsafe-request-flag>
@@ -446,6 +455,12 @@ pub struct RequestBuilder {
 
     /// <https://fetch.spec.whatwg.org/#concept-request-body>
     pub body: Option<RequestBody>,
+    /// <https://fetch.spec.whatwg.org/#concept-request-reload-navigation-flag>
+    /// A request has an associated reload-navigation flag. Unless stated otherwise, it is unset.
+    pub reload_navigation: bool,
+    /// <https://fetch.spec.whatwg.org/#concept-request-history-navigation-flag>
+    /// A request has an associated history-navigation flag. Unless stated otherwise, it is unset.
+    pub history_navigation: bool,
 
     /// <https://fetch.spec.whatwg.org/#request-service-workers-mode>
     pub service_workers_mode: ServiceWorkersMode,
@@ -473,8 +488,6 @@ pub struct RequestBuilder {
 
     /// <https://fetch.spec.whatwg.org/#concept-request-policy-container>
     pub policy_container: RequestPolicyContainer,
-    pub insecure_requests_policy: InsecureRequestsPolicy,
-    pub has_trustworthy_ancestor_origin: bool,
 
     /// <https://fetch.spec.whatwg.org/#concept-request-referrer>
     pub referrer: Referrer,
@@ -493,7 +506,7 @@ pub struct RequestBuilder {
     /// <https://fetch.spec.whatwg.org/#concept-request-nonce-metadata>
     pub cryptographic_nonce_metadata: String,
 
-    // to keep track of redirects
+    /// <https://fetch.spec.whatwg.org/#concept-request-url-list>
     pub url_list: Vec<ServoUrl>,
 
     /// <https://fetch.spec.whatwg.org/#concept-request-parser-metadata>
@@ -501,14 +514,19 @@ pub struct RequestBuilder {
 
     /// <https://fetch.spec.whatwg.org/#concept-request-initiator>
     pub initiator: Initiator,
-    pub https_state: HttpsState,
     pub response_tainting: ResponseTainting,
     /// Servo internal: if crash details are present, trigger a crash error page with these details.
     pub crash: Option<String>,
+    /// Servo internal: whether this request originates from Servo internal implementation
+    pub is_internal_request: InternalRequest,
 }
 
 impl RequestBuilder {
-    pub fn new(webview_id: Option<WebViewId>, url: ServoUrl, referrer: Referrer) -> RequestBuilder {
+    pub fn new(
+        webview_id: Option<WebViewId>,
+        url: UrlWithBlobClaim,
+        referrer: Referrer,
+    ) -> RequestBuilder {
         RequestBuilder {
             id: RequestId::default(),
             preload_id: None,
@@ -517,6 +535,8 @@ impl RequestBuilder {
             headers: HeaderMap::new(),
             unsafe_request: false,
             body: None,
+            reload_navigation: false,
+            history_navigation: false,
             service_workers_mode: ServiceWorkersMode::All,
             destination: Destination::None,
             synchronous: false,
@@ -529,20 +549,18 @@ impl RequestBuilder {
             origin: Origin::Client,
             client: None,
             policy_container: RequestPolicyContainer::default(),
-            insecure_requests_policy: InsecureRequestsPolicy::DoNotUpgrade,
-            has_trustworthy_ancestor_origin: false,
             referrer,
             referrer_policy: ReferrerPolicy::EmptyString,
             pipeline_id: None,
             target_webview_id: webview_id,
             redirect_mode: RedirectMode::Follow,
-            integrity_metadata: "".to_owned(),
-            cryptographic_nonce_metadata: "".to_owned(),
+            integrity_metadata: String::new(),
+            cryptographic_nonce_metadata: String::new(),
             url_list: vec![],
             parser_metadata: ParserMetadata::Default,
             initiator: Initiator::None,
-            https_state: HttpsState::None,
             response_tainting: ResponseTainting::Basic,
+            is_internal_request: Default::default(),
             crash: None,
         }
     }
@@ -633,6 +651,12 @@ impl RequestBuilder {
         self
     }
 
+    /// <https://fetch.spec.whatwg.org/#concept-request-url-list>
+    pub fn url_list(mut self, url_list: Vec<ServoUrl>) -> RequestBuilder {
+        self.url_list = url_list;
+        self
+    }
+
     pub fn pipeline_id(mut self, pipeline_id: Option<PipelineId>) -> RequestBuilder {
         self.pipeline_id = pipeline_id;
         self
@@ -662,11 +686,6 @@ impl RequestBuilder {
         self
     }
 
-    pub fn https_state(mut self, https_state: HttpsState) -> RequestBuilder {
-        self.https_state = https_state;
-        self
-    }
-
     pub fn response_tainting(mut self, response_tainting: ResponseTainting) -> RequestBuilder {
         self.response_tainting = response_tainting;
         self
@@ -689,22 +708,6 @@ impl RequestBuilder {
         self
     }
 
-    pub fn insecure_requests_policy(
-        mut self,
-        insecure_requests_policy: InsecureRequestsPolicy,
-    ) -> RequestBuilder {
-        self.insecure_requests_policy = insecure_requests_policy;
-        self
-    }
-
-    pub fn has_trustworthy_ancestor_origin(
-        mut self,
-        has_trustworthy_ancestor_origin: bool,
-    ) -> RequestBuilder {
-        self.has_trustworthy_ancestor_origin = has_trustworthy_ancestor_origin;
-        self
-    }
-
     /// <https://fetch.spec.whatwg.org/#request-service-workers-mode>
     pub fn service_workers_mode(
         mut self,
@@ -720,6 +723,11 @@ impl RequestBuilder {
         self
     }
 
+    pub fn is_internal_request(mut self, is_internal_request: InternalRequest) -> RequestBuilder {
+        self.is_internal_request = is_internal_request;
+        self
+    }
+
     pub fn build(self) -> Request {
         let mut request = Request::new(
             self.id,
@@ -728,7 +736,6 @@ impl RequestBuilder {
             self.referrer,
             self.pipeline_id,
             self.target_webview_id,
-            self.https_state,
         );
         request.preload_id = self.preload_id;
         request.initiator = self.initiator;
@@ -736,6 +743,8 @@ impl RequestBuilder {
         request.headers = self.headers;
         request.unsafe_request = self.unsafe_request;
         request.body = self.body;
+        request.reload_navigation = self.reload_navigation;
+        request.history_navigation = self.history_navigation;
         request.service_workers_mode = self.service_workers_mode;
         request.destination = self.destination;
         request.synchronous = self.synchronous;
@@ -747,7 +756,11 @@ impl RequestBuilder {
         request.cache_mode = self.cache_mode;
         request.referrer_policy = self.referrer_policy;
         request.redirect_mode = self.redirect_mode;
-        let mut url_list = self.url_list;
+        let mut url_list: Vec<_> = self
+            .url_list
+            .into_iter()
+            .map(UrlWithBlobClaim::from_url_without_having_claimed_blob)
+            .collect();
         if url_list.is_empty() {
             url_list.push(self.url);
         }
@@ -760,8 +773,7 @@ impl RequestBuilder {
         request.crash = self.crash;
         request.client = self.client;
         request.policy_container = self.policy_container;
-        request.insecure_requests_policy = self.insecure_requests_policy;
-        request.has_trustworthy_ancestor_origin = self.has_trustworthy_ancestor_origin;
+        request.is_internal_request = self.is_internal_request;
         request
     }
 
@@ -782,17 +794,21 @@ pub struct Request {
     pub id: RequestId,
     pub preload_id: Option<PreloadId>,
     /// <https://fetch.spec.whatwg.org/#concept-request-method>
-    #[ignore_malloc_size_of = "Defined in hyper"]
     pub method: Method,
     /// <https://fetch.spec.whatwg.org/#local-urls-only-flag>
     pub local_urls_only: bool,
     /// <https://fetch.spec.whatwg.org/#concept-request-header-list>
-    #[ignore_malloc_size_of = "Defined in hyper"]
     pub headers: HeaderMap,
     /// <https://fetch.spec.whatwg.org/#unsafe-request-flag>
     pub unsafe_request: bool,
     /// <https://fetch.spec.whatwg.org/#concept-request-body>
     pub body: Option<RequestBody>,
+    /// <https://fetch.spec.whatwg.org/#concept-request-reload-navigation-flag>
+    /// A request has an associated reload-navigation flag. Unless stated otherwise, it is unset.
+    pub reload_navigation: bool,
+    /// <https://fetch.spec.whatwg.org/#concept-request-history-navigation-flag>
+    /// A request has an associated history-navigation flag. Unless stated otherwise, it is unset.
+    pub history_navigation: bool,
     /// <https://fetch.spec.whatwg.org/#concept-request-client>
     pub client: Option<RequestClient>,
     /// <https://fetch.spec.whatwg.org/#concept-request-window>
@@ -832,10 +848,8 @@ pub struct Request {
     pub integrity_metadata: String,
     /// <https://fetch.spec.whatwg.org/#concept-request-nonce-metadata>
     pub cryptographic_nonce_metadata: String,
-    // Use the last method on url_list to act as spec current url field, and
-    // first method to act as spec url field
     /// <https://fetch.spec.whatwg.org/#concept-request-url-list>
-    pub url_list: Vec<ServoUrl>,
+    pub url_list: Vec<UrlWithBlobClaim>,
     /// <https://fetch.spec.whatwg.org/#concept-request-redirect-count>
     pub redirect_count: u32,
     /// <https://fetch.spec.whatwg.org/#concept-request-response-tainting>
@@ -844,23 +858,20 @@ pub struct Request {
     pub parser_metadata: ParserMetadata,
     /// <https://fetch.spec.whatwg.org/#concept-request-policy-container>
     pub policy_container: RequestPolicyContainer,
-    /// <https://w3c.github.io/webappsec-upgrade-insecure-requests/#insecure-requests-policy>
-    pub insecure_requests_policy: InsecureRequestsPolicy,
-    pub has_trustworthy_ancestor_origin: bool,
-    pub https_state: HttpsState,
     /// Servo internal: if crash details are present, trigger a crash error page with these details.
     pub crash: Option<String>,
+    /// Servo internal: whether this request originates from Servo internal implementation
+    pub is_internal_request: InternalRequest,
 }
 
 impl Request {
     pub fn new(
         id: RequestId,
-        url: ServoUrl,
+        url: UrlWithBlobClaim,
         origin: Option<Origin>,
         referrer: Referrer,
         pipeline_id: Option<PipelineId>,
         webview_id: Option<WebViewId>,
-        https_state: HttpsState,
     ) -> Request {
         Request {
             id,
@@ -870,6 +881,8 @@ impl Request {
             headers: HeaderMap::new(),
             unsafe_request: false,
             body: None,
+            reload_navigation: false,
+            history_navigation: false,
             client: None,
             traversable_for_user_prompts: TraversableForUserPrompts::Client,
             keep_alive: false,
@@ -895,15 +908,17 @@ impl Request {
             redirect_count: 0,
             response_tainting: ResponseTainting::Basic,
             policy_container: RequestPolicyContainer::Client,
-            insecure_requests_policy: InsecureRequestsPolicy::DoNotUpgrade,
-            has_trustworthy_ancestor_origin: false,
-            https_state,
+            is_internal_request: Default::default(),
             crash: None,
         }
     }
 
     /// <https://fetch.spec.whatwg.org/#concept-request-url>
     pub fn url(&self) -> ServoUrl {
+        self.url_list.first().unwrap().url()
+    }
+
+    pub fn url_with_blob_claim(&self) -> UrlWithBlobClaim {
         self.url_list.first().unwrap().clone()
     }
 
@@ -919,6 +934,11 @@ impl Request {
 
     /// <https://fetch.spec.whatwg.org/#concept-request-current-url>
     pub fn current_url(&self) -> ServoUrl {
+        self.current_url_with_blob_claim().url()
+    }
+
+    /// <https://fetch.spec.whatwg.org/#concept-request-current-url>
+    pub fn current_url_with_blob_claim(&self) -> UrlWithBlobClaim {
         self.url_list.last().unwrap().clone()
     }
 
@@ -931,11 +951,11 @@ impl Request {
     pub fn is_navigation_request(&self) -> bool {
         matches!(
             self.destination,
-            Destination::Document
-                | Destination::Embed
-                | Destination::Frame
-                | Destination::IFrame
-                | Destination::Object
+            Destination::Document |
+                Destination::Embed |
+                Destination::Frame |
+                Destination::IFrame |
+                Destination::Object
         )
     }
 
@@ -943,16 +963,16 @@ impl Request {
     pub fn is_subresource_request(&self) -> bool {
         matches!(
             self.destination,
-            Destination::Audio
-                | Destination::Font
-                | Destination::Image
-                | Destination::Manifest
-                | Destination::Script
-                | Destination::Style
-                | Destination::Track
-                | Destination::Video
-                | Destination::Xslt
-                | Destination::None
+            Destination::Audio |
+                Destination::Font |
+                Destination::Image |
+                Destination::Manifest |
+                Destination::Script |
+                Destination::Style |
+                Destination::Track |
+                Destination::Video |
+                Destination::Xslt |
+                Destination::None
         )
     }
 
@@ -994,7 +1014,8 @@ impl Request {
             // Step 3.1. If request’s client is non-null, then set request’s
             // policy container to a clone of request’s client’s policy container. [HTML]
             if let Some(client) = self.client.as_ref() {
-                self.policy_container = client.policy_container.clone();
+                self.policy_container =
+                    RequestPolicyContainer::PolicyContainer(client.policy_container.clone());
             } else {
                 // Step 3.2. Otherwise, set request’s policy container to a new policy container.
                 self.policy_container =
@@ -1051,8 +1072,8 @@ impl Request {
 
             // Step 4.2. If url’s origin is not same site with lastURL’s origin and
             // request’s origin is not same site with lastURL’s origin, then return "cross-site".
-            if !is_same_site(&url.origin(), &last_url.origin())
-                && !is_same_site(request_origin, &last_url.origin())
+            if !is_same_site(&url.origin(), &last_url.origin()) &&
+                !is_same_site(request_origin, &last_url.origin())
             {
                 return RedirectTaint::CrossSite;
             }
@@ -1148,9 +1169,9 @@ pub fn is_cors_safelisted_request_content_type(value: &[u8]) -> bool {
     match value_mime_result {
         Err(_) => false, // step 3
         Ok(value_mime) => match (value_mime.type_(), value_mime.subtype()) {
-            (mime::APPLICATION, mime::WWW_FORM_URLENCODED)
-            | (mime::MULTIPART, mime::FORM_DATA)
-            | (mime::TEXT, mime::PLAIN) => true,
+            (mime::APPLICATION, mime::WWW_FORM_URLENCODED) |
+            (mime::MULTIPART, mime::FORM_DATA) |
+            (mime::TEXT, mime::PLAIN) => true,
             _ => false, // step 4
         },
     }
@@ -1195,15 +1216,15 @@ fn validate_range_header(value: &str) -> bool {
         let start = parts.next();
         let end = parts.next();
 
-        if let Some(start) = start {
-            if let Ok(start_num) = start.parse::<u64>() {
-                return match end {
-                    Some(e) if !e.is_empty() => {
-                        e.parse::<u64>().is_ok_and(|end_num| start_num <= end_num)
-                    },
-                    _ => true,
-                };
-            }
+        if let Some(start) = start &&
+            let Ok(start_num) = start.parse::<u64>()
+        {
+            return match end {
+                Some(e) if !e.is_empty() => {
+                    e.parse::<u64>().is_ok_and(|end_num| start_num <= end_num)
+                },
+                _ => true,
+            };
         }
     }
     false
@@ -1259,8 +1280,8 @@ pub fn convert_header_names_to_sorted_lowercase_set(
     ordered_set.into_iter().cloned().collect()
 }
 
-pub fn create_request_body_with_content(content: &str) -> RequestBody {
-    let content_bytes = GenericSharedMemory::from_bytes(content.as_bytes());
+pub fn create_request_body_with_content(content: String) -> RequestBody {
+    let content_bytes = GenericSharedMemory::from_vec(content.into_bytes());
     let content_len = content_bytes.len();
 
     let (chunk_request_sender, chunk_request_receiver) = ipc::channel().unwrap();

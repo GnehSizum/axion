@@ -8,11 +8,13 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::net::IpAddr;
 use std::time::SystemTime;
 
 use cookie::Cookie;
 use itertools::Itertools;
 use log::info;
+use malloc_size_of_derive::MallocSizeOf;
 use net_traits::pub_domains::reg_suffix;
 use net_traits::{CookieSource, SiteDescriptor};
 use serde::{Deserialize, Serialize};
@@ -20,7 +22,7 @@ use servo_url::ServoUrl;
 
 use crate::cookie::ServoCookie;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, MallocSizeOf)]
 pub struct CookieStorage {
     version: u32,
     cookies_map: HashMap<String, Vec<ServoCookie>>,
@@ -61,11 +63,11 @@ impl CookieStorage {
                 let existing_domain = c.cookie.domain().as_ref().unwrap().to_owned();
                 let existing_path = c.cookie.path().as_ref().unwrap().to_owned();
 
-                c.cookie.name() == cookie.cookie.name()
-                    && c.cookie.secure().unwrap_or(false)
-                    && (ServoCookie::domain_match(new_domain, existing_domain)
-                        || ServoCookie::domain_match(existing_domain, new_domain))
-                    && ServoCookie::path_match(new_path, existing_path)
+                c.cookie.name() == cookie.cookie.name() &&
+                    c.cookie.secure().unwrap_or(false) &&
+                    (ServoCookie::domain_match(new_domain, existing_domain) ||
+                        ServoCookie::domain_match(existing_domain, new_domain)) &&
+                    ServoCookie::path_match(new_path, existing_path)
             });
 
             if any_overlapping {
@@ -75,9 +77,9 @@ impl CookieStorage {
 
         // Step 11.1
         let position = cookies.iter().position(|c| {
-            c.cookie.domain() == cookie.cookie.domain()
-                && c.cookie.path() == cookie.cookie.path()
-                && c.cookie.name() == cookie.cookie.name()
+            c.cookie.domain() == cookie.cookie.domain() &&
+                c.cookie.path() == cookie.cookie.path() &&
+                c.cookie.name() == cookie.cookie.name()
         });
 
         if let Some(ind) = position {
@@ -116,14 +118,21 @@ impl CookieStorage {
         }
     }
 
+    pub fn clear_session_cookies(&mut self) {
+        self.cookies_map
+            .values_mut()
+            .flat_map(|cookies| cookies.iter_mut())
+            .filter(|cookie| !cookie.persistent)
+            .for_each(|cookie| cookie.set_expiry_time_in_past());
+    }
+
     pub fn clear_storage(&mut self, url: Option<&ServoUrl>) {
         if let Some(url) = url {
             let domain = reg_host(url.host_str().unwrap_or(""));
-            // TODO: This creates an empty cookie list if none existed? Should
-            // we just use `get_mut` here?
-            let cookies = self.cookies_map.entry(domain).or_default();
-            for cookie in cookies.iter_mut() {
-                cookie.set_expiry_time_in_past();
+            if let Some(cookies) = self.cookies_map.get_mut(&domain) {
+                for cookie in cookies.iter_mut() {
+                    cookie.set_expiry_time_in_past();
+                }
             }
         } else {
             self.cookies_map.clear();
@@ -132,12 +141,11 @@ impl CookieStorage {
 
     pub fn delete_cookie_with_name(&mut self, url: &ServoUrl, name: String) {
         let domain = reg_host(url.host_str().unwrap_or(""));
-        // TODO: This creates an empty cookie list if none existed? Should we
-        // just use `get_mut` here?
-        let cookies = self.cookies_map.entry(domain).or_default();
-        for cookie in cookies.iter_mut() {
-            if cookie.cookie.name() == name {
-                cookie.set_expiry_time_in_past();
+        if let Some(cookies) = self.cookies_map.get_mut(&domain) {
+            for cookie in cookies.iter_mut() {
+                if cookie.cookie.name() == name {
+                    cookie.set_expiry_time_in_past();
+                }
             }
         }
     }
@@ -171,8 +179,8 @@ impl CookieStorage {
             let new_len = cookies.len();
 
             // https://www.ietf.org/id/draft-ietf-httpbis-cookie-alone-01.txt
-            if new_len == old_len
-                && !evict_one_cookie(cookie.cookie.secure().unwrap_or(false), cookies)
+            if new_len == old_len &&
+                !evict_one_cookie(cookie.cookie.secure().unwrap_or(false), cookies)
             {
                 return;
             }
@@ -224,13 +232,13 @@ impl CookieStorage {
             (match acc.len() {
                 0 => acc,
                 _ => acc + "; ",
-            }) + cookie.name()
-                + "="
-                + cookie.value()
+            }) + cookie.name() +
+                "=" +
+                cookie.value()
         };
 
         // Serialize the cookie-list into a cookie-string by processing each cookie in the cookie-list in order
-        let result = cookie_list.fold("".to_owned(), reducer);
+        let result = cookie_list.fold(String::new(), reducer);
 
         info!(" === COOKIES SENT: {}", result);
         match result.len() {
@@ -292,6 +300,14 @@ impl CookieStorage {
 }
 
 fn reg_host(url: &str) -> String {
+    let host_for_ip_parse = url
+        .strip_prefix('[')
+        .and_then(|url| url.strip_suffix(']'))
+        .unwrap_or(url);
+    if let Ok(address) = host_for_ip_parse.parse::<IpAddr>() {
+        return address.to_string().to_lowercase();
+    }
+
     reg_suffix(url).to_lowercase()
 }
 
@@ -324,8 +340,8 @@ fn get_oldest_accessed(
 ) -> Option<(usize, SystemTime)> {
     let mut oldest_accessed = None;
     for (i, c) in cookies.iter().enumerate() {
-        if (c.cookie.secure().unwrap_or(false) == is_secure_cookie)
-            && oldest_accessed
+        if (c.cookie.secure().unwrap_or(false) == is_secure_cookie) &&
+            oldest_accessed
                 .as_ref()
                 .is_none_or(|(_, current_oldest_time)| c.last_access < *current_oldest_time)
         {

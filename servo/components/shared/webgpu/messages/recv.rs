@@ -6,7 +6,7 @@
 //! (usually from the ScriptThread, and more specifically from DOM objects)
 
 use arrayvec::ArrayVec;
-use pixels::SharedSnapshot;
+use pixels::{SharedSnapshot, SnapshotPixelFormat};
 use serde::{Deserialize, Serialize};
 use servo_base::Epoch;
 use servo_base::generic_channel::{
@@ -21,8 +21,9 @@ use wgpu_core::binding_model::{
     BindGroupDescriptor, BindGroupLayoutDescriptor, PipelineLayoutDescriptor,
 };
 use wgpu_core::command::{
-    RenderBundleDescriptor, RenderBundleEncoder, RenderPassColorAttachment,
-    RenderPassDepthStencilAttachment, TexelCopyBufferInfo, TexelCopyTextureInfo,
+    PassTimestampWrites, RenderBundleDescriptor, RenderBundleEncoderDescriptor,
+    RenderPassColorAttachment, RenderPassDepthStencilAttachment, TexelCopyBufferInfo,
+    TexelCopyTextureInfo,
 };
 use wgpu_core::device::HostMap;
 pub use wgpu_core::id::markers::{
@@ -30,9 +31,9 @@ pub use wgpu_core::id::markers::{
 };
 use wgpu_core::id::{
     AdapterId, BindGroupId, BindGroupLayoutId, BufferId, CommandBufferId, CommandEncoderId,
-    ComputePassEncoderId, ComputePipelineId, DeviceId, PipelineLayoutId, QuerySetId, QueueId,
-    RenderBundleId, RenderPassEncoderId, RenderPipelineId, SamplerId, ShaderModuleId, TextureId,
-    TextureViewId,
+    ComputePassEncoderId, ComputePipelineId, DeviceId, ExternalTextureId, PipelineLayoutId,
+    QuerySetId, QueueId, RenderBundleEncoderId, RenderBundleId, RenderPassEncoderId,
+    RenderPipelineId, SamplerId, ShaderModuleId, TextureId, TextureViewId,
 };
 pub use wgpu_core::id::{
     ComputePassEncoderId as ComputePassId, RenderPassEncoderId as RenderPassId,
@@ -40,7 +41,7 @@ pub use wgpu_core::id::{
 use wgpu_core::instance::RequestAdapterOptions;
 use wgpu_core::pipeline::{ComputePipelineDescriptor, RenderPipelineDescriptor};
 use wgpu_core::resource::{
-    BufferAccessError, BufferDescriptor, SamplerDescriptor, TextureDescriptor,
+    BufferAccessError, BufferDescriptor, QuerySetDescriptor, SamplerDescriptor, TextureDescriptor,
     TextureViewDescriptor,
 };
 use wgpu_types::{
@@ -49,16 +50,17 @@ use wgpu_types::{
 };
 
 use crate::{
-    ContextConfiguration, Error, ErrorFilter, Mapping, PRESENTATION_BUFFER_COUNT, RenderCommand,
-    ShaderCompilationInfo, WebGPUAdapter, WebGPUAdapterResponse, WebGPUComputePipelineResponse,
-    WebGPUContextId, WebGPUDeviceResponse, WebGPUPoppedErrorScopeResponse,
-    WebGPURenderPipelineResponse,
+    ContextConfiguration, Error, ErrorFilter, Mapping, PRESENTATION_BUFFER_COUNT,
+    RenderBundleCommand, RenderCommand, ShaderCompilationInfo, WebGPUAdapter,
+    WebGPUAdapterResponse, WebGPUComputePipelineResponse, WebGPUContextId, WebGPUDeviceResponse,
+    WebGPUPoppedErrorScopeResponse, WebGPURenderPipelineResponse,
 };
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PendingTexture {
     pub texture_id: TextureId,
     pub encoder_id: CommandEncoderId,
+    pub command_buffer_id: CommandBufferId,
     pub configuration: ContextConfiguration,
 }
 
@@ -80,8 +82,10 @@ pub enum WebGPURequest {
         command_encoder_id: CommandEncoderId,
         device_id: DeviceId,
         desc: CommandBufferDescriptor<Label<'static>>,
+        command_buffer_id: CommandBufferId,
     },
     CopyBufferToBuffer {
+        device_id: DeviceId,
         command_encoder_id: CommandEncoderId,
         source_id: BufferId,
         source_offset: BufferAddress,
@@ -90,22 +94,47 @@ pub enum WebGPURequest {
         size: BufferAddress,
     },
     CopyBufferToTexture {
+        device_id: DeviceId,
         command_encoder_id: CommandEncoderId,
         source: TexelCopyBufferInfo,
         destination: TexelCopyTextureInfo,
         copy_size: Extent3d,
     },
     CopyTextureToBuffer {
+        device_id: DeviceId,
         command_encoder_id: CommandEncoderId,
         source: TexelCopyTextureInfo,
         destination: TexelCopyBufferInfo,
         copy_size: Extent3d,
     },
     CopyTextureToTexture {
+        device_id: DeviceId,
         command_encoder_id: CommandEncoderId,
         source: TexelCopyTextureInfo,
         destination: TexelCopyTextureInfo,
         copy_size: Extent3d,
+    },
+    CopyExternalImageToTexture {
+        device_id: DeviceId,
+        queue_id: QueueId,
+        usable_source: Option<SharedSnapshot>,
+        destination: TexelCopyTextureInfo,
+        dest_tex_descriptor: TextureDescriptor<'static>,
+        copy_size: Extent3d,
+    },
+    CommandEncoderPushDebugGroup {
+        device_id: DeviceId,
+        command_encoder_id: CommandEncoderId,
+        label: String,
+    },
+    CommandEncoderPopDebugGroup {
+        device_id: DeviceId,
+        command_encoder_id: CommandEncoderId,
+    },
+    CommandEncoderInsertDebugMarker {
+        device_id: DeviceId,
+        command_encoder_id: CommandEncoderId,
+        label: String,
     },
     CreateBindGroup {
         device_id: DeviceId,
@@ -131,7 +160,6 @@ pub enum WebGPURequest {
         device_id: DeviceId,
         compute_pipeline_id: ComputePipelineId,
         descriptor: ComputePipelineDescriptor<'static>,
-        implicit_ids: Option<(PipelineLayoutId, Vec<BindGroupLayoutId>)>,
         /// present only on ASYNC versions
         async_sender: Option<GenericCallback<WebGPUComputePipelineResponse>>,
     },
@@ -144,7 +172,6 @@ pub enum WebGPURequest {
         device_id: DeviceId,
         render_pipeline_id: RenderPipelineId,
         descriptor: RenderPipelineDescriptor<'static>,
-        implicit_ids: Option<(PipelineLayoutId, Vec<BindGroupLayoutId>)>,
         /// present only on ASYNC versions
         async_sender: Option<GenericCallback<WebGPURenderPipelineResponse>>,
     },
@@ -211,6 +238,7 @@ pub enum WebGPURequest {
     DropRenderPipeline(RenderPipelineId),
     DropBindGroup(BindGroupId),
     DropBindGroupLayout(BindGroupLayoutId),
+    DropCommandEncoder(CommandEncoderId),
     DropCommandBuffer(CommandBufferId),
     DropTextureView(TextureViewId),
     DropSampler(SamplerId),
@@ -221,7 +249,7 @@ pub enum WebGPURequest {
     DropRenderPass(RenderPassEncoderId),
     Exit(GenericOneshotSender<()>),
     RenderBundleEncoderFinish {
-        render_bundle_encoder: RenderBundleEncoder,
+        render_bundle_encoder_id: RenderBundleEncoderId,
         descriptor: RenderBundleDescriptor<'static>,
         render_bundle_id: RenderBundleId,
         device_id: DeviceId,
@@ -244,6 +272,7 @@ pub enum WebGPURequest {
         command_encoder_id: CommandEncoderId,
         compute_pass_id: ComputePassId,
         label: Label<'static>,
+        timestamp_writes: Option<PassTimestampWrites>,
         device_id: DeviceId,
     },
     ComputePassSetPipeline {
@@ -271,10 +300,23 @@ pub enum WebGPURequest {
         offset: u64,
         device_id: DeviceId,
     },
+    ComputePassPushDebugGroup {
+        compute_pass_id: ComputePassId,
+        label: String,
+        device_id: DeviceId,
+    },
+    ComputePassPopDebugGroup {
+        compute_pass_id: ComputePassId,
+        device_id: DeviceId,
+    },
+    ComputePassInsertDebugMarker {
+        compute_pass_id: ComputePassId,
+        label: String,
+        device_id: DeviceId,
+    },
     EndComputePass {
         compute_pass_id: ComputePassId,
         device_id: DeviceId,
-        command_encoder_id: CommandEncoderId,
     },
     // Render Pass
     BeginRenderPass {
@@ -282,7 +324,8 @@ pub enum WebGPURequest {
         render_pass_id: RenderPassId,
         label: Label<'static>,
         color_attachments: Vec<Option<RenderPassColorAttachment>>,
-        depth_stencil_attachment: Option<RenderPassDepthStencilAttachment>,
+        depth_stencil_attachment: Option<RenderPassDepthStencilAttachment<TextureViewId>>,
+        timestamp_writes: Option<PassTimestampWrites>,
         device_id: DeviceId,
     },
     RenderPassCommand {
@@ -293,7 +336,6 @@ pub enum WebGPURequest {
     EndRenderPass {
         render_pass_id: RenderPassId,
         device_id: DeviceId,
-        command_encoder_id: CommandEncoderId,
     },
     Submit {
         device_id: DeviceId,
@@ -348,4 +390,56 @@ pub enum WebGPURequest {
         index: u32,
         id: BindGroupLayoutId,
     },
+    CreateQuerySet {
+        device_id: DeviceId,
+        query_set_id: QuerySetId,
+        descriptor: QuerySetDescriptor<'static>,
+    },
+    ResolveQuerySet {
+        device_id: DeviceId,
+        command_encoder_id: CommandEncoderId,
+        query_set_id: QuerySetId,
+        start_query: u32,
+        query_count: u32,
+        destination: BufferId,
+        destination_offset: u64,
+    },
+    /// Create planar texture and view to be imported as external texture
+    CreatePlanarTexture {
+        device_id: DeviceId,
+        size: Size2D<u32>,
+        format: SnapshotPixelFormat,
+        texture_id: TextureId,
+        /// aka plane
+        texture_view_id: TextureViewId,
+    },
+    UpdatePlanarTexture {
+        device_id: DeviceId,
+        queue_id: QueueId,
+        texture_id: TextureId,
+        snapshot: SharedSnapshot,
+    },
+    DropPlanarTexture(TextureId, TextureViewId),
+    /// Import plane as external texture, if plane not provided it creates invalid external texture
+    ImportExternalTexture {
+        device_id: DeviceId,
+        external_texture_id: ExternalTextureId,
+        label: String,
+        size: Size2D<u32>,
+        plane0: Option<TextureViewId>,
+    },
+    DestroyExternalTexture(ExternalTextureId),
+    DropExternalTexture(ExternalTextureId),
+    DestroyQuerySet(QuerySetId),
+    CreateRenderBundleEncoder {
+        device_id: DeviceId,
+        render_bundle_encoder_id: RenderBundleEncoderId,
+        desc: RenderBundleEncoderDescriptor<'static>,
+    },
+    RenderBundleEncoderCommand {
+        render_bundle_encoder_id: RenderBundleEncoderId,
+        render_command: RenderBundleCommand,
+        device_id: DeviceId,
+    },
+    DropRenderBundleEncoder(RenderBundleEncoderId),
 }

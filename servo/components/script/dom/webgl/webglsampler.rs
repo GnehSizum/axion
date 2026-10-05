@@ -5,17 +5,18 @@
 use std::cell::Cell;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
+use script_bindings::reflector::reflect_dom_object_with_cx;
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::WebGLError::*;
 use servo_canvas_traits::webgl::{WebGLCommand, WebGLSamplerId, webgl_channel};
 
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants;
-use crate::dom::bindings::reflector::{DomGlobal, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
 use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
-use crate::script_runtime::CanGc;
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLSampler {
@@ -77,9 +78,9 @@ fn validate_params(pname: u32, value: WebGLSamplerValue) -> bool {
                     constants::LINEAR_MIPMAP_LINEAR,
                 ][..],
                 constants::TEXTURE_MAG_FILTER => &[constants::NEAREST, constants::LINEAR][..],
-                constants::TEXTURE_WRAP_R
-                | constants::TEXTURE_WRAP_S
-                | constants::TEXTURE_WRAP_T => &[
+                constants::TEXTURE_WRAP_R |
+                constants::TEXTURE_WRAP_S |
+                constants::TEXTURE_WRAP_T => &[
                     constants::CLAMP_TO_EDGE,
                     constants::MIRRORED_REPEAT,
                     constants::REPEAT,
@@ -120,15 +121,15 @@ impl WebGLSampler {
         }
     }
 
-    pub(crate) fn new(context: &WebGLRenderingContext, can_gc: CanGc) -> DomRoot<Self> {
+    pub(crate) fn new(cx: &mut JSContext, context: &WebGLRenderingContext) -> DomRoot<Self> {
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::GenerateSampler(sender));
         let id = receiver.recv().unwrap();
 
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(Self::new_inherited(context, id)),
             &*context.global(),
-            can_gc,
+            cx,
         )
     }
 
@@ -189,13 +190,13 @@ impl WebGLSampler {
             return Err(InvalidOperation);
         }
         match pname {
-            constants::TEXTURE_MIN_FILTER
-            | constants::TEXTURE_MAG_FILTER
-            | constants::TEXTURE_WRAP_R
-            | constants::TEXTURE_WRAP_S
-            | constants::TEXTURE_WRAP_T
-            | constants::TEXTURE_COMPARE_FUNC
-            | constants::TEXTURE_COMPARE_MODE => {
+            constants::TEXTURE_MIN_FILTER |
+            constants::TEXTURE_MAG_FILTER |
+            constants::TEXTURE_WRAP_R |
+            constants::TEXTURE_WRAP_S |
+            constants::TEXTURE_WRAP_T |
+            constants::TEXTURE_COMPARE_FUNC |
+            constants::TEXTURE_COMPARE_MODE => {
                 let (sender, receiver) = webgl_channel().unwrap();
                 context.send_command(WebGLCommand::GetSamplerParameterInt(
                     self.id(),

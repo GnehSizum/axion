@@ -2,43 +2,46 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::sync::Arc;
+
 use app_units::{Au, MAX_AU};
 use data_url::DataUrl;
 use embedder_traits::ViewportDetails;
 use euclid::{Scale, Size2D};
-use html5ever::local_name;
-use layout_api::wrapper_traits::ThreadSafeLayoutNode;
-use layout_api::{IFrameSize, LayoutImageDestination, SVGElementData};
+use layout_api::{IFrameSize, LayoutElement, LayoutImageDestination, LayoutNode, SVGElementData};
 use malloc_size_of_derive::MallocSizeOf;
 use net_traits::image_cache::{Image, ImageOrMetadataAvailable, VectorImage};
-use script::layout_dom::ServoThreadSafeLayoutNode;
-use selectors::Element;
+use net_traits::request::InternalRequest;
+use script::layout_dom::ServoLayoutNode;
 use servo_arc::Arc as ServoArc;
 use servo_base::id::{BrowsingContextId, PipelineId};
 use servo_url::ServoUrl;
 use style::Zero;
 use style::attr::AttrValue;
 use style::computed_values::object_fit::T as ObjectFit;
+use style::context::TreeCountingCaches;
+use style::dom::DummyElementContext;
 use style::logical_geometry::{Direction, WritingMode};
 use style::properties::{ComputedValues, StyleBuilder};
 use style::rule_cache::RuleCacheConditions;
-use style::servo::url::ComputedUrl;
+use style::rule_tree::RuleCascadeFlags;
 use style::stylesheets::container_rule::ContainerSizeQuery;
+use style::url::ComputedUrl;
 use style::values::CSSFloat;
 use style::values::computed::image::Image as ComputedImage;
 use style::values::computed::{Content, Context, ToComputedValue};
 use style::values::generics::counters::{GenericContentItem, GenericContentItems};
 use url::Url;
+use web_atoms::local_name;
 use webrender_api::ImageKey;
 
-use crate::cell::ArcRefCell;
 use crate::context::{LayoutContext, LayoutImageCacheResult};
 use crate::dom::NodeExt;
 use crate::fragment_tree::{
     BaseFragment, BaseFragmentInfo, CollapsedBlockMargins, Fragment, IFrameFragment, ImageFragment,
 };
 use crate::geom::{LogicalVec2, PhysicalPoint, PhysicalRect, PhysicalSize};
-use crate::layout_box_base::{CacheableLayoutResult, LayoutBoxBase};
+use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
 use crate::sizing::{
     ComputeInlineContentSizes, InlineContentSizesResult, LazySize, SizeConstraint,
 };
@@ -48,6 +51,9 @@ use crate::{ConstraintSpace, ContainingBlock};
 #[derive(Debug, MallocSizeOf)]
 pub(crate) struct ReplacedContents {
     pub kind: ReplacedContentKind,
+    /// Whether or not this [`ReplacedContents`] is due to content replacement, i.e.
+    /// `content: <image>` in style.
+    pub is_content_replacement: bool,
     natural_size: NaturalSizes,
     base_fragment_info: BaseFragmentInfo,
 }
@@ -134,6 +140,7 @@ pub(crate) struct ImageInfo {
 #[derive(Debug, MallocSizeOf)]
 pub(crate) struct VideoInfo {
     pub image_key: Option<ImageKey>,
+    pub poster_url: Option<ServoUrl>,
 }
 
 #[derive(Debug, MallocSizeOf)]
@@ -142,23 +149,19 @@ pub(crate) enum ReplacedContentKind {
     IFrame(IFrameInfo),
     Canvas(CanvasInfo),
     Video(VideoInfo),
-    SVGElement(Option<VectorImage>),
+    SVGElement {
+        vector_image: Option<VectorImage>,
+        has_viewbox: bool,
+    },
     Audio,
 }
 
 impl ReplacedContents {
-    pub fn for_element(
-        node: ServoThreadSafeLayoutNode<'_>,
-        context: &LayoutContext,
-    ) -> Option<Self> {
-        if let Some(ref data_attribute_string) = node.as_typeless_object_with_data_attribute() {
-            if let Some(url) = try_to_parse_image_data_url(data_attribute_string) {
-                return Self::from_image_url(
-                    node,
-                    context,
-                    &ComputedUrl::Valid(ServoArc::new(url)),
-                );
-            }
+    pub fn for_element(node: ServoLayoutNode<'_>, context: &LayoutContext) -> Option<Self> {
+        if let Some(ref data_attribute_string) = node.as_typeless_object_with_data_attribute() &&
+            let Some(url) = try_to_parse_image_data_url(data_attribute_string)
+        {
+            return Self::from_image_url(node, context, &ComputedUrl::Valid(ServoArc::new(url)));
         }
 
         let (kind, natural_size) = {
@@ -190,7 +193,7 @@ impl ReplacedContents {
                 Self::svg_kind_size(svg_data, context, node)
             } else if node
                 .as_html_element()
-                .is_some_and(|element| element.has_local_name(&local_name!("audio")))
+                .is_some_and(|element| element.local_name() == &local_name!("audio"))
             {
                 let natural_size = NaturalSizes {
                     width: None,
@@ -217,6 +220,7 @@ impl ReplacedContents {
 
         Some(Self {
             kind,
+            is_content_replacement: false,
             natural_size,
             base_fragment_info: node.into(),
         })
@@ -225,9 +229,10 @@ impl ReplacedContents {
     fn svg_kind_size(
         svg_data: SVGElementData,
         context: &LayoutContext,
-        node: ServoThreadSafeLayoutNode<'_>,
+        node: ServoLayoutNode<'_>,
     ) -> (ReplacedContentKind, NaturalSizes) {
         let rule_cache_conditions = &mut RuleCacheConditions::default();
+        let mut tree_counting_caches = TreeCountingCaches::default();
 
         let parent_style = node.style(&context.style_context);
         let style_builder = StyleBuilder::new(
@@ -239,11 +244,19 @@ impl ReplacedContents {
             false,
         );
 
+        // TODO: use the correct element context in order to properly resolve
+        // `sibling-index()`, like Blink. Or maybe do it like Gecko, and only
+        // accept literals, see https://github.com/w3c/csswg-drafts/issues/14117
+        let element_context = &DummyElementContext;
+
         let to_computed_context = Context::new(
             style_builder,
             context.style_context.quirks_mode(),
             rule_cache_conditions,
             ContainerSizeQuery::none(),
+            RuleCascadeFlags::empty(),
+            element_context,
+            &mut tree_counting_caches,
         );
 
         let attr_to_computed = |attr_val: &AttrValue| {
@@ -292,6 +305,7 @@ impl ReplacedContents {
                     node.opaque(),
                     svg_source,
                     LayoutImageDestination::BoxTreeConstruction,
+                    InternalRequest::Yes,
                 )
                 .ok()
         });
@@ -304,71 +318,77 @@ impl ReplacedContents {
             _ => unreachable!("SVG element can't contain a raster image."),
         });
 
-        (ReplacedContentKind::SVGElement(vector_image), natural_size)
+        (
+            ReplacedContentKind::SVGElement {
+                vector_image,
+                has_viewbox: svg_data.view_box.is_some(),
+            },
+            natural_size,
+        )
     }
 
-    fn from_content_property(
-        node: ServoThreadSafeLayoutNode<'_>,
-        context: &LayoutContext,
-    ) -> Option<Self> {
+    fn from_content_property(node: ServoLayoutNode<'_>, context: &LayoutContext) -> Option<Self> {
         // If the `content` property is a single image URL, non-replaced boxes
         // and images get replaced with the given image.
         if let Content::Items(GenericContentItems { items, .. }) =
-            node.style(&context.style_context).clone_content()
+            node.style(&context.style_context).clone_content() &&
+            let [GenericContentItem::Image(image)] = items.as_slice()
         {
-            if let [GenericContentItem::Image(image)] = items.as_slice() {
-                // Invalid images are treated as zero-sized.
-                return Some(
-                    Self::from_image(node, context, image)
-                        .unwrap_or_else(|| Self::zero_sized_invalid_image(node)),
-                );
-            }
+            // Invalid images are treated as zero-sized.
+            let mut replaced_contents = Self::from_image(node, context, image)
+                .unwrap_or_else(|| Self::zero_sized_invalid_image(node));
+
+            replaced_contents.is_content_replacement = true;
+            node.clear_fragments_and_dirty_fragment_caches_of_descendants();
+            return Some(replaced_contents);
         }
         None
     }
 
     pub fn from_image_url(
-        node: ServoThreadSafeLayoutNode<'_>,
+        node: ServoLayoutNode<'_>,
         context: &LayoutContext,
         image_url: &ComputedUrl,
     ) -> Option<Self> {
-        if let ComputedUrl::Valid(image_url) = image_url {
-            let (image, width, height) = match context.image_resolver.get_or_request_image_or_meta(
-                node.opaque(),
-                image_url.clone().into(),
-                LayoutImageDestination::BoxTreeConstruction,
-            ) {
-                LayoutImageCacheResult::DataAvailable(img_or_meta) => match img_or_meta {
-                    ImageOrMetadataAvailable::ImageAvailable { image, .. } => {
-                        if let Image::Raster(image) = &image {
-                            context
-                                .image_resolver
-                                .handle_animated_image(node.opaque(), image.clone());
-                        }
-                        let metadata = image.metadata();
-                        (Some(image), metadata.width as f32, metadata.height as f32)
-                    },
-                    ImageOrMetadataAvailable::MetadataAvailable(metadata, _id) => {
-                        (None, metadata.width as f32, metadata.height as f32)
-                    },
+        let ComputedUrl::Valid(image_url) = image_url else {
+            return None;
+        };
+        let (image, width, height) = match context.image_resolver.get_or_request_image_or_meta(
+            node.opaque(),
+            image_url.clone().into(),
+            LayoutImageDestination::BoxTreeConstruction,
+            InternalRequest::No,
+        ) {
+            LayoutImageCacheResult::DataAvailable(img_or_meta) => match img_or_meta {
+                ImageOrMetadataAvailable::ImageAvailable { image, .. } => {
+                    if let Image::Raster(image) = &image {
+                        context
+                            .image_resolver
+                            .handle_animated_image(node.opaque(), image.clone());
+                    }
+                    let metadata = image.metadata();
+                    (Some(image), metadata.width as f32, metadata.height as f32)
                 },
-                LayoutImageCacheResult::Pending | LayoutImageCacheResult::LoadError => return None,
-            };
-            return Some(Self {
-                kind: ReplacedContentKind::Image(ImageInfo {
-                    image,
-                    showing_broken_image_icon: false,
-                    url: Some(image_url.clone().into()),
-                }),
-                natural_size: NaturalSizes::from_width_and_height(width, height),
-                base_fragment_info: node.into(),
-            });
-        }
-        None
+                ImageOrMetadataAvailable::MetadataAvailable(metadata, _id) => {
+                    (None, metadata.width as f32, metadata.height as f32)
+                },
+            },
+            LayoutImageCacheResult::Pending | LayoutImageCacheResult::LoadError => return None,
+        };
+        Some(Self {
+            kind: ReplacedContentKind::Image(ImageInfo {
+                image,
+                showing_broken_image_icon: false,
+                url: Some(image_url.clone().into()),
+            }),
+            is_content_replacement: false,
+            natural_size: NaturalSizes::from_width_and_height(width, height),
+            base_fragment_info: node.into(),
+        })
     }
 
     pub fn from_image(
-        element: ServoThreadSafeLayoutNode<'_>,
+        element: ServoLayoutNode<'_>,
         context: &LayoutContext,
         image: &ComputedImage,
     ) -> Option<Self> {
@@ -378,13 +398,14 @@ impl ReplacedContents {
         }
     }
 
-    pub(crate) fn zero_sized_invalid_image(node: ServoThreadSafeLayoutNode<'_>) -> Self {
+    pub(crate) fn zero_sized_invalid_image(node: ServoLayoutNode<'_>) -> Self {
         Self {
             kind: ReplacedContentKind::Image(ImageInfo {
                 image: None,
                 showing_broken_image_icon: false,
                 url: None,
             }),
+            is_content_replacement: false,
             natural_size: NaturalSizes::from_width_and_height(0., 0.),
             base_fragment_info: node.into(),
         }
@@ -486,7 +507,7 @@ impl ReplacedContents {
         let (object_fit_size, rect) = self.calculate_fragment_rect(style, size);
         let clip = PhysicalRect::new(PhysicalPoint::origin(), size);
 
-        let mut base = BaseFragment::new(self.base_fragment_info, style.clone().into(), rect);
+        let base = BaseFragment::new(self.base_fragment_info, rect);
         match &self.kind {
             ReplacedContentKind::Image(image_info) => image_info
                 .image
@@ -505,29 +526,35 @@ impl ReplacedContents {
                                 vector_image.id,
                                 size,
                                 tag.node,
-                                vector_image.svg_id.clone(),
+                                vector_image.svg_id,
                             )
                             .and_then(|i| i.id)
                     },
                 })
                 .map(|image_key| {
-                    Fragment::Image(ArcRefCell::new(ImageFragment {
+                    Fragment::Image(Arc::new(ImageFragment {
                         base,
+                        style: style.clone().into(),
                         clip,
                         image_key: Some(image_key),
                         showing_broken_image_icon: image_info.showing_broken_image_icon,
                         url: image_info.url.clone(),
+                        natural_width: self.natural_size.width,
+                        natural_height: self.natural_size.height,
                     }))
                 })
                 .into_iter()
                 .collect(),
             ReplacedContentKind::Video(video_info) => {
-                vec![Fragment::Image(ArcRefCell::new(ImageFragment {
+                vec![Fragment::Image(Arc::new(ImageFragment {
                     base,
+                    style: style.clone().into(),
                     clip,
                     image_key: video_info.image_key,
                     showing_broken_image_icon: false,
-                    url: None,
+                    url: video_info.poster_url.clone(),
+                    natural_width: self.natural_size.width,
+                    natural_height: self.natural_size.height,
                 }))]
             },
             ReplacedContentKind::IFrame(iframe) => {
@@ -542,17 +569,19 @@ impl ReplacedContents {
                         viewport_details: ViewportDetails {
                             size,
                             hidpi_scale_factor: Scale::new(hidpi_scale_factor.0),
+                            device_size: layout_context.device_size.cast_unit(),
                         },
                     },
                 );
-                vec![Fragment::IFrame(ArcRefCell::new(IFrameFragment {
+                vec![Fragment::IFrame(Arc::new(IFrameFragment {
                     base,
+                    style: style.clone().into(),
                     pipeline_id: iframe.pipeline_id,
                 }))]
             },
             ReplacedContentKind::Canvas(canvas_info) => {
-                if self.natural_size.width == Some(Au::zero())
-                    || self.natural_size.height == Some(Au::zero())
+                if self.natural_size.width == Some(Au::zero()) ||
+                    self.natural_size.height == Some(Au::zero())
                 {
                     return vec![];
                 }
@@ -561,38 +590,48 @@ impl ReplacedContents {
                     return vec![];
                 };
 
-                vec![Fragment::Image(ArcRefCell::new(ImageFragment {
+                vec![Fragment::Image(Arc::new(ImageFragment {
                     base,
+                    style: style.clone().into(),
                     clip,
                     image_key: Some(image_key),
                     showing_broken_image_icon: false,
                     url: None,
+                    natural_width: self.natural_size.width,
+                    natural_height: self.natural_size.height,
                 }))]
             },
-            ReplacedContentKind::SVGElement(vector_image) => {
+            ReplacedContentKind::SVGElement {
+                vector_image,
+                has_viewbox,
+            } => {
                 let Some(vector_image) = vector_image else {
                     return vec![];
                 };
 
-                // TODO: This is incorrect if the SVG has a viewBox.
-                base.rect = PhysicalSize::new(
-                    vector_image
-                        .metadata
-                        .width
-                        .try_into()
-                        .map_or(MAX_AU, Au::from_px),
-                    vector_image
-                        .metadata
-                        .height
-                        .try_into()
-                        .map_or(MAX_AU, Au::from_px),
-                )
-                .into();
+                if !has_viewbox {
+                    base.set_rect(
+                        PhysicalSize::new(
+                            vector_image
+                                .metadata
+                                .width
+                                .try_into()
+                                .map_or(MAX_AU, Au::from_px),
+                            vector_image
+                                .metadata
+                                .height
+                                .try_into()
+                                .map_or(MAX_AU, Au::from_px),
+                        )
+                        .into(),
+                    );
+                }
 
                 let scale = layout_context.style_context.device_pixel_ratio();
+                let content_size = base.rect().size;
                 let raster_size = Size2D::new(
-                    base.rect.size.width.scale_by(scale.0).to_px(),
-                    base.rect.size.height.scale_by(scale.0).to_px(),
+                    content_size.width.scale_by(scale.0).to_px(),
+                    content_size.height.scale_by(scale.0).to_px(),
                 );
 
                 let tag = self.base_fragment_info.tag.unwrap();
@@ -602,16 +641,19 @@ impl ReplacedContents {
                         vector_image.id,
                         raster_size,
                         tag.node,
-                        vector_image.svg_id.clone(),
+                        vector_image.svg_id,
                     )
                     .and_then(|image| image.id)
                     .map(|image_key| {
-                        Fragment::Image(ArcRefCell::new(ImageFragment {
+                        Fragment::Image(Arc::new(ImageFragment {
                             base,
+                            style: style.clone().into(),
                             clip,
                             image_key: Some(image_key),
                             showing_broken_image_icon: false,
                             url: None,
+                            natural_width: self.natural_size.width,
+                            natural_height: self.natural_size.height,
                         }))
                     })
                     .into_iter()
@@ -698,7 +740,7 @@ impl ReplacedContents {
         preferred_aspect_ratio: Option<AspectRatio>,
         base: &LayoutBoxBase,
         lazy_block_size: &LazySize,
-    ) -> CacheableLayoutResult {
+    ) -> IndependentFormattingContextLayoutResult {
         let writing_mode = base.style.writing_mode;
         let inline_size = containing_block_for_children.size.inline;
         let content_block_size = self.content_size(
@@ -712,7 +754,7 @@ impl ReplacedContents {
             block: lazy_block_size.resolve(|| content_block_size),
         }
         .to_physical_size(writing_mode);
-        CacheableLayoutResult {
+        IndependentFormattingContextLayoutResult {
             baselines: Default::default(),
             collapsible_margins_in_children: CollapsedBlockMargins::zero(),
             content_block_size,

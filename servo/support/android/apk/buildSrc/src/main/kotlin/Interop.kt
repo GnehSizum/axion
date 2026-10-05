@@ -10,7 +10,7 @@ Some functions are extensions to the Project class, as to allow access to its pu
 
 fun Project.getTargetDir(debug: Boolean, arch: String): String {
     val basePath = project.rootDir.parentFile.parentFile.parentFile.absolutePath
-    return basePath + "/target/android/" + getSubTargetDir(debug, arch)
+    return basePath + "/target/" + getSubTargetDir(debug, arch)
 }
 
 fun Project.getNativeTargetDir(debug: Boolean, arch: String): String {
@@ -23,7 +23,10 @@ fun Project.getNativeTargetDir(debug: Boolean, arch: String): String {
 }
 
 fun getSubTargetDir(debug: Boolean, arch: String): String {
-    return getRustTarget(arch) + "/" + if (debug) "debug" else "release"
+    val buildTypeDirectory = System.getenv("SERVO_TARGET_DIR")
+        ?.let { File(it).name }
+        ?: if (debug) "debug" else "release"
+    return getRustTarget(arch) + "/" + buildTypeDirectory
 }
 
 fun Project.getJniLibsPath(debug: Boolean, arch: String): String =

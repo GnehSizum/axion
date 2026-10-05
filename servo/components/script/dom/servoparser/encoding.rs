@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::mem;
 use std::time::{Duration, Instant};
 
+use chardetng::{Iso2022JpDetection, Utf8Detection};
 use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252, X_USER_DEFINED};
 use tendril::fmt::UTF8;
 use tendril::stream::LossyDecoder;
@@ -139,14 +140,15 @@ impl DetectingState {
             // Step 6.2 If parentDocument's origin is same origin with d's origin and parentDocument's character encoding
             // is not UTF-16BE/LE, then return parentDocument's character encoding, with the confidence tentative.
             // NOTE: This should not happen for XML documents
-            if let Some(encoding) = self.encoding_of_container_document {
-                if encoding != UTF_16LE && encoding != UTF_16BE {
-                    log::debug!(
-                        "Inferred encoding to be that of the container document, which is {}",
-                        encoding.name()
-                    );
-                    return Some(encoding);
-                }
+            if let Some(encoding) = self.encoding_of_container_document &&
+                encoding != UTF_16LE &&
+                encoding != UTF_16BE
+            {
+                log::debug!(
+                    "Inferred encoding to be that of the container document, which is {}",
+                    encoding.name()
+                );
+                return Some(encoding);
             }
 
             // Step 7. Otherwise, if the user agent has information on the likely encoding for this page, e.g.
@@ -156,7 +158,8 @@ impl DetectingState {
 
             // Step 8. The user agent may attempt to autodetect the character encoding from applying frequency analysis
             // or other algorithms to the data stream.
-            let mut encoding_detector = chardetng::EncodingDetector::new();
+            // According to the documentatioin `allow_iis_2022_jp` should be set to false.
+            let mut encoding_detector = chardetng::EncodingDetector::new(Iso2022JpDetection::Deny);
             encoding_detector.feed(&self.buffered_bytes, is_at_end_of_file == AtEndOfFile::Yes);
             let url = document.url();
             let tld = url
@@ -164,14 +167,12 @@ impl DetectingState {
                 .domain()
                 .and_then(|domain| domain.rsplit('.').next())
                 .map(|tld| tld.as_bytes());
-            let (guessed_encoding, is_probably_right) = encoding_detector.guess_assess(tld, true);
-            if is_probably_right {
-                log::debug!(
-                    "chardetng determined that the document encoding is {}",
-                    guessed_encoding.name()
-                );
-                return Some(guessed_encoding);
-            }
+            let guessed_encoding = encoding_detector.guess(tld, Utf8Detection::Allow);
+            log::debug!(
+                "chardetng determined that the document encoding is {}",
+                guessed_encoding.name()
+            );
+            return Some(guessed_encoding);
         }
 
         // Step 9. Otherwise, return an implementation-defined or user-specified default character encoding,
@@ -273,13 +274,6 @@ impl NetworkDecoderState {
             Self::Decoding(network_decoder) => network_decoder.decoder.is_none(),
         }
     }
-
-    pub(super) fn decoder(&mut self) -> &mut DecodingState {
-        match self {
-            Self::Detecting(_) => unreachable!("Cannot access decoder before decoding"),
-            Self::Decoding(decoder) => decoder,
-        }
-    }
 }
 
 /// An implementor of `TendrilSink` with the sole purpose of buffering decoded data
@@ -359,10 +353,10 @@ pub fn prescan_the_byte_stream_to_determine_the_encoding(
         else if remaining_byte_stream
             .get(..b"<meta ".len())
             .is_some_and(|candidate| {
-                candidate[..b"<meta".len()].eq_ignore_ascii_case(b"<meta")
-                    && candidate
-                        .last()
-                        .is_some_and(|byte| matches!(byte, 0x09 | 0x0A | 0x0C | 0x0D | 0x20 | 0x2F))
+                candidate[..b"<meta".len()].eq_ignore_ascii_case(b"<meta") &&
+                    candidate.last().is_some_and(|byte| {
+                        matches!(byte, 0x09 | 0x0A | 0x0C | 0x0D | 0x20 | 0x2F)
+                    })
             })
         {
             // Step 1. Advance the position pointer so that it points at the next 0x09, 0x0A, 0x0C, 0x0D, 0x20,
@@ -412,13 +406,14 @@ pub fn prescan_the_byte_stream_to_determine_the_encoding(
                         // giving the attribute's value as the string to parse. If a character encoding
                         // is returned, and if charset is still set to null, let charset be the encoding
                         // returned, and set need pragma to true.
-                        if charset.is_none() {
-                            if let Some(extracted_charset) =
-                                extract_a_character_encoding_from_a_meta_element(&attribute.value)
-                            {
-                                need_pragma = Some(true);
-                                charset = Some(extracted_charset);
-                            }
+                        if charset.is_none() &&
+                            let Some(extracted_charset) =
+                                extract_a_character_encoding_from_a_meta_element(
+                                    &attribute.value,
+                                )
+                        {
+                            need_pragma = Some(true);
+                            charset = Some(extracted_charset);
                         }
                     },
                     // If the attribute's name is "charset"
@@ -460,8 +455,8 @@ pub fn prescan_the_byte_stream_to_determine_the_encoding(
         }
         // A sequence of bytes starting with a 0x3C byte (<), optionally a 0x2F byte (/),
         // and finally a byte in the range 0x41-0x5A or 0x61-0x7A (A-Z or a-z)
-        else if *remaining_byte_stream.first()? == b'<'
-            && remaining_byte_stream
+        else if *remaining_byte_stream.first()? == b'<' &&
+            remaining_byte_stream
                 .get(1)
                 .filter(|byte| **byte != b'=')
                 .or(remaining_byte_stream.get(2))?
@@ -480,9 +475,9 @@ pub fn prescan_the_byte_stream_to_determine_the_encoding(
         // A sequence of bytes starting with: 0x3C 0x21 (`<!`)
         // A sequence of bytes starting with: 0x3C 0x2F (`</`)
         // A sequence of bytes starting with: 0x3C 0x3F (`<?`)
-        else if remaining_byte_stream.starts_with(b"<!")
-            || remaining_byte_stream.starts_with(b"</")
-            || remaining_byte_stream.starts_with(b"<?")
+        else if remaining_byte_stream.starts_with(b"<!") ||
+            remaining_byte_stream.starts_with(b"</") ||
+            remaining_byte_stream.starts_with(b"<?")
         {
             // Advance the position pointer so that it points at the first 0x3E byte (>) that comes after the 0x3C byte that was found.
             position += remaining_byte_stream
@@ -686,8 +681,8 @@ fn extract_a_character_encoding_from_a_meta_element(input: &[u8]) -> Option<&'st
         // NOTE: In our case, the attribute value always comes from "get_an_attribute" and is already lowercased.
         position += input[position..]
             .windows(7)
-            .position(|window| window == b"charset")?
-            + b"charset".len();
+            .position(|window| window == b"charset")? +
+            b"charset".len();
 
         // Step 3. Skip any ASCII whitespace that immediately follow the word "charset" (there might not be any).
         position += &input[position..]

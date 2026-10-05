@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use content_security_policy as csp;
 use cookie::Cookie as CookiePair;
@@ -34,13 +34,14 @@ use net::fetch::methods::{self};
 use net::http_loader::{determine_requests_referrer, serialize_origin};
 use net::resource_thread::AuthCacheEntry;
 use net::test::DECODER_BUFFER_SIZE;
+use net_traits::blob_url_store::UrlWithBlobClaim;
 use net_traits::http_status::HttpStatus;
 use net_traits::request::{
     CredentialsMode, Destination, Referrer, Request, RequestBuilder, RequestMode,
     TraversableForUserPrompts, create_request_body_with_content,
 };
 use net_traits::response::{Response, ResponseBody};
-use net_traits::{CookieSource, FetchTaskTarget, NetworkError, ReferrerPolicy};
+use net_traits::{CookieSource, FetchTaskTarget, NetworkError, ReferrerPolicy, get_current_locale};
 use parking_lot::{Mutex, RwLock};
 use servo_base::id::{TEST_PIPELINE_ID, TEST_WEBVIEW_ID};
 use servo_url::{ImmutableOrigin, ServoUrl};
@@ -201,7 +202,7 @@ fn test_check_default_headers_loaded_in_every_request() {
         HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
     );
 
-    headers.insert(header::ACCEPT_LANGUAGE, HeaderValue::from_static("en-US"));
+    headers.insert(header::ACCEPT_LANGUAGE, get_current_locale().1.clone());
 
     headers.typed_insert::<UserAgent>(crate::DEFAULT_USER_AGENT.parse().unwrap());
 
@@ -359,7 +360,7 @@ fn test_request_and_response_data_with_network_messages() {
         HeaderValue::from_static("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
     );
 
-    headers.insert(header::ACCEPT_LANGUAGE, HeaderValue::from_static("en-US"));
+    headers.insert(header::ACCEPT_LANGUAGE, get_current_locale().1.clone());
 
     headers.typed_insert::<UserAgent>(crate::DEFAULT_USER_AGENT.parse().unwrap());
 
@@ -387,7 +388,7 @@ fn test_request_and_response_data_with_network_messages() {
     );
 
     let httprequest = DevtoolsHttpRequest {
-        url: url,
+        url: url.url(),
         method: Method::GET,
         headers: headers,
         body: Some(vec![].into()),
@@ -501,7 +502,7 @@ fn test_redirected_request_to_devtools() {
     let first_response = expect_response(&mut events);
 
     assert_eq!(first_request.method, Method::POST);
-    assert_eq!(first_request.url, pre_url);
+    assert_eq!(first_request.url, pre_url.url());
     assert_eq!(
         first_response.status,
         HttpStatus::from(StatusCode::MOVED_PERMANENTLY)
@@ -514,7 +515,7 @@ fn test_redirected_request_to_devtools() {
     let second_response = expect_response(&mut events);
 
     assert_eq!(second_request.method, Method::GET);
-    assert_eq!(second_request.url, post_url);
+    assert_eq!(second_request.url, post_url.url());
     assert_eq!(second_response.status, HttpStatus::default());
     assert_eq!(second_request.method, second_request_update.method);
     assert_eq!(second_request.url, second_request_update.url);
@@ -658,7 +659,7 @@ fn test_load_doesnt_send_request_body_on_any_redirect() {
     let (pre_server, pre_url) = make_server(pre_handler);
 
     let content = "Body on POST!";
-    let request_body = create_request_body_with_content(content);
+    let request_body = create_request_body_with_content(content.to_string());
 
     let request = RequestBuilder::new(None, pre_url.clone(), Referrer::NoReferrer)
         .body(Some(request_body))
@@ -975,7 +976,7 @@ fn test_load_sets_content_length_to_length_of_request_body() {
         };
     let (server, url) = make_server(handler);
 
-    let request_body = create_request_body_with_content(content);
+    let request_body = create_request_body_with_content(content.to_string());
 
     let request = RequestBuilder::new(None, url.clone(), Referrer::NoReferrer)
         .method(Method::POST)
@@ -1194,7 +1195,7 @@ fn test_load_errors_when_there_a_redirect_loop() {
         };
     let (server_b, url_b) = make_server(handler_b);
 
-    *url_b_for_a.lock() = Some(url_b.clone());
+    *url_b_for_a.lock() = Some(url_b.url());
 
     let request = RequestBuilder::new(None, url_a.clone(), Referrer::NoReferrer)
         .method(Method::GET)
@@ -1248,7 +1249,7 @@ fn test_load_succeeds_with_a_redirect_loop() {
         };
     let (server_b, url_b) = make_server(handler_b);
 
-    *url_b_for_a.lock() = Some(url_b.clone());
+    *url_b_for_a.lock() = Some(url_b.url());
 
     let request = RequestBuilder::new(None, url_a.clone(), Referrer::NoReferrer)
         .method(Method::GET)
@@ -1264,7 +1265,7 @@ fn test_load_succeeds_with_a_redirect_loop() {
     let _ = server_b.close();
 
     let response = response.to_actual();
-    assert_eq!(response.url_list, [url_a.clone(), url_b, url_a]);
+    assert_eq!(response.url_list, [url_a.url(), url_b.url(), url_a.url()]);
     assert_eq!(
         *response.body.lock(),
         ResponseBody::Done(b"Success".to_vec())
@@ -1380,14 +1381,18 @@ fn test_redirect_from_x_to_y_provides_y_cookies_from_y() {
         cookie_jar.push(cookie_y, &url_y, CookieSource::HTTP);
     }
 
-    let request = RequestBuilder::new(None, url_x.clone(), Referrer::NoReferrer)
-        .method(Method::GET)
-        .destination(Destination::Document)
-        .origin(mock_origin())
-        .pipeline_id(Some(TEST_PIPELINE_ID))
-        .credentials_mode(CredentialsMode::Include)
-        .policy_container(Default::default())
-        .build();
+    let request = RequestBuilder::new(
+        None,
+        UrlWithBlobClaim::new(url_x.clone(), None),
+        Referrer::NoReferrer,
+    )
+    .method(Method::GET)
+    .destination(Destination::Document)
+    .origin(mock_origin())
+    .pipeline_id(Some(TEST_PIPELINE_ID))
+    .credentials_mode(CredentialsMode::Include)
+    .policy_container(Default::default())
+    .build();
 
     let response = fetch_with_context(request, &mut context);
 
@@ -1432,14 +1437,18 @@ fn test_redirect_from_x_to_x_provides_x_with_cookie_from_first_response() {
 
     let url = url.join("/initial/").unwrap();
 
-    let request = RequestBuilder::new(None, url.clone(), Referrer::NoReferrer)
-        .method(Method::GET)
-        .destination(Destination::Document)
-        .origin(mock_origin())
-        .pipeline_id(Some(TEST_PIPELINE_ID))
-        .credentials_mode(CredentialsMode::Include)
-        .policy_container(Default::default())
-        .build();
+    let request = RequestBuilder::new(
+        None,
+        UrlWithBlobClaim::new(url.clone(), None),
+        Referrer::NoReferrer,
+    )
+    .method(Method::GET)
+    .destination(Destination::Document)
+    .origin(mock_origin())
+    .pipeline_id(Some(TEST_PIPELINE_ID))
+    .credentials_mode(CredentialsMode::Include)
+    .policy_container(Default::default())
+    .build();
 
     let response = fetch(request, None);
 
@@ -1484,12 +1493,10 @@ fn test_if_auth_creds_not_in_url_but_in_cache_it_sets_it() {
         password: "test".to_owned(),
     };
 
-    context
-        .state
-        .auth_cache
-        .write()
-        .entries
-        .insert(url.origin().clone().ascii_serialization(), auth_entry);
+    context.state.auth_cache.write().entries.insert(
+        url.origin().clone().ascii_serialization().into_owned(),
+        auth_entry,
+    );
 
     let response = fetch_with_context(request, &mut context);
 
@@ -1599,7 +1606,7 @@ fn test_fetch_compressed_response_update_count() {
     impl FetchTaskTarget for FetchResponseCollector {
         fn process_request_body(&mut self, _: &Request) {}
         fn process_response(&mut self, _: &Request, _: &Response) {}
-        fn process_response_chunk(&mut self, _: &Request, _: Vec<u8>) {
+        fn process_response_chunk(&mut self, _: &Request, _: bytes::Bytes) {
             self.update_count += 1;
         }
         /// Fired when the response is fully fetched
@@ -1607,6 +1614,8 @@ fn test_fetch_compressed_response_update_count() {
             let _ = self.sender.take().unwrap().send(self.update_count);
         }
         fn process_csp_violations(&mut self, _: &Request, _: Vec<csp::Violation>) {}
+
+        fn process_response_length_hint(&mut self, _: &Request, _: usize) {}
     }
 
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -1630,9 +1639,9 @@ fn test_fetch_compressed_response_update_count() {
 fn test_origin_serialization_compatibility() {
     let ensure_serialiations_match = |url_string| {
         let url = Url::parse(url_string).unwrap();
-        let origin = ImmutableOrigin::new(url.origin());
+        let origin = ImmutableOrigin::new(&url);
         let serialized = format!("{}", serialize_origin(&origin));
-        assert_eq!(serialized, origin.ascii_serialization());
+        assert_eq!(serialized, origin.ascii_serialization().as_ref());
     };
 
     ensure_serialiations_match("https://example.com");
@@ -2102,4 +2111,54 @@ fn test_no_security_info_for_http_connection() {
             "HTTP connection should not have TLS security info"
         );
     }
+}
+
+#[test]
+fn test_stale_while_revalidate_serves_cached_and_revalidates_in_background() {
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let request_count_clone = request_count.clone();
+    let handler =
+        move |_: HyperRequest<Incoming>,
+              response: &mut HyperResponse<BoxBody<Bytes, hyper::Error>>| {
+            request_count_clone.fetch_add(1, Ordering::SeqCst);
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("max-age=0, stale-while-revalidate=30"),
+            );
+            *response.body_mut() = make_body(b"content".to_vec());
+        };
+    let (server, url) = make_server(handler);
+
+    let mut context = new_fetch_context(None, None);
+
+    let build_request = || {
+        RequestBuilder::new(None, url.clone(), Referrer::NoReferrer)
+            .method(Method::GET)
+            .destination(Destination::Document)
+            .origin(url.clone().origin())
+            .pipeline_id(Some(TEST_PIPELINE_ID))
+            .policy_container(Default::default())
+            .build()
+    };
+
+    let response = fetch_with_context(build_request(), &mut context);
+    assert!(response.actual_response().status.code().is_success());
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+
+    // the stored response is stale but within the stale-while-revalidate window, so
+    // it is served from cache immediately and a background revalidation is spawned.
+    let response = fetch_with_context(build_request(), &mut context);
+    assert!(response.actual_response().status.code().is_success());
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while request_count.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        request_count.load(Ordering::SeqCst),
+        2,
+        "exactly one background revalidation should have hit the server"
+    );
+
+    let _ = server.close();
 }

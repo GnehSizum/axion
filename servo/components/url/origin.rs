@@ -2,14 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::RefCell;
+use std::borrow::Cow;
+use std::cell::{Ref, RefCell};
 use std::net::IpAddr;
 use std::rc::Rc;
 
 use malloc_size_of::malloc_size_of_is_0;
 use malloc_size_of_derive::MallocSizeOf;
 use serde::{Deserialize, Serialize};
-use url::{Host, Origin};
+use url::{Host, Origin, Url};
 use uuid::Uuid;
 
 /// The origin of an URL
@@ -45,9 +46,22 @@ impl DomainComparable for MutableOrigin {
     }
 }
 
+impl DomainComparable for Ref<'_, MutableOrigin> {
+    fn has_domain(&self) -> bool {
+        (self.0).1.borrow().is_some()
+    }
+    fn immutable(&self) -> &ImmutableOrigin {
+        &(self.0).0
+    }
+}
+
 impl ImmutableOrigin {
-    pub fn new(origin: Origin) -> ImmutableOrigin {
-        match origin {
+    pub fn new(url: &Url) -> ImmutableOrigin {
+        if url.scheme() == "file" {
+            return Self::new_opaque_for_file();
+        }
+
+        match url.origin() {
             Origin::Opaque(_) => ImmutableOrigin::new_opaque(),
             Origin::Tuple(scheme, host, port) => ImmutableOrigin::Tuple(scheme, host, port),
         }
@@ -63,12 +77,28 @@ impl ImmutableOrigin {
 
     /// Creates a new opaque origin that is only equal to itself.
     pub fn new_opaque() -> ImmutableOrigin {
-        ImmutableOrigin::Opaque(OpaqueOrigin::Opaque(Uuid::new_v4()))
+        ImmutableOrigin::Opaque(OpaqueOrigin {
+            id: Uuid::new_v4(),
+            is_for_data_worker_from_secure_context: false,
+            is_file_origin: false,
+        })
     }
 
-    // For use in mixed security context tests because data: URL workers inherit contexts
+    /// For use in mixed security context tests because data: URL workers inherit contexts
     pub fn new_opaque_data_url_worker() -> ImmutableOrigin {
-        ImmutableOrigin::Opaque(OpaqueOrigin::SecureWorkerFromDataUrl(Uuid::new_v4()))
+        ImmutableOrigin::Opaque(OpaqueOrigin {
+            id: Uuid::new_v4(),
+            is_for_data_worker_from_secure_context: true,
+            is_file_origin: false,
+        })
+    }
+
+    pub fn new_opaque_for_file() -> ImmutableOrigin {
+        ImmutableOrigin::Opaque(OpaqueOrigin {
+            id: Uuid::new_v4(),
+            is_for_data_worker_from_secure_context: false,
+            is_file_origin: true,
+        })
     }
 
     pub fn scheme(&self) -> Option<&str> {
@@ -102,16 +132,42 @@ impl ImmutableOrigin {
     /// Return whether this origin is a (scheme, host, port) tuple
     /// (as opposed to an opaque origin).
     pub fn is_tuple(&self) -> bool {
-        match *self {
-            ImmutableOrigin::Opaque(..) => false,
-            ImmutableOrigin::Tuple(..) => true,
-        }
+        matches!(self, ImmutableOrigin::Tuple(..))
+    }
+
+    pub fn is_file_origin(&self) -> bool {
+        matches!(
+            self,
+            ImmutableOrigin::Opaque(OpaqueOrigin {
+                is_file_origin: true,
+                ..
+            })
+        )
+    }
+
+    pub fn is_for_data_worker_from_secure_context(&self) -> bool {
+        matches!(
+            self,
+            ImmutableOrigin::Opaque(OpaqueOrigin {
+                is_for_data_worker_from_secure_context: true,
+                ..
+            })
+        )
     }
 
     /// <https://w3c.github.io/webappsec-secure-contexts/#is-origin-trustworthy>
     pub fn is_potentially_trustworthy(&self) -> bool {
         // 1. If origin is an opaque origin return "Not Trustworthy"
-        if matches!(self, ImmutableOrigin::Opaque(_)) {
+        if let ImmutableOrigin::Opaque(opaque_origin) = self {
+            // The webappsec spec assumes that file:// urls have a tuple origin,
+            // which is implementation defined.
+            // See <https://github.com/w3c/webappsec-secure-contexts/issues/66>.
+            //
+            // They're not tuple origins in our implementation (which is the more correct choice),
+            // so we have to return here instead of Step 6.
+            if opaque_origin.is_file_origin {
+                return true;
+            }
             return false;
         }
 
@@ -120,10 +176,10 @@ impl ImmutableOrigin {
             if scheme == "https" || scheme == "wss" {
                 return true;
             }
+
             // 6. If origin’s scheme is "file", return "Potentially Trustworthy".
-            if scheme == "file" {
-                return true;
-            }
+            // NOTE: The comment at Step 1 explains why this is unreachable here.
+            debug_assert_ne!(scheme, "file", "File URLs don't have a tuple origin");
 
             // 4. If origin’s host matches one of the CIDR notations 127.0.0.0/8 or ::1/128,
             // return "Potentially Trustworthy".
@@ -135,31 +191,43 @@ impl ImmutableOrigin {
             // * origin’s host is "localhost" or "localhost."
             // * origin’s host ends with ".localhost" or ".localhost."
             // then return "Potentially Trustworthy".
-            if let Host::Domain(domain) = host {
-                if domain == "localhost" || domain.ends_with(".localhost") {
-                    return true;
-                }
+            if let Host::Domain(domain) = host &&
+                (domain == "localhost" || domain.ends_with(".localhost"))
+            {
+                return true;
             }
         }
+
         // 9. Return "Not Trustworthy".
         false
     }
 
     /// <https://html.spec.whatwg.org/multipage/#ascii-serialisation-of-an-origin>
-    pub fn ascii_serialization(&self) -> String {
-        self.clone().into_url_origin().ascii_serialization()
+    pub fn ascii_serialization(&self) -> Cow<'_, str> {
+        match self {
+            ImmutableOrigin::Opaque(_) => Cow::Borrowed("null"),
+            ImmutableOrigin::Tuple(..) => {
+                Cow::Owned(self.clone().into_url_origin().ascii_serialization())
+            },
+        }
     }
 }
 
 /// Opaque identifier for URLs that have file or other schemes
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub enum OpaqueOrigin {
-    Opaque(Uuid),
-    // Workers created from `data:` urls will have opaque origins but need to be treated
-    // as inheriting the secure context they were created in. This tracks that the origin
-    // was created in such a context
-    SecureWorkerFromDataUrl(Uuid),
+pub struct OpaqueOrigin {
+    id: Uuid,
+    /// Workers created from `data:` urls will have opaque origins but need to be treated
+    /// as inheriting the secure context they were created in. This tracks that the origin
+    /// was created in such a context
+    is_for_data_worker_from_secure_context: bool,
+    /// `file://` URLs are *usually* treated as opaque, but not always. This flag serves
+    /// as an indicator that they need special handling in certain cases.
+    ///
+    /// See <https://github.com/whatwg/html/issues/3099>.
+    is_file_origin: bool,
 }
+
 malloc_size_of_is_0!(OpaqueOrigin);
 
 /// A snapshot of a MutableOrigin at a moment in time.
@@ -238,8 +306,8 @@ impl MutableOrigin {
     pub fn same_origin_domain(&self, other: &MutableOrigin) -> bool {
         if let Some(ref self_domain) = *(self.0).1.borrow() {
             if let Some(ref other_domain) = *(other.0).1.borrow() {
-                self_domain == other_domain
-                    && self.immutable().scheme() == other.immutable().scheme()
+                self_domain == other_domain &&
+                    self.immutable().scheme() == other.immutable().scheme()
             } else {
                 false
             }

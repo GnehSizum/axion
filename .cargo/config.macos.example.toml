@@ -1,0 +1,15 @@
+# Copy to .cargo/config.toml, or merge with an existing local configuration.
+# Servo requires these crate-scoped unstable Rust features on its stable toolchain.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "13.0"
+RUSTC_BOOTSTRAP = "crown,script,script_bindings,script_webgpu,style_tests,mozjs,mozjs_sys"
+
+# macOS SDKs can be newer than LLVM's lld TAPI parser; use the SDK's linker.
+# clang/clang++ must be version 19 or newer and available on PATH.
+CC = "clang --ld-path=/usr/bin/ld -Wno-unused-command-line-argument"
+CXX = "clang++ --ld-path=/usr/bin/ld -Wno-unused-command-line-argument"
+HOST_CC = "clang --ld-path=/usr/bin/ld -Wno-unused-command-line-argument"
+HOST_CXX = "clang++ --ld-path=/usr/bin/ld -Wno-unused-command-line-argument"
+# Rust 1.97.1's implicit stripping can produce misaligned dylibs on macOS 27.
+CARGO_PROFILE_DEV_STRIP = "none"
+CARGO_PROFILE_RELEASE_STRIP = "none"

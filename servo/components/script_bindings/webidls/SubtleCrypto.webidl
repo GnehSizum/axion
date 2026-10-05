@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+// skip-unless CARGO_FEATURE_WEBCRYPTO
+
 // https://w3c.github.io/webcrypto/#subtlecrypto-interface
 
 // enum KeyFormat { "raw", "spki", "pkcs8", "jwk" };
@@ -34,7 +36,7 @@ interface SubtleCrypto {
                          sequence<KeyUsage> keyUsages );
   Promise<ArrayBuffer> deriveBits(AlgorithmIdentifier algorithm,
                           CryptoKey baseKey,
-                          optional unsigned long? length = null);
+                          optional [EnforceRange] unsigned long? length = null);
 
   Promise<CryptoKey> importKey(KeyFormat format,
                          (BufferSource or JsonWebKey) keyData,
@@ -92,7 +94,7 @@ dictionary RsaHashedKeyGenParams : RsaKeyGenParams {
 // https://w3c.github.io/webcrypto/#RsaKeyAlgorithm-dictionary
 
 dictionary RsaKeyAlgorithm : KeyAlgorithm {
-  required unsigned long modulusLength;
+  required [EnforceRange] unsigned long modulusLength;
   required BigInteger publicExponent;
 };
 
@@ -161,7 +163,7 @@ dictionary AesCtrParams : Algorithm {
 // https://w3c.github.io/webcrypto/#AesKeyAlgorithm-dictionary
 
 dictionary AesKeyAlgorithm : KeyAlgorithm {
-  required unsigned short length;
+  required [EnforceRange] unsigned short length;
 };
 
 // https://w3c.github.io/webcrypto/#aes-keygen-params
@@ -201,7 +203,7 @@ dictionary HmacImportParams : Algorithm {
 
 dictionary HmacKeyAlgorithm : KeyAlgorithm {
   required KeyAlgorithm hash;
-  required unsigned long length;
+  required [EnforceRange] unsigned long length;
 };
 
 // https://w3c.github.io/webcrypto/#hmac-keygen-params
@@ -297,12 +299,12 @@ partial interface SubtleCrypto {
     sequence<KeyUsage> keyUsages
   );
 
-  // static boolean supports(DOMString operation,
-  //                  AlgorithmIdentifier algorithm,
-  //                  optional unsigned long? length = null);
-  // static boolean supports(DOMString operation,
-  //                  AlgorithmIdentifier algorithm,
-  //                  AlgorithmIdentifier additionalAlgorithm);
+  static boolean supports(DOMString operation,
+                   AlgorithmIdentifier algorithm,
+                   optional [EnforceRange] unsigned long? length = null);
+  static boolean supports(DOMString operation,
+                   AlgorithmIdentifier algorithm,
+                   AlgorithmIdentifier additionalAlgorithm);
 };
 
 // https://wicg.github.io/webcrypto-modern-algos/#subtlecrypto-interface-keyformat
@@ -342,6 +344,38 @@ dictionary CShakeParams : Algorithm {
 dictionary TurboShakeParams : Algorithm {
   required [EnforceRange] unsigned long outputLength;
   [EnforceRange] octet domainSeparation;
+};
+
+// https://wicg.github.io/webcrypto-modern-algos/#kangarootwelve-params
+
+dictionary KangarooTwelveParams : Algorithm {
+  required [EnforceRange] unsigned long outputLength;
+  BufferSource customization;
+};
+
+// https://wicg.github.io/webcrypto-modern-algos/#kmac-keygen-params
+
+dictionary KmacKeyGenParams : Algorithm {
+  [EnforceRange] unsigned long length;
+};
+
+// https://wicg.github.io/webcrypto-modern-algos/#kmac-importparams
+
+dictionary KmacImportParams : Algorithm {
+  [EnforceRange] unsigned long length;
+};
+
+// https://wicg.github.io/webcrypto-modern-algos/#KmacKeyAlgorithm-dictionary
+
+dictionary KmacKeyAlgorithm : KeyAlgorithm {
+  required [EnforceRange] unsigned long length;
+};
+
+// https://wicg.github.io/webcrypto-modern-algos/#kmac-params
+
+dictionary KmacParams : Algorithm {
+  required [EnforceRange] unsigned long outputLength;
+  BufferSource customization;
 };
 
 // https://wicg.github.io/webcrypto-modern-algos/#argon2-params

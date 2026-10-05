@@ -1793,28 +1793,28 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.1.33.0"));
+        assert!(line.contains("release=v0.6.0"));
         assert!(line.contains("msrv="));
     }
 
     #[test]
     fn rustc_msrv_diagnostics_compare_versions() {
-        assert_eq!(parse_semver("1.86.0"), Some((1, 86, 0)));
+        assert_eq!(parse_semver("1.88.0"), Some((1, 88, 0)));
         assert_eq!(
             parse_rustc_semver("rustc 1.94.0 (4a4ef493e 2026-03-02)"),
             Some((1, 94, 0))
         );
         assert_eq!(
-            rustc_msrv_diagnostic_line("rustc 1.86.0 (abc 2025-01-01)"),
-            "rustc.msrv: ok (active=1.86.0, required=1.86.0)"
+            rustc_msrv_diagnostic_line("rustc 1.88.0 (abc 2025-01-01)"),
+            "rustc.msrv: ok (active=1.88.0, required=1.88.0)"
         );
         assert_eq!(
-            rustc_msrv_diagnostic_line("rustc 1.85.0 (abc 2025-01-01)"),
-            "rustc.msrv: failed (active=1.85.0, required=1.86.0)"
+            rustc_msrv_diagnostic_line("rustc 1.87.0 (abc 2025-01-01)"),
+            "rustc.msrv: failed (active=1.87.0, required=1.88.0)"
         );
         assert_eq!(
             rustc_msrv_diagnostic_line("not rustc"),
-            "rustc.msrv: unknown (active=unknown, required=1.86.0)"
+            "rustc.msrv: unknown (active=unknown, required=1.88.0)"
         );
     }
 

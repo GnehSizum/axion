@@ -7,19 +7,20 @@ use std::ptr::{self};
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use js::jsapi::{Heap, IsPromiseObject, JSObject};
 use js::jsval::{JSVal, ObjectValue, UndefinedValue};
 use js::realm::CurrentRealm;
 use js::rust::{HandleObject as SafeHandleObject, HandleValue as SafeHandleValue, IntoHandle};
 use rustc_hash::FxHashMap;
 use script_bindings::callback::ExceptionHandling;
-use script_bindings::realms::InRealm;
+use script_bindings::cell::DomRefCell;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use servo_base::id::{MessagePortId, MessagePortIndex};
 use servo_constellation_traits::TransformStreamData;
 
 use super::readablestream::CrossRealmTransformReadable;
 use super::writablestream::CrossRealmTransformWritable;
-use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::QueuingStrategyBinding::{
     QueuingStrategy, QueuingStrategySize,
 };
@@ -27,7 +28,7 @@ use crate::dom::bindings::codegen::Bindings::TransformStreamBinding::TransformSt
 use crate::dom::bindings::codegen::Bindings::TransformerBinding::Transformer;
 use crate::dom::bindings::conversions::ConversionResult;
 use crate::dom::bindings::error::{Error, Fallible};
-use crate::dom::bindings::reflector::{DomGlobal, Reflector, reflect_dom_object_with_proto};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::structuredclone::StructuredData;
 use crate::dom::bindings::transferable::Transferable;
@@ -42,8 +43,7 @@ use crate::dom::stream::underlyingsourcecontainer::UnderlyingSourceType;
 use crate::dom::stream::writablestream::create_writable_stream;
 use crate::dom::stream::writablestreamdefaultcontroller::UnderlyingSinkType;
 use crate::dom::types::{PromiseNativeHandler, TransformStreamDefaultController, WritableStream};
-use crate::realms::{enter_auto_realm, enter_realm};
-use crate::script_runtime::{CanGc, JSContext as SafeJSContext};
+use crate::realms::enter_auto_realm;
 
 impl js::gc::Rootable for TransformBackPressureChangePromiseFulfillment {}
 
@@ -74,8 +74,7 @@ impl Callback for TransformBackPressureChangePromiseFulfillment {
         if self.writable.is_erroring() {
             rooted!(&in(cx) let mut error = UndefinedValue());
             self.writable.get_stored_error(error.handle_mut());
-            self.result_promise
-                .reject(cx.into(), error.handle(), CanGc::from_cx(cx));
+            self.result_promise.reject(cx, error.handle());
             return;
         }
 
@@ -97,6 +96,7 @@ impl Callback for TransformBackPressureChangePromiseFulfillment {
         // PerformTransformFulfillment and PerformTransformRejection do not need
         // to be rooted because they only contain an Rc.
         let handler = PromiseNativeHandler::new(
+            cx,
             &self.writable.global(),
             Some(Box::new(PerformTransformFulfillment {
                 result_promise: self.result_promise.clone(),
@@ -104,14 +104,11 @@ impl Callback for TransformBackPressureChangePromiseFulfillment {
             Some(Box::new(PerformTransformRejection {
                 result_promise: self.result_promise.clone(),
             })),
-            CanGc::from_cx(cx),
         );
 
         let mut realm = enter_auto_realm(cx, &*self.writable.global());
         let realm = &mut realm.current_realm();
-        let in_realm_proof = realm.into();
-        let comp = InRealm::Already(&in_realm_proof);
-        transform_result.append_native_handler(&handler, comp, CanGc::from_cx(realm));
+        transform_result.append_native_handler(realm, &handler);
     }
 }
 
@@ -126,9 +123,8 @@ struct PerformTransformFulfillment {
 
 impl Callback for PerformTransformFulfillment {
     fn callback(&self, cx: &mut CurrentRealm, _v: SafeHandleValue) {
-        let can_gc = CanGc::from_cx(cx);
         // Fulfilled: resolve the outer promise
-        self.result_promise.resolve_native(&(), can_gc);
+        self.result_promise.resolve_native(cx, &());
     }
 }
 
@@ -143,9 +139,8 @@ struct PerformTransformRejection {
 
 impl Callback for PerformTransformRejection {
     fn callback(&self, cx: &mut CurrentRealm, v: SafeHandleValue) {
-        let can_gc = CanGc::from_cx(cx);
         // Stream already errored in perform_transform, just reject result_promise
-        self.result_promise.reject(cx.into(), v, can_gc);
+        self.result_promise.reject(cx, v);
     }
 }
 
@@ -160,8 +155,7 @@ struct BackpressureChangeRejection {
 
 impl Callback for BackpressureChangeRejection {
     fn callback(&self, cx: &mut CurrentRealm, reason: SafeHandleValue) {
-        let can_gc = CanGc::from_cx(cx);
-        self.result_promise.reject(cx.into(), reason, can_gc);
+        self.result_promise.reject(cx, reason);
     }
 }
 
@@ -181,30 +175,28 @@ struct CancelPromiseFulfillment {
 impl Callback for CancelPromiseFulfillment {
     /// Reacting to backpressureChangePromise with the following fulfillment steps:
     fn callback(&self, cx: &mut CurrentRealm, _v: SafeHandleValue) {
-        let can_gc = CanGc::from_cx(cx);
-        let cx: SafeJSContext = cx.into();
         // If readable.[[state]] is "errored", reject controller.[[finishPromise]] with readable.[[storedError]].
         if self.readable.is_errored() {
-            rooted!(in(*cx) let mut error = UndefinedValue());
+            rooted!(&in(cx) let mut error = UndefinedValue());
             self.readable.get_stored_error(error.handle_mut());
             self.controller
                 .get_finish_promise()
                 .expect("finish promise is not set")
-                .reject_native(&error.handle(), can_gc);
+                .reject_native(cx, &error.handle());
         } else {
             // Otherwise:
             // Perform ! ReadableStreamDefaultControllerError(readable.[[controller]], reason).
-            rooted!(in(*cx) let mut reason = UndefinedValue());
+            rooted!(&in(cx) let mut reason = UndefinedValue());
             reason.set(self.reason.get());
             self.readable
                 .get_default_controller()
-                .error(reason.handle(), can_gc);
+                .error(cx, reason.handle());
 
             // Resolve controller.[[finishPromise]] with undefined.
             self.controller
                 .get_finish_promise()
                 .expect("finish promise is not set")
-                .resolve_native(&(), can_gc);
+                .resolve_native(cx, &());
         }
     }
 }
@@ -223,16 +215,14 @@ struct CancelPromiseRejection {
 impl Callback for CancelPromiseRejection {
     /// Reacting to backpressureChangePromise with the following fulfillment steps:
     fn callback(&self, cx: &mut CurrentRealm, v: SafeHandleValue) {
-        let can_gc = CanGc::from_cx(cx);
-        let cx: SafeJSContext = cx.into();
         // Perform ! ReadableStreamDefaultControllerError(readable.[[controller]], r).
-        self.readable.get_default_controller().error(v, can_gc);
+        self.readable.get_default_controller().error(cx, v);
 
         // Reject controller.[[finishPromise]] with r.
         self.controller
             .get_finish_promise()
             .expect("finish promise is not set")
-            .reject(cx, v, can_gc);
+            .reject(cx, v);
     }
 }
 
@@ -264,7 +254,7 @@ impl Callback for SourceCancelPromiseFulfillment {
         if self.writeable.is_errored() {
             rooted!(&in(cx) let mut error = UndefinedValue());
             self.writeable.get_stored_error(error.handle_mut());
-            finish_promise.reject(cx.into(), error.handle(), CanGc::from_cx(cx));
+            finish_promise.reject(cx, error.handle());
         } else {
             // Otherwise:
             // Perform ! WritableStreamDefaultControllerErrorIfNeeded(writable.[[controller]], reason).
@@ -275,10 +265,10 @@ impl Callback for SourceCancelPromiseFulfillment {
                 .error_if_needed(cx, reason.handle(), global);
 
             // Perform ! TransformStreamUnblockWrite(stream).
-            self.stream.unblock_write(global, CanGc::from_cx(cx));
+            self.stream.unblock_write(cx, global);
 
             // Resolve controller.[[finishPromise]] with undefined.
-            finish_promise.resolve_native(&(), CanGc::from_cx(cx));
+            finish_promise.resolve_native(cx, &());
         }
     }
 }
@@ -306,13 +296,13 @@ impl Callback for SourceCancelPromiseRejection {
             .error_if_needed(cx, v, global);
 
         // Perform ! TransformStreamUnblockWrite(stream).
-        self.stream.unblock_write(global, CanGc::from_cx(cx));
+        self.stream.unblock_write(cx, global);
 
         // Reject controller.[[finishPromise]] with r.
         self.controller
             .get_finish_promise()
             .expect("finish promise is not set")
-            .reject(cx.into(), v, CanGc::from_cx(cx));
+            .reject(cx, v);
     }
 }
 
@@ -330,8 +320,6 @@ struct FlushPromiseFulfillment {
 impl Callback for FlushPromiseFulfillment {
     /// Reacting to flushpromise with the following fulfillment steps:
     fn callback(&self, cx: &mut CurrentRealm, _v: SafeHandleValue) {
-        let can_gc = CanGc::from_cx(cx);
-        let cx: SafeJSContext = cx.into();
         // If flushPromise was fulfilled, then:
         let finish_promise = self
             .controller
@@ -340,16 +328,16 @@ impl Callback for FlushPromiseFulfillment {
 
         // If readable.[[state]] is "errored", reject controller.[[finishPromise]] with readable.[[storedError]].
         if self.readable.is_errored() {
-            rooted!(in(*cx) let mut error = UndefinedValue());
+            rooted!(&in(cx) let mut error = UndefinedValue());
             self.readable.get_stored_error(error.handle_mut());
-            finish_promise.reject(cx, error.handle(), can_gc);
+            finish_promise.reject(cx, error.handle());
         } else {
             // Otherwise:
             // Perform ! ReadableStreamDefaultControllerClose(readable.[[controller]]).
-            self.readable.get_default_controller().close(can_gc);
+            self.readable.get_default_controller().close(cx);
 
             // Resolve controller.[[finishPromise]] with undefined.
-            finish_promise.resolve_native(&(), can_gc);
+            finish_promise.resolve_native(cx, &());
         }
     }
 }
@@ -368,17 +356,15 @@ struct FlushPromiseRejection {
 impl Callback for FlushPromiseRejection {
     /// Reacting to flushpromise with the following fulfillment steps:
     fn callback(&self, cx: &mut CurrentRealm, v: SafeHandleValue) {
-        let can_gc = CanGc::from_cx(cx);
-        let cx: SafeJSContext = cx.into();
         // If flushPromise was rejected with reason r, then:
         // Perform ! ReadableStreamDefaultControllerError(readable.[[controller]], r).
-        self.readable.get_default_controller().error(v, can_gc);
+        self.readable.get_default_controller().error(cx, v);
 
         // Reject controller.[[finishPromise]] with r.
         self.controller
             .get_finish_promise()
             .expect("finish promise is not set")
-            .reject(cx, v, can_gc);
+            .reject(cx, v);
     }
 }
 
@@ -435,38 +421,38 @@ impl TransformStream {
     }
 
     pub(crate) fn new_with_proto(
+        cx: &mut JSContext,
         global: &GlobalScope,
         proto: Option<SafeHandleObject>,
-        can_gc: CanGc,
     ) -> DomRoot<TransformStream> {
         reflect_dom_object_with_proto(
+            cx,
             Box::new(TransformStream::new_inherited()),
             global,
             proto,
-            can_gc,
         )
     }
 
     /// Creates and set up the newly created transform stream following
     /// <https://streams.spec.whatwg.org/#transformstream-set-up>
+    #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn set_up(
         &self,
-        cx: SafeJSContext,
+        cx: &mut JSContext,
         global: &GlobalScope,
         transformer_type: TransformerType,
-        can_gc: CanGc,
     ) -> Fallible<()> {
         // Step1. Let writableHighWaterMark be 1.
         let writable_high_water_mark = 1.0;
 
         // Step 2. Let writableSizeAlgorithm be an algorithm that returns 1.
-        let writable_size_algorithm = extract_size_algorithm(&Default::default(), can_gc);
+        let writable_size_algorithm = extract_size_algorithm(cx, &Default::default());
 
         // Step 3. Let readableHighWaterMark be 0.
         let readable_high_water_mark = 0.0;
 
         // Step 4. Let readableSizeAlgorithm be an algorithm that returns 1.
-        let readable_size_algorithm = extract_size_algorithm(&Default::default(), can_gc);
+        let readable_size_algorithm = extract_size_algorithm(cx, &Default::default());
 
         // Step 5. Let transformAlgorithmWrapper be an algorithm that runs these steps given a value chunk:
         // Step 6. Let flushAlgorithmWrapper be an algorithm that runs these steps:
@@ -474,7 +460,7 @@ impl TransformStream {
         // NOTE: These steps are implemented in `TransformStreamDefaultController::new`
 
         // Step 8. Let startPromise be a promise resolved with undefined.
-        let start_promise = Promise::new_resolved(global, cx, (), can_gc);
+        let start_promise = Promise::new_resolved(cx, global, ());
 
         // Step 9. Perform ! InitializeTransformStream(stream, startPromise,
         // writableHighWaterMark, writableSizeAlgorithm, readableHighWaterMark,
@@ -487,11 +473,10 @@ impl TransformStream {
             writable_size_algorithm,
             readable_high_water_mark,
             readable_size_algorithm,
-            can_gc,
         )?;
 
         // Step 10. Let controller be a new TransformStreamDefaultController.
-        let controller = TransformStreamDefaultController::new(global, transformer_type, can_gc);
+        let controller = TransformStreamDefaultController::new(cx, global, transformer_type);
 
         // Step 11. Perform ! SetUpTransformStreamDefaultController(stream,
         // controller, transformAlgorithmWrapper, flushAlgorithmWrapper,
@@ -518,17 +503,16 @@ impl TransformStream {
     }
 
     /// <https://streams.spec.whatwg.org/#initialize-transform-stream>
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn initialize(
         &self,
-        cx: SafeJSContext,
+        cx: &mut JSContext,
         global: &GlobalScope,
         start_promise: Rc<Promise>,
         writable_high_water_mark: f64,
         writable_size_algorithm: Rc<QueuingStrategySize>,
         readable_high_water_mark: f64,
         readable_size_algorithm: Rc<QueuingStrategySize>,
-        can_gc: CanGc,
     ) -> Fallible<()> {
         // Let startAlgorithm be an algorithm that returns startPromise.
         // Let writeAlgorithm be the following steps, taking a chunk argument:
@@ -547,7 +531,6 @@ impl TransformStream {
             writable_high_water_mark,
             writable_size_algorithm,
             UnderlyingSinkType::Transform(Dom::from_ref(self), start_promise.clone()),
-            can_gc,
         )?;
         self.writable.set(Some(&writable));
 
@@ -563,11 +546,11 @@ impl TransformStream {
         // cancelAlgorithm, readableHighWaterMark, readableSizeAlgorithm).
 
         let readable = create_readable_stream(
+            cx,
             global,
-            UnderlyingSourceType::Transform(Dom::from_ref(self), start_promise),
+            UnderlyingSourceType::Transform(self, start_promise),
             Some(readable_size_algorithm),
             Some(readable_high_water_mark),
-            can_gc,
         );
         self.readable.set(Some(&readable));
 
@@ -575,7 +558,7 @@ impl TransformStream {
         // Note: This is done in the constructor.
 
         // Perform ! TransformStreamSetBackpressure(stream, true).
-        self.set_backpressure(global, true, can_gc);
+        self.set_backpressure(cx, global, true);
 
         // Set stream.[[controller]] to undefined.
         self.controller.set(None);
@@ -584,18 +567,23 @@ impl TransformStream {
     }
 
     /// <https://streams.spec.whatwg.org/#transform-stream-set-backpressure>
-    pub(crate) fn set_backpressure(&self, global: &GlobalScope, backpressure: bool, can_gc: CanGc) {
+    pub(crate) fn set_backpressure(
+        &self,
+        cx: &mut JSContext,
+        global: &GlobalScope,
+        backpressure: bool,
+    ) {
         // Assert: stream.[[backpressure]] is not backpressure.
         assert!(self.backpressure.get() != backpressure);
 
         // If stream.[[backpressureChangePromise]] is not undefined, resolve
         // stream.[[backpressureChangePromise]] with undefined.
         if let Some(promise) = self.backpressure_change_promise.borrow_mut().take() {
-            promise.resolve_native(&(), can_gc);
+            promise.resolve_native(cx, &());
         }
 
         // Set stream.[[backpressureChangePromise]] to a new promise.;
-        *self.backpressure_change_promise.borrow_mut() = Some(Promise::new(global, can_gc));
+        *self.backpressure_change_promise.borrow_mut() = Some(Promise::new(cx, global));
 
         // Set stream.[[backpressure]] to backpressure.
         self.backpressure.set(backpressure);
@@ -627,14 +615,17 @@ impl TransformStream {
     /// <https://streams.spec.whatwg.org/#set-up-transform-stream-default-controller-from-transformer>
     fn set_up_transform_stream_default_controller_from_transformer(
         &self,
+        cx: &mut JSContext,
         global: &GlobalScope,
         transformer_obj: SafeHandleObject,
         transformer: &Transformer,
-        can_gc: CanGc,
     ) {
         // Let controller be a new TransformStreamDefaultController.
-        let transformer_type = TransformerType::new_from_js_transformer(transformer);
-        let controller = TransformStreamDefaultController::new(global, transformer_type, can_gc);
+        let controller = TransformStreamDefaultController::new(
+            cx,
+            global,
+            TransformerType::new_from_js_transformer(transformer),
+        );
 
         // Let transformAlgorithm be the following steps, taking a chunk argument:
         // Let result be TransformStreamDefaultControllerEnqueue(controller, chunk).
@@ -668,7 +659,7 @@ impl TransformStream {
     /// <https://streams.spec.whatwg.org/#transform-stream-default-sink-write-algorithm>
     pub(crate) fn transform_stream_default_sink_write_algorithm(
         &self,
-        cx: &mut js::context::JSContext,
+        cx: &mut JSContext,
         global: &GlobalScope,
         chunk: SafeHandleValue,
     ) -> Fallible<Rc<Promise>> {
@@ -687,7 +678,7 @@ impl TransformStream {
             assert!(backpressure_change_promise.is_some());
 
             // Return the result of reacting to backpressureChangePromise with the following fulfillment steps:
-            let result_promise = Promise::new2(cx, global);
+            let result_promise = Promise::new(cx, global);
             rooted!(&in(cx) let mut fulfillment_handler = Some(TransformBackPressureChangePromiseFulfillment {
                 controller: Dom::from_ref(&controller),
                 writable: Dom::from_ref(&self.writable.get().expect("writable stream")),
@@ -696,21 +687,19 @@ impl TransformStream {
             }));
 
             let handler = PromiseNativeHandler::new(
+                cx,
                 global,
                 fulfillment_handler.take().map(|h| Box::new(h) as Box<_>),
                 Some(Box::new(BackpressureChangeRejection {
                     result_promise: result_promise.clone(),
                 })),
-                CanGc::from_cx(cx),
             );
             let mut realm = enter_auto_realm(cx, global);
             let realm = &mut realm.current_realm();
-            let in_realm_proof = realm.into();
-            let comp = InRealm::Already(&in_realm_proof);
             backpressure_change_promise
                 .as_ref()
                 .expect("Promise must be some by now.")
-                .append_native_handler(&handler, comp, CanGc::from_cx(realm));
+                .append_native_handler(realm, &handler);
 
             return Ok(result_promise);
         }
@@ -722,10 +711,9 @@ impl TransformStream {
     /// <https://streams.spec.whatwg.org/#transform-stream-default-sink-abort-algorithm>
     pub(crate) fn transform_stream_default_sink_abort_algorithm(
         &self,
-        cx: SafeJSContext,
+        cx: &mut JSContext,
         global: &GlobalScope,
         reason: SafeHandleValue,
-        can_gc: CanGc,
     ) -> Fallible<Rc<Promise>> {
         // Let controller be stream.[[controller]].
         let controller = self.controller.get().expect("controller is not set");
@@ -739,16 +727,17 @@ impl TransformStream {
         let readable = self.readable.get().expect("readable stream is not set");
 
         // Let controller.[[finishPromise]] be a new promise.
-        controller.set_finish_promise(Promise::new(global, can_gc));
+        controller.set_finish_promise(Promise::new(cx, global));
 
         // Let cancelPromise be the result of performing controller.[[cancelAlgorithm]], passing reason.
-        let cancel_promise = controller.perform_cancel(cx, global, reason, can_gc)?;
+        let cancel_promise = controller.perform_cancel(cx, global, reason)?;
 
         // Perform ! TransformStreamDefaultControllerClearAlgorithms(controller).
         controller.clear_algorithms();
 
         // React to cancelPromise:
         let handler = PromiseNativeHandler::new(
+            cx,
             global,
             Some(Box::new(CancelPromiseFulfillment {
                 readable: Dom::from_ref(&readable),
@@ -759,11 +748,10 @@ impl TransformStream {
                 readable: Dom::from_ref(&readable),
                 controller: Dom::from_ref(&controller),
             })),
-            can_gc,
         );
-        let realm = enter_realm(global);
-        let comp = InRealm::Entered(&realm);
-        cancel_promise.append_native_handler(&handler, comp, can_gc);
+        let mut realm = enter_auto_realm(cx, global);
+        let cx = &mut realm.current_realm();
+        cancel_promise.append_native_handler(cx, &handler);
 
         // Return controller.[[finishPromise]].
         let finish_promise = controller
@@ -775,7 +763,7 @@ impl TransformStream {
     /// <https://streams.spec.whatwg.org/#transform-stream-default-sink-close-algorithm>
     pub(crate) fn transform_stream_default_sink_close_algorithm(
         &self,
-        cx: &mut js::context::JSContext,
+        cx: &mut JSContext,
         global: &GlobalScope,
     ) -> Fallible<Rc<Promise>> {
         // Let controller be stream.[[controller]].
@@ -796,7 +784,7 @@ impl TransformStream {
             .ok_or(Error::Type(c"readable stream is not set".to_owned()))?;
 
         // Let controller.[[finishPromise]] be a new promise.
-        controller.set_finish_promise(Promise::new2(cx, global));
+        controller.set_finish_promise(Promise::new(cx, global));
 
         // Let flushPromise be the result of performing controller.[[flushAlgorithm]].
         let flush_promise = controller.perform_flush(cx, global)?;
@@ -806,6 +794,7 @@ impl TransformStream {
 
         // React to flushPromise:
         let handler = PromiseNativeHandler::new(
+            cx,
             global,
             Some(Box::new(FlushPromiseFulfillment {
                 readable: Dom::from_ref(&readable),
@@ -815,14 +804,11 @@ impl TransformStream {
                 readable: Dom::from_ref(&readable),
                 controller: Dom::from_ref(&controller),
             })),
-            CanGc::from_cx(cx),
         );
 
         let mut realm = enter_auto_realm(cx, global);
         let realm = &mut realm.current_realm();
-        let in_realm_proof = realm.into();
-        let comp = InRealm::Already(&in_realm_proof);
-        flush_promise.append_native_handler(&handler, comp, CanGc::from_cx(realm));
+        flush_promise.append_native_handler(realm, &handler);
         // Return controller.[[finishPromise]].
         let finish_promise = controller
             .get_finish_promise()
@@ -833,10 +819,9 @@ impl TransformStream {
     /// <https://streams.spec.whatwg.org/#transform-stream-default-source-cancel>
     pub(crate) fn transform_stream_default_source_cancel(
         &self,
-        cx: SafeJSContext,
+        cx: &mut JSContext,
         global: &GlobalScope,
         reason: SafeHandleValue,
-        can_gc: CanGc,
     ) -> Fallible<Rc<Promise>> {
         // Let controller be stream.[[controller]].
         let controller = self
@@ -856,16 +841,17 @@ impl TransformStream {
             .ok_or(Error::Type(c"writable stream is not set".to_owned()))?;
 
         // Let controller.[[finishPromise]] be a new promise.
-        controller.set_finish_promise(Promise::new(global, can_gc));
+        controller.set_finish_promise(Promise::new(cx, global));
 
         // Let cancelPromise be the result of performing controller.[[cancelAlgorithm]], passing reason.
-        let cancel_promise = controller.perform_cancel(cx, global, reason, can_gc)?;
+        let cancel_promise = controller.perform_cancel(cx, global, reason)?;
 
         // Perform ! TransformStreamDefaultControllerClearAlgorithms(controller).
         controller.clear_algorithms();
 
         // React to cancelPromise:
         let handler = PromiseNativeHandler::new(
+            cx,
             global,
             Some(Box::new(SourceCancelPromiseFulfillment {
                 writeable: Dom::from_ref(&writable),
@@ -878,24 +864,23 @@ impl TransformStream {
                 controller: Dom::from_ref(&controller),
                 stream: Dom::from_ref(self),
             })),
-            can_gc,
         );
 
         // Return controller.[[finishPromise]].
         let finish_promise = controller
             .get_finish_promise()
             .expect("finish promise is not set");
-        let realm = enter_realm(global);
-        let comp = InRealm::Entered(&realm);
-        cancel_promise.append_native_handler(&handler, comp, can_gc);
+        let mut realm = enter_auto_realm(cx, global);
+        let cx = &mut realm.current_realm();
+        cancel_promise.append_native_handler(cx, &handler);
         Ok(finish_promise)
     }
 
     /// <https://streams.spec.whatwg.org/#transform-stream-default-source-pull>
     pub(crate) fn transform_stream_default_source_pull(
         &self,
+        cx: &mut JSContext,
         global: &GlobalScope,
-        can_gc: CanGc,
     ) -> Fallible<Rc<Promise>> {
         // Assert: stream.[[backpressure]] is true.
         assert!(self.backpressure.get());
@@ -904,7 +889,7 @@ impl TransformStream {
         assert!(self.backpressure_change_promise.borrow().is_some());
 
         // Perform ! TransformStreamSetBackpressure(stream, false).
-        self.set_backpressure(global, false, can_gc);
+        self.set_backpressure(cx, global, false);
 
         // Return stream.[[backpressureChangePromise]].
         Ok(self
@@ -917,7 +902,7 @@ impl TransformStream {
     /// <https://streams.spec.whatwg.org/#transform-stream-error-writable-and-unblock-write>
     pub(crate) fn error_writable_and_unblock_write(
         &self,
-        cx: &mut js::context::JSContext,
+        cx: &mut JSContext,
         global: &GlobalScope,
         error: SafeHandleValue,
     ) {
@@ -930,28 +915,23 @@ impl TransformStream {
             .error_if_needed(cx, error, global);
 
         // Perform ! TransformStreamUnblockWrite(stream).
-        self.unblock_write(global, CanGc::from_cx(cx))
+        self.unblock_write(cx, global)
     }
 
     /// <https://streams.spec.whatwg.org/#transform-stream-unblock-write>
-    pub(crate) fn unblock_write(&self, global: &GlobalScope, can_gc: CanGc) {
+    pub(crate) fn unblock_write(&self, cx: &mut JSContext, global: &GlobalScope) {
         // If stream.[[backpressure]] is true, perform ! TransformStreamSetBackpressure(stream, false).
         if self.backpressure.get() {
-            self.set_backpressure(global, false, can_gc);
+            self.set_backpressure(cx, global, false);
         }
     }
 
     /// <https://streams.spec.whatwg.org/#transform-stream-error>
-    pub(crate) fn error(
-        &self,
-        cx: &mut js::context::JSContext,
-        global: &GlobalScope,
-        error: SafeHandleValue,
-    ) {
+    pub(crate) fn error(&self, cx: &mut JSContext, global: &GlobalScope, error: SafeHandleValue) {
         // Perform ! ReadableStreamDefaultControllerError(stream.[[readable]].[[controller]], e).
         self.get_readable()
             .get_default_controller()
-            .error(error, CanGc::from_cx(cx));
+            .error(cx, error);
 
         // Perform ! TransformStreamErrorWritableAndUnblockWrite(stream, e).
         self.error_writable_and_unblock_write(cx, global, error);
@@ -962,22 +942,21 @@ impl TransformStreamMethods<crate::DomTypeHolder> for TransformStream {
     /// <https://streams.spec.whatwg.org/#ts-constructor>
     #[expect(unsafe_code)]
     fn Constructor(
-        cx: SafeJSContext,
+        cx: &mut JSContext,
         global: &GlobalScope,
         proto: Option<SafeHandleObject>,
-        can_gc: CanGc,
         transformer: Option<*mut JSObject>,
         writable_strategy: &QueuingStrategy,
         readable_strategy: &QueuingStrategy,
     ) -> Fallible<DomRoot<TransformStream>> {
         // If transformer is missing, set it to null.
-        rooted!(in(*cx) let transformer_obj = transformer.unwrap_or(ptr::null_mut()));
+        rooted!(&in(cx) let transformer_obj = transformer.unwrap_or(ptr::null_mut()));
 
         // Let underlyingSinkDict be underlyingSink,
         // converted to an IDL value of type UnderlyingSink.
         let transformer_dict = if !transformer_obj.is_null() {
-            rooted!(in(*cx) let obj_val = ObjectValue(transformer_obj.get()));
-            match Transformer::new(cx, obj_val.handle(), can_gc) {
+            rooted!(&in(cx) let obj_val = ObjectValue(transformer_obj.get()));
+            match Transformer::new(cx, obj_val.handle()) {
                 Ok(ConversionResult::Success(val)) => val,
                 Ok(ConversionResult::Failure(error)) => {
                     return Err(Error::Type(error.into_owned()));
@@ -1004,20 +983,20 @@ impl TransformStreamMethods<crate::DomTypeHolder> for TransformStream {
         let readable_high_water_mark = extract_high_water_mark(readable_strategy, 0.0)?;
 
         // Let readableSizeAlgorithm be ! ExtractSizeAlgorithm(readableStrategy).
-        let readable_size_algorithm = extract_size_algorithm(readable_strategy, can_gc);
+        let readable_size_algorithm = extract_size_algorithm(cx, readable_strategy);
 
         // Let writableHighWaterMark be ? ExtractHighWaterMark(writableStrategy, 1).
         let writable_high_water_mark = extract_high_water_mark(writable_strategy, 1.0)?;
 
         // Let writableSizeAlgorithm be ! ExtractSizeAlgorithm(writableStrategy).
-        let writable_size_algorithm = extract_size_algorithm(writable_strategy, can_gc);
+        let writable_size_algorithm = extract_size_algorithm(cx, writable_strategy);
 
         // Let startPromise be a new promise.
-        let start_promise = Promise::new(global, can_gc);
+        let start_promise = Promise::new(cx, global);
 
         // Perform ! InitializeTransformStream(this, startPromise, writableHighWaterMark,
         // writableSizeAlgorithm, readableHighWaterMark, readableSizeAlgorithm).
-        let stream = TransformStream::new_with_proto(global, proto, can_gc);
+        let stream = TransformStream::new_with_proto(cx, global, proto);
         stream.initialize(
             cx,
             global,
@@ -1026,30 +1005,29 @@ impl TransformStreamMethods<crate::DomTypeHolder> for TransformStream {
             writable_size_algorithm,
             readable_high_water_mark,
             readable_size_algorithm,
-            can_gc,
         )?;
 
         // Perform ? SetUpTransformStreamDefaultControllerFromTransformer(this, transformer, transformerDict).
         stream.set_up_transform_stream_default_controller_from_transformer(
+            cx,
             global,
             transformer_obj.handle(),
             &transformer_dict,
-            can_gc,
         );
 
         // If transformerDict["start"] exists, then resolve startPromise with the
         // result of invoking transformerDict["start"]
         // with argument list « this.[[controller]] » and callback this value transformer.
         if let Some(start) = &transformer_dict.start {
-            rooted!(in(*cx) let mut result_object = ptr::null_mut::<JSObject>());
-            rooted!(in(*cx) let mut result: JSVal);
-            rooted!(in(*cx) let this_object = transformer_obj.get());
+            rooted!(&in(cx) let mut result_object = ptr::null_mut::<JSObject>());
+            rooted!(&in(cx) let mut result: JSVal);
+            rooted!(&in(cx) let this_object = transformer_obj.get());
             start.Call_(
+                cx,
                 &this_object.handle(),
                 &stream.get_controller(),
                 result.handle_mut(),
                 ExceptionHandling::Rethrow,
-                can_gc,
             )?;
             let is_promise = unsafe {
                 if result.is_object() {
@@ -1060,14 +1038,14 @@ impl TransformStreamMethods<crate::DomTypeHolder> for TransformStream {
                 }
             };
             let promise = if is_promise {
-                Promise::new_with_js_promise(result_object.handle(), cx)
+                Promise::new_with_js_promise(cx, result_object.handle())
             } else {
-                Promise::new_resolved(global, cx, result.get(), can_gc)
+                Promise::new_resolved(cx, global, result.get())
             };
-            start_promise.resolve_native(&promise, can_gc);
+            start_promise.resolve_native(cx, &promise);
         } else {
             // Otherwise, resolve startPromise with undefined.
-            start_promise.resolve_native(&(), can_gc);
+            start_promise.resolve_native(cx, &());
         };
 
         Ok(stream)
@@ -1092,10 +1070,7 @@ impl Transferable for TransformStream {
     type Data = TransformStreamData;
 
     /// <https://streams.spec.whatwg.org/#ref-for-transfer-steps②>
-    fn transfer(
-        &self,
-        cx: &mut js::context::JSContext,
-    ) -> Fallible<(MessagePortId, TransformStreamData)> {
+    fn transfer(&self, cx: &mut JSContext) -> Fallible<(MessagePortId, TransformStreamData)> {
         let global = self.global();
         let mut realm = enter_auto_realm(cx, &*global);
         let mut realm = realm.current_realm();
@@ -1116,32 +1091,32 @@ impl Transferable for TransformStream {
         }
 
         // First port pair (readable → proxy writable)
-        let port1 = MessagePort::new(&global, CanGc::from_cx(cx));
+        let port1 = MessagePort::new(cx, &global);
         global.track_message_port(&port1, None);
-        let port1_peer = MessagePort::new(&global, CanGc::from_cx(cx));
+        let port1_peer = MessagePort::new(cx, &global);
         global.track_message_port(&port1_peer, None);
         global.entangle_ports(*port1.message_port_id(), *port1_peer.message_port_id());
 
-        let proxy_readable = ReadableStream::new_with_proto(&global, None, CanGc::from_cx(cx));
+        let proxy_readable = ReadableStream::new_with_proto(cx, &global, None);
         proxy_readable.setup_cross_realm_transform_readable(cx, &port1);
         proxy_readable
             .pipe_to(cx, &global, &writable, false, false, false, None)
-            .set_promise_is_handled();
+            .set_promise_is_handled(cx);
 
         // Second port pair (proxy readable → writable)
-        let port2 = MessagePort::new(&global, CanGc::from_cx(cx));
+        let port2 = MessagePort::new(cx, &global);
         global.track_message_port(&port2, None);
-        let port2_peer = MessagePort::new(&global, CanGc::from_cx(cx));
+        let port2_peer = MessagePort::new(cx, &global);
         global.track_message_port(&port2_peer, None);
         global.entangle_ports(*port2.message_port_id(), *port2_peer.message_port_id());
 
-        let proxy_writable = WritableStream::new_with_proto(&global, None, CanGc::from_cx(cx));
+        let proxy_writable = WritableStream::new_with_proto(cx, &global, None);
         proxy_writable.setup_cross_realm_transform_writable(cx, &port2);
 
         // Pipe readable into the proxy writable (→ port_1)
         readable
             .pipe_to(cx, &global, &proxy_writable, false, false, false, None)
-            .set_promise_is_handled();
+            .set_promise_is_handled(cx);
 
         // Step 5. Set dataHolder.[[readable]] to !
         // StructuredSerializeWithTransfer(readable, « readable »).
@@ -1158,7 +1133,7 @@ impl Transferable for TransformStream {
 
     /// <https://streams.spec.whatwg.org/#ref-for-transfer-receiving-steps②>
     fn transfer_receive(
-        cx: &mut js::context::JSContext,
+        cx: &mut JSContext,
         owner: &GlobalScope,
         _id: MessagePortId,
         data: TransformStreamData,
@@ -1169,13 +1144,13 @@ impl Transferable for TransformStream {
         // Step 1. Let readableRecord be !
         // StructuredDeserializeWithTransfer(dataHolder.[[readable]], the
         // current Realm).
-        let proxy_readable = ReadableStream::new_with_proto(owner, None, CanGc::from_cx(cx));
+        let proxy_readable = ReadableStream::new_with_proto(cx, owner, None);
         proxy_readable.setup_cross_realm_transform_readable(cx, &port2);
 
         // Step 2. Let writableRecord be !
         // StructuredDeserializeWithTransfer(dataHolder.[[writable]], the
         // current Realm).
-        let proxy_writable = WritableStream::new_with_proto(owner, None, CanGc::from_cx(cx));
+        let proxy_writable = WritableStream::new_with_proto(cx, owner, None);
         proxy_writable.setup_cross_realm_transform_writable(cx, &port1);
 
         // Step 3. Set value.[[readable]] to readableRecord.[[Deserialized]].
@@ -1183,7 +1158,7 @@ impl Transferable for TransformStream {
         // Step 5. Set value.[[backpressure]],
         // value.[[backpressureChangePromise]], and value.[[controller]] to
         // undefined.
-        let stream = TransformStream::new_with_proto(owner, None, CanGc::from_cx(cx));
+        let stream = TransformStream::new_with_proto(cx, owner, None);
         stream.readable.set(Some(&proxy_readable));
         stream.writable.set(Some(&proxy_writable));
 

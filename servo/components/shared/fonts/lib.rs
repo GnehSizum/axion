@@ -11,6 +11,7 @@ mod system_font_service_proxy;
 
 use std::ops::{Deref, Range};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 pub use font_descriptor::*;
 pub use font_identifier::*;
@@ -18,7 +19,10 @@ pub use font_template::*;
 use malloc_size_of_derive::MallocSizeOf;
 use num_derive::{NumOps, One, Zero};
 use serde::{Deserialize, Serialize};
+use servo_arc::Arc as ServoArc;
 use servo_base::generic_channel::GenericSharedMemory;
+use style::font_face::Descriptors;
+use style::stylesheets::LockedFontFaceRule;
 pub use system_font_service_proxy::*;
 use webrender_api::euclid::num::One;
 
@@ -95,6 +99,13 @@ impl Iterator for TextByteRange {
             Some(next)
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (
+            self.0.end.0 - self.0.start.0,
+            Some(self.0.end.0 - self.0.start.0),
+        )
+    }
 }
 
 impl DoubleEndedIterator for TextByteRange {
@@ -118,7 +129,14 @@ impl TextByteRange {
     }
 }
 
-pub type StylesheetWebFontLoadFinishedCallback = Arc<dyn Fn(bool) + Send + Sync + 'static>;
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum WebFontLoadEvent {
+    LoadedSuccessfully,
+    UnblockedFontReadyPromise,
+}
+
+pub type StylesheetWebFontLoadFinishedCallback =
+    Arc<dyn Fn(WebFontLoadEvent) + Send + Sync + 'static>;
 
 /// A data structure to store data for fonts. Data is stored internally in an
 /// [`GenericSharedMemory`] handle, so that it can be sent without serialization
@@ -157,4 +175,39 @@ pub struct FontDataAndIndex {
 #[derive(Copy, Clone, PartialEq)]
 pub enum FontDataError {
     FailedToLoad,
+}
+
+/// Describes how the set of active `@font-face` rules was changed after a call to `FontContext::rebuild_font_face_set`.
+#[derive(Clone, Default)]
+pub struct WebFontSetDifference {
+    /// A list of `@font-face` rules that were added in this update.
+    pub added_font_faces: Vec<ServoArc<FontFaceRuleInfo>>,
+    /// A list of `@font-face` rules that were removed in this update.
+    pub removed_font_faces: Vec<ServoArc<FontFaceRuleInfo>>,
+    /// Whether the cascade index of any `@font-face` rule changed during this update.
+    ///
+    /// This can cause different fonts to be selected during font matching.
+    pub cascade_index_of_any_rule_changed: bool,
+}
+
+impl WebFontSetDifference {
+    /// Returns `true` iff the font face set remained unchanged by the update.
+    pub fn is_empty(&self) -> bool {
+        self.added_font_faces.is_empty() && self.removed_font_faces.is_empty()
+    }
+}
+
+#[derive(MallocSizeOf)]
+pub struct FontFaceRuleInfo {
+    /// The index of this `@font-face` in the cascade, relative to all
+    /// other `@font-face` rules.
+    pub cascade_index: AtomicUsize,
+    /// The descriptors on the `@font-face` rule.
+    pub descriptors: Descriptors,
+    /// The CSS rule that created this `@font-face`.
+    ///
+    /// This does *not* uniquely identify this struct across updates
+    /// to the set of live `@font-face` rules.
+    #[conditional_malloc_size_of]
+    pub rule: ServoArc<LockedFontFaceRule>,
 }

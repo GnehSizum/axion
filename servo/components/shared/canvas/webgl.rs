@@ -12,10 +12,10 @@ use glow::{
     self as gl, NativeBuffer, NativeFence, NativeFramebuffer, NativeProgram, NativeQuery,
     NativeRenderbuffer, NativeSampler, NativeShader, NativeTexture, NativeVertexArray,
 };
+use log::warn;
 use malloc_size_of_derive::MallocSizeOf;
 use pixels::{PixelFormat, SnapshotAlphaMode};
 use serde::{Deserialize, Serialize};
-use servo_base::Epoch;
 /// Receiver type used in WebGLCommands.
 pub use servo_base::generic_channel::GenericReceiver;
 /// Sender type used in WebGLCommands.
@@ -24,6 +24,7 @@ use servo_base::generic_channel::GenericSharedMemory;
 /// Result type for send()/recv() calls in in WebGLCommands.
 pub use servo_base::generic_channel::SendResult as WebGLSendResult;
 use servo_base::id::PainterId;
+use servo_base::{Epoch, generic_channel};
 use webrender_api::ImageKey;
 use webxr_api::{
     ContextId as WebXRContextId, Error as WebXRError, LayerId as WebXRLayerId,
@@ -78,9 +79,24 @@ impl WebGLThreads {
         WebGLPipeline(WebGLChan(self.0.clone()))
     }
 
-    /// Sends a exit message to close the WebGLThreads and release all WebGLContexts.
-    pub fn exit(&self, sender: GenericSender<()>) -> WebGLSendResult {
-        self.0.send(WebGLMsg::Exit(sender))
+    /// Sends an exit message to close the WebGLThreads and release all WebGLContexts.
+    pub fn exit(&self) {
+        if self.0.send(WebGLMsg::Exit).is_err() {
+            warn!("Could not exit WebGLThread.");
+        }
+    }
+
+    /// Sends a message to remove the resources for a `Painter` with the given [`PainterId`].
+    /// Returns `true` if clearing resources was successful and `false` otherwise.
+    pub fn clear_painter_resources(&self, painter_id: PainterId) -> bool {
+        let (webgl_exit_sender, webgl_exit_receiver) =
+            generic_channel::channel().expect("Failed to create IPC channel!");
+        self.0
+            .send(WebGLMsg::ClearPainterResources(
+                painter_id,
+                webgl_exit_sender,
+            ))
+            .is_ok_and(|_| webgl_exit_receiver.recv().is_ok())
     }
 
     /// Inform the WebGLThreads that WebRender has finished rendering a particular WebGL context,
@@ -127,8 +143,10 @@ pub enum WebGLMsg {
     /// readily releaseable via the `SwapChain`. This can happen when the context is
     /// released in the WebGLThread while the contents are being rendered by WebRender.
     FinishedRenderingToContext(WebGLContextId),
+    /// Frees all resources associated with a particular `Painter`.
+    ClearPainterResources(PainterId, GenericSender<()>),
     /// Frees all resources and closes the thread.
-    Exit(GenericSender<()>),
+    Exit,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
@@ -961,9 +979,9 @@ parameters! {
 impl TexParameter {
     pub fn required_webgl_version(self) -> WebGLVersion {
         match self {
-            Self::Float(TexParameterFloat::TextureMaxAnisotropyExt)
-            | Self::Int(TexParameterInt::TextureWrapS)
-            | Self::Int(TexParameterInt::TextureWrapT) => WebGLVersion::WebGL1,
+            Self::Float(TexParameterFloat::TextureMaxAnisotropyExt) |
+            Self::Int(TexParameterInt::TextureWrapS) |
+            Self::Int(TexParameterInt::TextureWrapT) => WebGLVersion::WebGL1,
             _ => WebGLVersion::WebGL2,
         }
     }
@@ -1136,11 +1154,11 @@ impl TexFormat {
         let gl_const = self.as_gl_constant();
         matches!(
             gl_const,
-            gl::COMPRESSED_RGB_S3TC_DXT1_EXT
-                | gl::COMPRESSED_RGBA_S3TC_DXT1_EXT
-                | gl::COMPRESSED_RGBA_S3TC_DXT3_EXT
-                | gl::COMPRESSED_RGBA_S3TC_DXT5_EXT
-                | gl_ext_constants::COMPRESSED_RGB_ETC1_WEBGL
+            gl::COMPRESSED_RGB_S3TC_DXT1_EXT |
+                gl::COMPRESSED_RGBA_S3TC_DXT1_EXT |
+                gl::COMPRESSED_RGBA_S3TC_DXT3_EXT |
+                gl::COMPRESSED_RGBA_S3TC_DXT5_EXT |
+                gl_ext_constants::COMPRESSED_RGB_ETC1_WEBGL
         )
     }
 
@@ -1148,15 +1166,15 @@ impl TexFormat {
     pub fn is_sized(&self) -> bool {
         !matches!(
             self,
-            TexFormat::DepthComponent
-                | TexFormat::DepthStencil
-                | TexFormat::Alpha
-                | TexFormat::Red
-                | TexFormat::RG
-                | TexFormat::RGB
-                | TexFormat::RGBA
-                | TexFormat::Luminance
-                | TexFormat::LuminanceAlpha
+            TexFormat::DepthComponent |
+                TexFormat::DepthStencil |
+                TexFormat::Alpha |
+                TexFormat::Red |
+                TexFormat::RG |
+                TexFormat::RGB |
+                TexFormat::RGBA |
+                TexFormat::Luminance |
+                TexFormat::LuminanceAlpha
         )
     }
 
@@ -1330,26 +1348,26 @@ impl TexFormat {
             TexFormat::DepthComponent32f => &[TexDataType::Float][..],
             TexFormat::Depth24Stencil8 => &[TexDataType::UnsignedInt248][..],
             TexFormat::Depth32fStencil8 => &[TexDataType::Float32UnsignedInt248Rev][..],
-            TexFormat::CompressedRgbS3tcDxt1
-            | TexFormat::CompressedRgbaS3tcDxt1
-            | TexFormat::CompressedRgbaS3tcDxt3
-            | TexFormat::CompressedRgbaS3tcDxt5 => &[TexDataType::UnsignedByte][..],
+            TexFormat::CompressedRgbS3tcDxt1 |
+            TexFormat::CompressedRgbaS3tcDxt1 |
+            TexFormat::CompressedRgbaS3tcDxt3 |
+            TexFormat::CompressedRgbaS3tcDxt5 => &[TexDataType::UnsignedByte][..],
             _ => &[][..],
         }
     }
 
     pub fn required_webgl_version(self) -> WebGLVersion {
         match self {
-            TexFormat::DepthComponent
-            | TexFormat::Alpha
-            | TexFormat::RGB
-            | TexFormat::RGBA
-            | TexFormat::Luminance
-            | TexFormat::LuminanceAlpha
-            | TexFormat::CompressedRgbS3tcDxt1
-            | TexFormat::CompressedRgbaS3tcDxt1
-            | TexFormat::CompressedRgbaS3tcDxt3
-            | TexFormat::CompressedRgbaS3tcDxt5 => WebGLVersion::WebGL1,
+            TexFormat::DepthComponent |
+            TexFormat::Alpha |
+            TexFormat::RGB |
+            TexFormat::RGBA |
+            TexFormat::Luminance |
+            TexFormat::LuminanceAlpha |
+            TexFormat::CompressedRgbS3tcDxt1 |
+            TexFormat::CompressedRgbaS3tcDxt1 |
+            TexFormat::CompressedRgbaS3tcDxt3 |
+            TexFormat::CompressedRgbaS3tcDxt5 => WebGLVersion::WebGL1,
             _ => WebGLVersion::WebGL2,
         }
     }
@@ -1377,16 +1395,16 @@ impl TexDataType {
             TexDataType::Byte => SizedDataType::Int8,
             TexDataType::UnsignedByte => SizedDataType::Uint8,
             TexDataType::Short => SizedDataType::Int16,
-            TexDataType::UnsignedShort
-            | TexDataType::UnsignedShort4444
-            | TexDataType::UnsignedShort5551
-            | TexDataType::UnsignedShort565 => SizedDataType::Uint16,
+            TexDataType::UnsignedShort |
+            TexDataType::UnsignedShort4444 |
+            TexDataType::UnsignedShort5551 |
+            TexDataType::UnsignedShort565 => SizedDataType::Uint16,
             TexDataType::Int => SizedDataType::Int32,
-            TexDataType::UnsignedInt
-            | TexDataType::UnsignedInt10f11f11fRev
-            | TexDataType::UnsignedInt2101010Rev
-            | TexDataType::UnsignedInt5999Rev
-            | TexDataType::UnsignedInt248 => SizedDataType::Uint32,
+            TexDataType::UnsignedInt |
+            TexDataType::UnsignedInt10f11f11fRev |
+            TexDataType::UnsignedInt2101010Rev |
+            TexDataType::UnsignedInt5999Rev |
+            TexDataType::UnsignedInt248 => SizedDataType::Uint32,
             TexDataType::HalfFloat => SizedDataType::Uint16,
             TexDataType::Float | TexDataType::Float32UnsignedInt248Rev => SizedDataType::Float32,
         }
@@ -1397,16 +1415,16 @@ impl TexDataType {
         use self::*;
         match *self {
             TexDataType::Byte | TexDataType::UnsignedByte => 1,
-            TexDataType::Short
-            | TexDataType::UnsignedShort
-            | TexDataType::UnsignedShort4444
-            | TexDataType::UnsignedShort5551
-            | TexDataType::UnsignedShort565 => 2,
-            TexDataType::Int
-            | TexDataType::UnsignedInt
-            | TexDataType::UnsignedInt10f11f11fRev
-            | TexDataType::UnsignedInt2101010Rev
-            | TexDataType::UnsignedInt5999Rev => 4,
+            TexDataType::Short |
+            TexDataType::UnsignedShort |
+            TexDataType::UnsignedShort4444 |
+            TexDataType::UnsignedShort5551 |
+            TexDataType::UnsignedShort565 => 2,
+            TexDataType::Int |
+            TexDataType::UnsignedInt |
+            TexDataType::UnsignedInt10f11f11fRev |
+            TexDataType::UnsignedInt2101010Rev |
+            TexDataType::UnsignedInt5999Rev => 4,
             TexDataType::UnsignedInt248 => 4,
             TexDataType::Float => 4,
             TexDataType::HalfFloat => 2,
@@ -1439,12 +1457,12 @@ impl TexDataType {
 
     pub fn required_webgl_version(self) -> WebGLVersion {
         match self {
-            TexDataType::UnsignedByte
-            | TexDataType::UnsignedShort4444
-            | TexDataType::UnsignedShort5551
-            | TexDataType::UnsignedShort565
-            | TexDataType::Float
-            | TexDataType::HalfFloat => WebGLVersion::WebGL1,
+            TexDataType::UnsignedByte |
+            TexDataType::UnsignedShort4444 |
+            TexDataType::UnsignedShort5551 |
+            TexDataType::UnsignedShort565 |
+            TexDataType::Float |
+            TexDataType::HalfFloat => WebGLVersion::WebGL1,
             _ => WebGLVersion::WebGL2,
         }
     }

@@ -13,19 +13,20 @@ use std::sync::LazyLock;
 use std::{fmt, slice, str};
 
 use html5ever::{LocalName, Namespace};
+use js::context::JSContext;
 use js::conversions::{ToJSValConvertible, jsstr_to_string};
-use js::gc::MutableHandleValue;
-use js::jsapi::{Heap, JS_GetLatin1StringCharsAndLength, JSContext, JSString};
+use js::gc::{HandleValue, MutableHandleValue};
+use js::jsapi::{Heap, JS_GetLatin1StringCharsAndLength, JSString};
 use js::jsval::StringValue;
 use js::rust::{Runtime, Trace};
 use malloc_size_of::MallocSizeOfOps;
 use num_traits::{ToPrimitive, Zero};
 use regex::Regex;
-use servo_base::text::{Utf8CodeUnitLength, Utf16CodeUnitLength};
+use servo_base::text::{Utf8CodeUnits, Utf16CodeUnits};
 use style::Atom;
 use style::str::HTML_SPACE_CHARACTERS;
+use zeroize::Zeroize;
 
-use crate::script_runtime::JSContext as SafeJSContext;
 use crate::trace::RootedTraceableBox;
 
 const ASCII_END: u8 = 0x7E;
@@ -93,15 +94,19 @@ impl EncodedBytes<'_> {
     }
 }
 
+#[derive(Zeroize)]
 enum DOMStringType {
     /// A simple rust string
     Rust(String),
     /// A JS String stored in mozjs.
+    #[zeroize(skip)]
     JSString(RootedTraceableBox<Heap<*mut JSString>>),
     #[cfg(test)]
     /// This is used for testing of the bindings to give
     /// a raw u8 Latin1 encoded string without having a js engine.
     Latin1Vec(Vec<u8>),
+    #[zeroize(skip)] // static strings will never have secrets.
+    RustStatic(&'static str),
 }
 
 impl Default for DOMStringType {
@@ -112,8 +117,8 @@ impl Default for DOMStringType {
 
 impl DOMStringType {
     /// Warning:
-    /// This function does not checking and just returns the raw bytes of the string,
-    /// independently if they are  utf8 or latin1.
+    /// This function does not check and just returns the raw bytes of the string,
+    /// whether they are utf8 or latin1.
     /// The caller needs to take care that these make sense in context.
     fn as_raw_bytes(&self) -> &[u8] {
         match self {
@@ -123,17 +128,17 @@ impl DOMStringType {
             },
             #[cfg(test)]
             DOMStringType::Latin1Vec(items) => items,
+            DOMStringType::RustStatic(s) => s.as_bytes(),
         }
     }
 
     fn ensure_rust_string(&mut self) -> &mut String {
         let new_string = match self {
             DOMStringType::Rust(string) => return string,
-            DOMStringType::JSString(rooted_traceable_box) => unsafe {
-                jsstr_to_string(
-                    Runtime::get().expect("JS runtime has shut down").as_ptr(),
-                    NonNull::new(rooted_traceable_box.get()).unwrap(),
-                )
+            DOMStringType::JSString(rooted_traceable_box) => {
+                let cx = unsafe { JSContext::get_from_thread() };
+                let cx = cx.as_ref().expect("JS runtime has shut down");
+                unsafe { jsstr_to_string(cx, NonNull::new(rooted_traceable_box.get()).unwrap()) }
             },
             #[cfg(test)]
             DOMStringType::Latin1Vec(items) => {
@@ -146,6 +151,8 @@ impl DOMStringType {
                 // buffer is the size specified in the documentation, so this should be safe.
                 unsafe { String::from_utf8_unchecked(v) }
             },
+            // Currently because we return a `&mut String` we need to own the string.
+            DOMStringType::RustStatic(s) => s.to_owned(),
         };
         *self = DOMStringType::Rust(new_string);
         self.ensure_rust_string()
@@ -222,6 +229,7 @@ unsafe impl Trace for DOMStringType {
                 DOMStringType::JSString(rooted_traceable_box) => rooted_traceable_box.trace(tracer),
                 #[cfg(test)]
                 DOMStringType::Latin1Vec(_s) => {},
+                DOMStringType::RustStatic(_) => {},
             }
         }
     }
@@ -237,6 +245,7 @@ impl malloc_size_of::MallocSizeOf for DOMStringType {
             },
             #[cfg(test)]
             DOMStringType::Latin1Vec(s) => s.size_of(ops),
+            DOMStringType::RustStatic(_s) => 0,
         }
     }
 }
@@ -250,6 +259,10 @@ impl std::fmt::Debug for DOMStringType {
             DOMStringType::Latin1Vec(s) => f
                 .debug_struct("DOMString")
                 .field("latin1_string", s)
+                .finish(),
+            DOMStringType::RustStatic(s) => f
+                .debug_struct("DOMString")
+                .field("static_string", s)
                 .finish(),
         }
     }
@@ -273,7 +286,7 @@ impl std::fmt::Debug for DOMStringType {
 ///
 /// The hypothesis is that it does not matter much how exactly those values are
 /// transformed, because  passing unpaired surrogates into the DOM is very rare.
-/// Instead Servo withh replace the unpaired surrogate by a U+FFFD replacement
+/// Instead Servo will replace the unpaired surrogate by a U+FFFD replacement
 /// character.
 ///
 /// Currently, the lack of crash reports about this issue provides some
@@ -313,10 +326,10 @@ impl DOMString {
     /// Creates the string from js. If the string can be encoded in latin1, just take the reference
     /// to the JSString. Otherwise do the conversion to utf8 now.
     pub fn from_js_string(
-        cx: SafeJSContext,
-        value: js::gc::HandleValue,
+        cx: &mut JSContext,
+        value: HandleValue,
     ) -> Result<DOMString, DOMStringErrorType> {
-        let string_ptr = unsafe { js::rust::ToString(*cx, value) };
+        let string_ptr = unsafe { js::rust::ToString(cx, value) };
         if string_ptr.is_null() {
             debug!("ToString failed");
             Err(DOMStringErrorType::JSConversionError)
@@ -328,11 +341,16 @@ impl DOMString {
             } else {
                 // We need to convert the string anyway as it is not just latin1
                 DOMStringType::Rust(unsafe {
-                    jsstr_to_string(*cx, ptr::NonNull::new(string_ptr).unwrap())
+                    jsstr_to_string(cx, NonNull::new(string_ptr).unwrap())
                 })
             };
             Ok(DOMString(RefCell::new(inner)))
         }
+    }
+
+    /// Creates a DOMString from a `&'static str` reference. More efficient than allocating the string.
+    pub fn from_static(s: &'static str) -> DOMString {
+        DOMString(RefCell::new(DOMStringType::RustStatic(s)))
     }
 
     /// Transforms the internal storage of this [`DOMString`] into a Rust string if it is not
@@ -344,20 +362,18 @@ impl DOMString {
 
     /// Debug the current  state of the string without modifying it.
     #[expect(unused)]
-    fn debug_js(&self) {
+    fn debug_js(&self, cx: &JSContext) {
         match *self.0.borrow() {
             DOMStringType::Rust(ref s) => info!("Rust String ({})", s),
             DOMStringType::JSString(ref rooted_traceable_box) => {
                 let s = unsafe {
-                    jsstr_to_string(
-                        Runtime::get().expect("JS runtime has shut down").as_ptr(),
-                        ptr::NonNull::new(rooted_traceable_box.get()).unwrap(),
-                    )
+                    jsstr_to_string(cx, NonNull::new(rooted_traceable_box.get()).unwrap())
                 };
                 info!("JSString ({})", s);
             },
             #[cfg(test)]
             DOMStringType::Latin1Vec(ref items) => info!("Latin1 string"),
+            DOMStringType::RustStatic(s) => info!("Static Rust String ({})", s),
         }
     }
 
@@ -382,10 +398,16 @@ impl DOMString {
     pub fn encoded_bytes(&self) -> EncodedBytes<'_> {
         let inner = self.0.borrow();
         match &*inner {
-            DOMStringType::Rust(..) => {
+            DOMStringType::Rust(..) | DOMStringType::RustStatic(..) => {
                 EncodedBytes::Utf8(Ref::map(inner, |inner| inner.as_raw_bytes()))
             },
-            _ => EncodedBytes::Latin1(Ref::map(inner, |inner| inner.as_raw_bytes())),
+            DOMStringType::JSString(..) => {
+                EncodedBytes::Latin1(Ref::map(inner, |inner| inner.as_raw_bytes()))
+            },
+            #[cfg(test)]
+            DOMStringType::Latin1Vec(..) => {
+                EncodedBytes::Latin1(Ref::map(inner, |inner| inner.as_raw_bytes()))
+            },
         }
     }
 
@@ -412,22 +434,24 @@ impl DOMString {
 
     /// The length of this string in UTF-8 code units, each one being one byte in size.
     /// This method is the same as [`DOMString::len`], but the result is wrapped in a
-    /// `Utf8CodeUnitLength` to be used in code that mixes different kinds of offsets.
+    /// `Utf8CodeUnits` to be used in code that mixes different kinds of offsets.
     ///
     /// Note: This is different than the number of Unicode characters (or code points). A
     /// character may require multiple UTF-8 code units.
-    pub fn len_utf8(&self) -> Utf8CodeUnitLength {
-        Utf8CodeUnitLength(self.len())
+    pub fn len_utf8(&self) -> Utf8CodeUnits {
+        Utf8CodeUnits(self.len())
     }
 
     /// The length of this string in UTF-16 code units, each one being one two bytes in size.
     ///
     /// Note: This is different than the number of Unicode characters (or code points). A
     /// character may require multiple UTF-16 code units.
-    pub fn len_utf16(&self) -> Utf16CodeUnitLength {
-        Utf16CodeUnitLength(self.str().chars().map(char::len_utf16).sum())
+    pub fn len_utf16(&self) -> Utf16CodeUnits {
+        Utf16CodeUnits(self.str().chars().map(char::len_utf16).sum())
     }
 
+    /// This works the same as `make_ascii_lowercase` on std::string. This means that any character in [A-Z]
+    /// will be transformed to lower case but other characters stay the same (either ASCII or not ASCII).
     pub fn make_ascii_lowercase(&mut self) {
         self.0
             .borrow_mut()
@@ -442,6 +466,7 @@ impl DOMString {
             .push_str(string_to_push);
     }
 
+    /// <https://infra.spec.whatwg.org/#strip-leading-and-trailing-ascii-whitespace>
     pub fn strip_leading_and_trailing_ascii_whitespace(&mut self) {
         if self.is_empty() {
             return;
@@ -463,14 +488,14 @@ impl DOMString {
         string.replace_range(0..first_non_whitespace, "");
     }
 
-    /// This is a dom spec
+    /// <https://html.spec.whatwg.org/multipage/#valid-floating-point-number>
     pub fn is_valid_floating_point_number_string(&self) -> bool {
         static RE: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"^-?(?:\d+\.\d+|\d+|\.\d+)(?:(e|E)(\+|\-)?\d+)?$").unwrap()
         });
 
-        RE.is_match(self.0.borrow_mut().ensure_rust_string())
-            && self.parse_floating_point_number().is_some()
+        RE.is_match(self.0.borrow_mut().ensure_rust_string()) &&
+            self.parse_floating_point_number().is_some()
     }
 
     pub fn parse<T: FromStr>(&self) -> Result<T, <T as FromStr>::Err> {
@@ -541,8 +566,26 @@ impl DOMString {
         self.str().starts_with(needle)
     }
 
+    pub fn ends_with_str(&self, needle: &str) -> bool {
+        self.str().ends_with(needle)
+    }
+
     pub fn contains(&self, needle: &str) -> bool {
         self.str().contains(needle)
+    }
+
+    /// Returns whether this [`DOMString`] is an ASCII case-insensitive match for `other`,
+    /// without allocating and copying temporaries.
+    ///
+    /// <https://infra.spec.whatwg.org/#ascii-case-insensitive>
+    pub fn eq_ignore_ascii_case(&self, other: &str) -> bool {
+        if other.is_ascii() {
+            self.encoded_bytes()
+                .bytes()
+                .eq_ignore_ascii_case(other.as_bytes())
+        } else {
+            self.str().eq_ignore_ascii_case(other)
+        }
     }
 
     pub fn to_ascii_lowercase(&self) -> String {
@@ -569,7 +612,7 @@ impl DOMString {
                 }
             },
             EncodedBytes::Utf8(bytes) => unsafe {
-                // Save because we know it was a utf8 string
+                // Safe because we know it was a utf8 string
                 Some(str::from_utf8_unchecked(&bytes).to_ascii_lowercase())
             },
         };
@@ -680,6 +723,43 @@ impl DOMString {
         };
         callback(self.str().deref())
     }
+
+    /// Newline replacement routine as described in step 1 of the multipart/form-data
+    /// encoding algorithm and many steps of application/x-www-form-urlencoded.
+    /// e.g. <https://html.spec.whatwg.org/multipage/#convert-to-a-list-of-name-value-pairs>
+    ///
+    /// Replace every occurrence of U+000D (CR) not followed by U+000A (LF),
+    /// and every occurrence of U+000A (LF) not preceded by U+000D (CR), in entry's name,
+    /// by a string consisting of a U+000D (CR) and U+000A (LF).
+    pub fn normalize_crlf(&self) -> String {
+        let s = self.str();
+        let mut buf = String::new();
+        let mut prev = ' ';
+        for ch in s.chars() {
+            match ch {
+                '\n' if prev != '\r' => {
+                    buf.push('\r');
+                    buf.push('\n');
+                },
+                '\n' => {
+                    buf.push('\n');
+                },
+                // This character isn't LF but is
+                // preceded by CR
+                _ if prev == '\r' => {
+                    buf.push('\n');
+                    buf.push(ch);
+                },
+                _ => buf.push(ch),
+            };
+            prev = ch;
+        }
+        // In case the last character was CR
+        if prev == '\r' {
+            buf.push('\n');
+        }
+        buf
+    }
 }
 
 /// <https://html.spec.whatwg.org/multipage/#rules-for-parsing-floating-point-number-values>
@@ -726,12 +806,10 @@ impl Extend<char> for DOMString {
 }
 
 impl ToJSValConvertible for DOMString {
-    unsafe fn to_jsval(&self, cx: *mut JSContext, mut rval: MutableHandleValue) {
+    fn to_jsval(&self, cx: &mut JSContext, mut rval: MutableHandleValue) {
         let val = self.0.borrow();
         match *val {
-            DOMStringType::Rust(ref s) => unsafe {
-                s.to_jsval(cx, rval);
-            },
+            DOMStringType::Rust(ref s) => s.to_jsval(cx, rval),
             DOMStringType::JSString(ref rooted_traceable_box) => unsafe {
                 rval.set(StringValue(&*rooted_traceable_box.get()));
             },
@@ -746,6 +824,7 @@ impl ToJSValConvertible for DOMString {
                     .expect("Error in constructin test string")
                     .to_jsval(cx, rval);
             },
+            DOMStringType::RustStatic(s) => s.to_jsval(cx, rval),
         };
     }
 }
@@ -832,6 +911,7 @@ impl From<std::string::String> for DOMString {
     }
 }
 
+/// If you have a static str use the provided `DOMString::from_static`.
 impl From<&str> for DOMString {
     fn from(string: &str) -> Self {
         String::from(string).into()
@@ -864,19 +944,41 @@ impl From<DOMString> for Atom {
 
 impl From<DOMString> for String {
     fn from(val: DOMString) -> Self {
-        val.str().to_owned()
+        val.ensure_rust_string();
+        let inner = val.0.take();
+        match inner {
+            DOMStringType::Rust(s) => s,
+            DOMStringType::JSString(_) => unreachable!(),
+            #[cfg(test)]
+            DOMStringType::Latin1Vec(items) => String::from_utf8(items).expect("Not valid latin1"),
+            DOMStringType::RustStatic(s) => s.to_owned(),
+        }
     }
 }
 
 impl From<DOMString> for Vec<u8> {
     fn from(value: DOMString) -> Self {
-        value.str().as_bytes().to_vec()
+        value.ensure_rust_string();
+        let inner = value.0.take();
+        match inner {
+            DOMStringType::Rust(s) => s.into_bytes(),
+            DOMStringType::JSString(_) => unreachable!(),
+            #[cfg(test)]
+            DOMStringType::Latin1Vec(items) => items,
+            DOMStringType::RustStatic(_) => unreachable!(),
+        }
     }
 }
 
 impl From<Cow<'_, str>> for DOMString {
     fn from(value: Cow<'_, str>) -> Self {
         DOMString(RefCell::new(DOMStringType::Rust(value.into_owned())))
+    }
+}
+
+impl Zeroize for DOMString {
+    fn zeroize(&mut self) {
+        self.0.get_mut().zeroize();
     }
 }
 
@@ -913,6 +1015,9 @@ macro_rules! match_domstring_ascii_inner {
 /// );
 /// assert_eq!(value, 3);
 /// ```
+///
+/// The `RefCell` inside `DOMString` is borrowed for the duration of the `match`,
+/// so the string cannot be accessed again inside a `match` arm.
 #[macro_export]
 macro_rules! match_domstring_ascii {
     ($input:expr, $($tail:tt)*) => {
@@ -1050,8 +1155,10 @@ mod tests {
         let s = from_latin1(vec![b'a', b'b', b'c', b'%', b'$']);
         let string = String::from("abc%$");
         let s2 = DOMString::from(string.clone());
+        let s3 = DOMString::from_static("abc%$");
         assert_eq!(s, s2);
         assert_eq!(s, string);
+        assert_eq!(s, s3);
     }
 
     #[test]
@@ -1093,13 +1200,16 @@ mod tests {
         let s_converted = from_latin1(vec![b'a', b'b', b'c', b'%', b'$', 0xB2]);
         s_converted.ensure_rust_string();
         let s2 = DOMString::from("abc%$²");
+        let s3 = DOMString::from_static("abc%$²");
 
         let hash_s = hash_value(&s);
         let hash_s_converted = hash_value(&s_converted);
         let hash_s2 = hash_value(&s2);
+        let hash_s3 = hash_value(&s3);
 
         assert_eq!(hash_s, hash_s2);
         assert_eq!(hash_s, hash_s_converted);
+        assert_eq!(hash_s, hash_s3);
     }
 
     // Testing match_lazydomstring if it executes the statements in the match correctly
@@ -1153,6 +1263,14 @@ mod tests {
             let s = from_latin1(vec![b'a', b'b', b'c']);
             match_domstring_ascii!( s,
                 "abcdd" => assert!(false),
+                "bcd" => assert!(false),
+                _ => (),
+            );
+        }
+        {
+            let s = DOMString::from_static("abc");
+            match_domstring_ascii!( s,
+                "abc" => assert!(true),
                 "bcd" => assert!(false),
                 _ => (),
             );
@@ -1220,6 +1338,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic]
     fn test_match_panic() {
         let s = DOMString::from("abcd");
@@ -1229,6 +1348,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic]
     fn test_match_panic2() {
         let s = DOMString::from("abcd");
@@ -1252,6 +1372,13 @@ mod tests {
         }
         {
             let mut s = DOMString::from("   \n  abc%$ ");
+
+            s.strip_leading_and_trailing_ascii_whitespace();
+            s.ensure_rust_string();
+            assert_eq!(&*s.str(), "abc%$");
+        }
+        {
+            let mut s = DOMString::from_static("   \n  abc%$ ");
 
             s.strip_leading_and_trailing_ascii_whitespace();
             s.ensure_rust_string();
@@ -1291,6 +1418,11 @@ mod tests {
         assert!(!s.contains_html_space_characters());
         s.ensure_rust_string();
         assert!(!s.contains_html_space_characters());
+
+        let s = DOMString::from_static("aba aaa");
+        assert!(s.contains_html_space_characters());
+        s.ensure_rust_string();
+        assert!(s.contains_html_space_characters());
     }
 
     #[test]
@@ -1303,6 +1435,12 @@ mod tests {
         let s3 = from_latin1(vec![b'a', b'a', b'a', 0xB2, b'a', b'a']);
         let atom3 = Atom::from(s3);
         assert_ne!(atom1, atom3);
+        let s3 = DOMString::from_static("aaa\u{03B1}aa");
+        let atom3 = Atom::from(s3);
+        assert_ne!(atom1, atom3);
+        let s4 = DOMString::from_static("aaa aa");
+        let atom4 = Atom::from(s4);
+        assert_eq!(atom2, atom4);
     }
 
     #[test]
@@ -1315,6 +1453,9 @@ mod tests {
         let s3 = from_latin1(vec![b'a', b'a', b'a', LATIN1_POWER2, b'a', b'a']);
         let atom3 = Namespace::from(s3);
         assert_ne!(atom1, atom3);
+        let s4 = DOMString::from_static("aaa aa");
+        let atom4 = Namespace::from(s4);
+        assert_eq!(atom2, atom4);
     }
 
     #[test]
@@ -1327,6 +1468,9 @@ mod tests {
         let s3 = from_latin1(vec![b'a', b'a', b'a', LATIN1_POWER2, b'a', b'a']);
         let atom3 = LocalName::from(s3);
         assert_ne!(atom1, atom3);
+        let s4 = DOMString::from_static("aaa aa");
+        let atom4 = LocalName::from(s4);
+        assert_eq!(atom2, atom4);
     }
 
     #[test]
@@ -1342,6 +1486,8 @@ mod tests {
         let s = DOMString::from("`aaaz");
         assert!(!s.is_ascii_lowercase());
         let s = DOMString::from("aaaz");
+        assert!(s.is_ascii_lowercase());
+        let s = DOMString::from_static("aaaz");
         assert!(s.is_ascii_lowercase());
     }
 
@@ -1383,6 +1529,8 @@ mod tests {
         assert_eq!(&*s.as_bytes(), str.as_bytes());
         let str = "AbBcC❤&%$#".to_owned();
         let s = DOMString::from(str.clone());
+        assert_eq!(&*s.as_bytes(), str.as_bytes());
+        let s = DOMString::from_static("AbBcC❤&%$#");
         assert_eq!(&*s.as_bytes(), str.as_bytes());
     }
 }

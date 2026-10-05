@@ -6,6 +6,8 @@ use std::rc::Rc;
 
 use embedder_traits::EmbedderMsg;
 use html5ever::{local_name, ns};
+use js::context::JSContext;
+use js::realm::CurrentRealm;
 use servo_config::pref;
 
 use crate::dom::bindings::codegen::Bindings::NodeBinding::GetRootNodeOptions;
@@ -28,30 +30,25 @@ use crate::dom::promise::Promise;
 use crate::dom::shadowroot::ShadowRoot;
 use crate::dom::types::HTMLDialogElement;
 use crate::messaging::{CommonScriptMsg, MainThreadScriptMsg};
-use crate::realms::{AlreadyInRealm, InRealm};
-use crate::script_runtime::{CanGc, ScriptThreadEventCategory};
-use crate::task::TaskOnce;
-use crate::task_source::TaskSourceName;
+use crate::runtime::script_runtime::ScriptThreadEventCategory;
+use crate::tasks::task::TaskOnce;
+use crate::tasks::task_source::TaskSourceName;
 
 impl Document {
     /// <https://fullscreen.spec.whatwg.org/#dom-element-requestfullscreen>
-    pub(crate) fn enter_fullscreen(&self, pending: &Element, can_gc: CanGc) -> Rc<Promise> {
+    pub(crate) fn enter_fullscreen(&self, cx: &mut CurrentRealm, pending: &Element) -> Rc<Promise> {
         // Step 1
         // > Let pendingDoc be this’s node document.
         // `Self` is the pending document.
 
         // Step 2
         // > Let promise be a new promise.
-        let in_realm_proof = AlreadyInRealm::assert::<crate::DomTypeHolder>();
-        let promise = Promise::new_in_current_realm(InRealm::Already(&in_realm_proof), can_gc);
+        let promise = Promise::new_in_realm(cx);
 
         // Step 3
         // > If pendingDoc is not fully active, then reject promise with a TypeError exception and return promise.
         if !self.is_fully_active() {
-            promise.reject_error(
-                Error::Type(c"Document is not fully active".to_owned()),
-                can_gc,
-            );
+            promise.reject_error(cx, Error::Type(c"Document is not fully active".to_owned()));
             return promise;
         }
 
@@ -152,22 +149,22 @@ impl Document {
     }
 
     /// <https://fullscreen.spec.whatwg.org/#exit-fullscreen>
-    pub(crate) fn exit_fullscreen(&self, can_gc: CanGc) -> Rc<Promise> {
+    pub(crate) fn exit_fullscreen(&self, cx: &mut JSContext) -> Rc<Promise> {
         let global = self.global();
 
         // Step 1
         // > Let promise be a new promise
-        let in_realm_proof = AlreadyInRealm::assert::<crate::DomTypeHolder>();
-        let promise = Promise::new_in_current_realm(InRealm::Already(&in_realm_proof), can_gc);
+        let mut realm = CurrentRealm::assert(cx);
+        let promise = Promise::new_in_realm(&mut realm);
 
         // Step 2
         // > If doc is not fully active or doc’s fullscreen element is null, then reject promise with a TypeError exception and return promise.
         if !self.is_fully_active() || self.fullscreen_element().is_none() {
             promise.reject_error(
+                cx,
                 Error::Type(
                     c"No fullscreen element to exit or document is not fully active".to_owned(),
                 ),
-                can_gc,
             );
             return promise;
         }
@@ -229,10 +226,10 @@ impl DocumentOrShadowRoot {
         fullscreen_element: Option<DomRoot<Element>>,
     ) -> Option<DomRoot<Element>> {
         // Step 1. If this is a shadow root and its host is not connected, then return null.
-        if let Some(shadow_root) = node.downcast::<ShadowRoot>() {
-            if !shadow_root.Host().is_connected() {
-                return None;
-            }
+        if let Some(shadow_root) = node.downcast::<ShadowRoot>() &&
+            !shadow_root.Host().is_connected()
+        {
+            return None;
         }
 
         // Step 2. Let candidate be the result of retargeting fullscreen element against this.
@@ -245,8 +242,8 @@ impl DocumentOrShadowRoot {
         // Step 3. If candidate and this are in the same tree, then return candidate.
         if *candidate
             .upcast::<Node>()
-            .GetRootNode(&GetRootNodeOptions::empty())
-            == *node
+            .GetRootNode(&GetRootNodeOptions::empty()) ==
+            *node
         {
             return Some(candidate);
         }
@@ -304,18 +301,15 @@ impl TaskOnce for ElementPerformFullscreenEnter {
         // > If error is true:
         // > - Append (fullscreenerror, this) to pendingDoc’s list of pending fullscreen events.
         // > - Reject promise with a TypeError exception and terminate these steps.
-        if self.document.root() != document
-            || !element.fullscreen_element_ready_check()
-            || self.error
+        if self.document.root() != document ||
+            !element.fullscreen_element_ready_check() ||
+            self.error
         {
             // TODO(#31866): we should queue this and fire them in update the rendering.
             document
                 .upcast::<EventTarget>()
-                .fire_event(atom!("fullscreenerror"), CanGc::from_cx(cx));
-            promise.reject_error(
-                Error::Type(c"fullscreen is not connected".to_owned()),
-                CanGc::from_cx(cx),
-            );
+                .fire_event(cx, atom!("fullscreenerror"));
+            promise.reject_error(cx, Error::Type(c"fullscreen is not connected".to_owned()));
             return;
         }
 
@@ -324,16 +318,16 @@ impl TaskOnce for ElementPerformFullscreenEnter {
         element.set_fullscreen_state(true);
         document.set_fullscreen_element(Some(&element));
         document.upcast::<EventTarget>().fire_event_with_params(
+            cx,
             atom!("fullscreenchange"),
             EventBubbles::Bubbles,
             EventCancelable::NotCancelable,
             EventComposed::Composed,
-            CanGc::from_cx(cx),
         );
 
         // Step 14.
         // > Resolve promise with undefined.
-        promise.resolve_native(&(), CanGc::from_cx(cx));
+        promise.resolve_native(cx, &());
     }
 }
 
@@ -365,15 +359,15 @@ impl TaskOnce for ElementPerformFullscreenExit {
         element.set_fullscreen_state(false);
         document.set_fullscreen_element(None);
         document.upcast::<EventTarget>().fire_event_with_params(
+            cx,
             atom!("fullscreenchange"),
             EventBubbles::Bubbles,
             EventCancelable::NotCancelable,
             EventComposed::Composed,
-            CanGc::from_cx(cx),
         );
 
         // Step 16
         // > Resolve promise with undefined.
-        self.promise.root().resolve_native(&(), CanGc::from_cx(cx));
+        self.promise.root().resolve_native(cx, &());
     }
 }

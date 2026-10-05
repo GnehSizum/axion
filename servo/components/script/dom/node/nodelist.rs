@@ -2,22 +2,23 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::Cell;
+use std::cell::RefCell;
 
 use dom_struct::dom_struct;
+use js::context::{JSContext, NoGC};
+use script_bindings::dom::UnrootedDom;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use stylo_atoms::Atom;
 
-use crate::dom::bindings::codegen::Bindings::NodeBinding::NodeMethods;
+use crate::dom::ChildrenMutation;
 use crate::dom::bindings::codegen::Bindings::NodeListBinding::NodeListMethods;
-use crate::dom::bindings::reflector::{Reflector, reflect_dom_object};
-use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
+use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::document::Document;
 use crate::dom::html::htmlelement::HTMLElement;
 use crate::dom::html::htmlformelement::HTMLFormElement;
-use crate::dom::node::{ChildrenMutation, Node};
+use crate::dom::node::Node;
 use crate::dom::window::Window;
-use crate::script_runtime::CanGc;
 
 #[derive(JSTraceable, MallocSizeOf)]
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
@@ -47,71 +48,71 @@ impl NodeList {
 
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn new(
+        cx: &mut JSContext,
         window: &Window,
         list_type: NodeListType,
-        can_gc: CanGc,
     ) -> DomRoot<NodeList> {
-        reflect_dom_object(Box::new(NodeList::new_inherited(list_type)), window, can_gc)
+        reflect_dom_object_with_cx(Box::new(NodeList::new_inherited(list_type)), window, cx)
     }
 
-    pub(crate) fn new_simple_list<T>(window: &Window, iter: T, can_gc: CanGc) -> DomRoot<NodeList>
+    pub(crate) fn new_simple_list<T>(
+        cx: &mut JSContext,
+        window: &Window,
+        iter: T,
+    ) -> DomRoot<NodeList>
     where
         T: Iterator<Item = DomRoot<Node>>,
     {
         NodeList::new(
+            cx,
             window,
             NodeListType::Simple(iter.map(|r| Dom::from_ref(&*r)).collect()),
-            can_gc,
         )
     }
 
     pub(crate) fn new_simple_list_slice(
+        cx: &mut JSContext,
         window: &Window,
         slice: &[&Node],
-        can_gc: CanGc,
     ) -> DomRoot<NodeList> {
         NodeList::new(
+            cx,
             window,
             NodeListType::Simple(slice.iter().map(|r| Dom::from_ref(*r)).collect()),
-            can_gc,
         )
     }
 
-    pub(crate) fn new_child_list(window: &Window, node: &Node, can_gc: CanGc) -> DomRoot<NodeList> {
-        NodeList::new(
-            window,
-            NodeListType::Children(ChildrenList::new(node)),
-            can_gc,
-        )
+    pub(crate) fn new_child_list(
+        cx: &mut JSContext,
+        window: &Window,
+        node: &Node,
+    ) -> DomRoot<NodeList> {
+        NodeList::new(cx, window, NodeListType::Children(ChildrenList::new(node)))
     }
 
     pub(crate) fn new_labels_list(
+        cx: &mut JSContext,
         window: &Window,
         element: &HTMLElement,
-        can_gc: CanGc,
     ) -> DomRoot<NodeList> {
-        NodeList::new(
-            window,
-            NodeListType::Labels(LabelsList::new(element)),
-            can_gc,
-        )
+        NodeList::new(cx, window, NodeListType::Labels(LabelsList::new(element)))
     }
 
     pub(crate) fn new_elements_by_name_list(
+        cx: &mut JSContext,
         window: &Window,
         document: &Document,
         name: DOMString,
-        can_gc: CanGc,
     ) -> DomRoot<NodeList> {
         NodeList::new(
+            cx,
             window,
             NodeListType::ElementsByName(ElementsByNameList::new(document, name)),
-            can_gc,
         )
     }
 
-    pub(crate) fn empty(window: &Window, can_gc: CanGc) -> DomRoot<NodeList> {
-        NodeList::new(window, NodeListType::Simple(vec![]), can_gc)
+    pub(crate) fn empty(cx: &mut JSContext, window: &Window) -> DomRoot<NodeList> {
+        NodeList::new(cx, window, NodeListType::Simple(vec![]))
     }
 }
 
@@ -128,21 +129,14 @@ impl NodeListMethods<crate::DomTypeHolder> for NodeList {
     }
 
     /// <https://dom.spec.whatwg.org/#dom-nodelist-item>
-    fn Item(&self, index: u32) -> Option<DomRoot<Node>> {
-        match self.list_type {
-            NodeListType::Simple(ref elems) => elems
-                .get(index as usize)
-                .map(|node| DomRoot::from_ref(&**node)),
-            NodeListType::Children(ref list) => list.item(index),
-            NodeListType::Labels(ref list) => list.item(index),
-            NodeListType::Radio(ref list) => list.item(index),
-            NodeListType::ElementsByName(ref list) => list.item(index),
-        }
+    fn Item(&self, no_gc: &NoGC, index: u32) -> Option<DomRoot<Node>> {
+        self.item_unrooted(no_gc, index)
+            .map(|item| item.as_rooted())
     }
 
     /// <https://dom.spec.whatwg.org/#dom-nodelist-item>
-    fn IndexedGetter(&self, index: u32) -> Option<DomRoot<Node>> {
-        self.Item(index)
+    fn IndexedGetter(&self, no_gc: &NoGC, index: u32) -> Option<DomRoot<Node>> {
+        self.Item(no_gc, index)
     }
 }
 
@@ -155,19 +149,30 @@ impl NodeList {
         }
     }
 
-    pub(crate) fn as_radio_list(&self) -> &RadioList {
-        if let NodeListType::Radio(ref list) = self.list_type {
-            list
-        } else {
-            panic!("called as_radio_list() on a non-radio node list")
+    pub(crate) fn item_unrooted<'a>(
+        &self,
+        no_gc: &'a NoGC,
+        index: u32,
+    ) -> Option<UnrootedDom<'a, Node>> {
+        match self.list_type {
+            NodeListType::Simple(ref elems) => elems
+                .get(index as usize)
+                .map(|node| UnrootedDom::from_dom(node.clone(), no_gc)),
+            NodeListType::Children(ref list) => list.item(no_gc, index),
+            NodeListType::Labels(ref list) => list.item(no_gc, index),
+            NodeListType::Radio(ref list) => list.item(no_gc, index),
+            NodeListType::ElementsByName(ref list) => list.item(no_gc, index),
         }
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = DomRoot<Node>> + '_ {
+    pub(crate) fn iter<'a>(
+        &'a self,
+        no_gc: &'a NoGC,
+    ) -> impl Iterator<Item = UnrootedDom<'a, Node>> {
         let len = self.Length();
         // There is room for optimization here in non-simple cases,
         // as calling Item repeatedly on a live list can involve redundant work.
-        (0..len).flat_map(move |i| self.Item(i))
+        (0..len).flat_map(move |i| self.item_unrooted(no_gc, i))
     }
 }
 
@@ -175,17 +180,14 @@ impl NodeList {
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 pub(crate) struct ChildrenList {
     node: Dom<Node>,
-    last_visited: MutNullableDom<Node>,
-    last_index: Cell<u32>,
+    cached_children: RefCell<Option<Vec<Dom<Node>>>>,
 }
 
 impl ChildrenList {
     pub(crate) fn new(node: &Node) -> ChildrenList {
-        let last_visited = node.GetFirstChild();
         ChildrenList {
             node: Dom::from_ref(node),
-            last_visited: MutNullableDom::new(last_visited.as_deref()),
-            last_index: Cell::new(0u32),
+            cached_children: RefCell::new(None),
         }
     }
 
@@ -193,182 +195,28 @@ impl ChildrenList {
         self.node.children_count()
     }
 
-    pub(crate) fn item(&self, index: u32) -> Option<DomRoot<Node>> {
-        // This always start traversing the children from the closest element
-        // among parent's first and last children and the last visited one.
-        let len = self.len();
-        if index >= len {
-            return None;
-        }
-        if index == 0u32 {
-            // Item is first child if any, not worth updating last visited.
-            return self.node.GetFirstChild();
-        }
-        let last_index = self.last_index.get();
-        if index == last_index {
-            // Item is last visited child, no need to update last visited.
-            return Some(self.last_visited.get().unwrap());
-        }
-        let last_visited = if index - 1u32 == last_index {
-            // Item is last visited's next sibling.
-            self.last_visited.get().unwrap().GetNextSibling().unwrap()
-        } else if last_index > 0 && index == last_index - 1u32 {
-            // Item is last visited's previous sibling.
-            self.last_visited
-                .get()
-                .unwrap()
-                .GetPreviousSibling()
-                .unwrap()
-        } else if index > last_index {
-            if index == len - 1u32 {
-                // Item is parent's last child, not worth updating last visited.
-                return Some(self.node.GetLastChild().unwrap());
-            }
-            if index <= last_index + (len - last_index) / 2u32 {
-                // Item is closer to the last visited child and follows it.
-                self.last_visited
-                    .get()
-                    .unwrap()
-                    .inclusively_following_siblings()
-                    .nth((index - last_index) as usize)
-                    .unwrap()
-            } else {
-                // Item is closer to parent's last child and obviously
-                // precedes it.
+    pub(crate) fn item<'a>(&self, no_gc: &'a NoGC, index: u32) -> Option<UnrootedDom<'a, Node>> {
+        self.cached_children
+            .borrow_mut()
+            .get_or_insert_with(|| {
                 self.node
-                    .GetLastChild()
-                    .unwrap()
-                    .inclusively_preceding_siblings()
-                    .nth((len - index - 1u32) as usize)
-                    .unwrap()
-            }
-        } else if index >= last_index / 2u32 {
-            // Item is closer to the last visited child and precedes it.
-            self.last_visited
-                .get()
-                .unwrap()
-                .inclusively_preceding_siblings()
-                .nth((last_index - index) as usize)
-                .unwrap()
-        } else {
-            // Item is closer to parent's first child and obviously follows it.
-            debug_assert!(index < last_index / 2u32);
-            self.node
-                .GetFirstChild()
-                .unwrap()
-                .inclusively_following_siblings()
-                .nth(index as usize)
-                .unwrap()
-        };
-        self.last_visited.set(Some(&last_visited));
-        self.last_index.set(index);
-        Some(last_visited)
+                    .children_unrooted(no_gc)
+                    .map(|child| (*child).clone())
+                    .collect()
+            })
+            .get(index as usize)
+            .map(|child| UnrootedDom::from_dom(child.clone(), no_gc))
     }
 
     pub(crate) fn children_changed(&self, mutation: &ChildrenMutation) {
-        fn prepend(list: &ChildrenList, added: &[&Node], next: &Node) {
-            let len = added.len() as u32;
-            if len == 0u32 {
-                return;
-            }
-            let index = list.last_index.get();
-            if index < len {
-                list.last_visited.set(Some(added[index as usize]));
-            } else if index / 2u32 >= len {
-                // If last index is twice as large as the number of added nodes,
-                // updating only it means that less nodes will be traversed if
-                // caller is traversing the node list linearly.
-                list.last_index.set(len + index);
-            } else {
-                // If last index is not twice as large but still larger,
-                // it's better to update it to the number of added nodes.
-                list.last_visited.set(Some(next));
-                list.last_index.set(len);
-            }
-        }
-
-        fn replace(
-            list: &ChildrenList,
-            prev: Option<&Node>,
-            removed: &Node,
-            added: &[&Node],
-            next: Option<&Node>,
-        ) {
-            let index = list.last_index.get();
-            if removed == &*list.last_visited.get().unwrap() {
-                let visited = match (prev, added, next) {
-                    (None, _, None) => {
-                        // Such cases where parent had only one child should
-                        // have been changed into ChildrenMutation::ReplaceAll
-                        // by ChildrenMutation::replace().
-                        unreachable!()
-                    },
-                    (_, added, _) if !added.is_empty() => added[0],
-                    (_, _, Some(next)) => next,
-                    (Some(prev), _, None) => {
-                        list.last_index.set(index - 1u32);
-                        prev
-                    },
-                };
-                list.last_visited.set(Some(visited));
-            } else if added.len() != 1 {
-                // The replaced child isn't the last visited one, and there are
-                // 0 or more than 1 nodes to replace it. Special care must be
-                // given to update the state of that ChildrenList.
-                match (prev, next) {
-                    (Some(_), None) => {},
-                    (None, Some(next)) => {
-                        list.last_index.set(index - 1);
-                        prepend(list, added, next);
-                    },
-                    (Some(_), Some(_)) => {
-                        list.reset();
-                    },
-                    (None, None) => unreachable!(),
-                }
-            }
-        }
-
-        match *mutation {
-            ChildrenMutation::Append { .. } => {},
-            ChildrenMutation::Insert { .. } => {
-                self.reset();
-            },
-            ChildrenMutation::Prepend { added, next } => {
-                prepend(self, added, next);
-            },
-            ChildrenMutation::Replace {
-                prev,
-                removed,
-                added,
-                next,
-            } => {
-                replace(self, prev, removed, added, next);
-            },
-            ChildrenMutation::ReplaceAll { added, .. } => {
-                let len = added.len();
-                let index = self.last_index.get();
-                if len == 0 {
-                    self.last_visited.set(None);
-                    self.last_index.set(0u32);
-                } else if index < len as u32 {
-                    self.last_visited.set(Some(added[index as usize]));
-                } else {
-                    // Setting last visited to parent's last child serves no purpose,
-                    // so the middle is arbitrarily chosen here in case the caller
-                    // wants random access.
-                    let middle = len / 2;
-                    self.last_visited.set(Some(added[middle]));
-                    self.last_index.set(middle as u32);
-                }
-            },
+        match mutation {
+            ChildrenMutation::Append { .. } |
+            ChildrenMutation::Insert { .. } |
+            ChildrenMutation::Prepend { .. } |
+            ChildrenMutation::Replace { .. } |
+            ChildrenMutation::ReplaceAll { .. } => *self.cached_children.borrow_mut() = None,
             ChildrenMutation::ChangeText => {},
         }
-    }
-
-    fn reset(&self) {
-        self.last_visited.set(self.node.GetFirstChild().as_deref());
-        self.last_index.set(0u32);
     }
 }
 
@@ -397,8 +245,8 @@ impl LabelsList {
         self.element.labels_count()
     }
 
-    pub(crate) fn item(&self, index: u32) -> Option<DomRoot<Node>> {
-        self.element.label_at(index)
+    pub(crate) fn item<'a>(&self, no_gc: &'a NoGC, index: u32) -> Option<UnrootedDom<'a, Node>> {
+        self.element.label_at(no_gc, index)
     }
 }
 
@@ -435,8 +283,9 @@ impl RadioList {
         self.form.count_for_radio_list(self.mode, &self.name)
     }
 
-    pub(crate) fn item(&self, index: u32) -> Option<DomRoot<Node>> {
-        self.form.nth_for_radio_list(index, self.mode, &self.name)
+    pub(crate) fn item<'a>(&self, no_gc: &'a NoGC, index: u32) -> Option<UnrootedDom<'a, Node>> {
+        self.form
+            .nth_for_radio_list(no_gc, index, self.mode, &self.name)
     }
 }
 
@@ -459,9 +308,7 @@ impl ElementsByNameList {
         self.document.elements_by_name_count(&self.name)
     }
 
-    pub(crate) fn item(&self, index: u32) -> Option<DomRoot<Node>> {
-        self.document
-            .nth_element_by_name(index, &self.name)
-            .map(|n| DomRoot::from_ref(&*n))
+    pub(crate) fn item<'a>(&self, no_gc: &'a NoGC, index: u32) -> Option<UnrootedDom<'a, Node>> {
+        self.document.nth_element_by_name(no_gc, index, &self.name)
     }
 }

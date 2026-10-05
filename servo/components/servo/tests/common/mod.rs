@@ -12,9 +12,9 @@ use dpi::PhysicalSize;
 use embedder_traits::EventLoopWaker;
 use paint_api::rendering_context::{RenderingContext, SoftwareRenderingContext};
 use servo::{
-    EmbedderControl, InputEvent, JSValue, JavaScriptEvaluationError, LoadStatus, MouseButton,
-    MouseButtonAction, MouseButtonEvent, MouseMoveEvent, Preferences, Servo, ServoBuilder,
-    SimpleDialog, WebView, WebViewDelegate,
+    ConsoleLogLevel, EmbedderControl, InputEvent, JSValue, JavaScriptEvaluationError, LoadStatus,
+    MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, Preferences, Servo,
+    ServoBuilder, SimpleDialog, WebView, WebViewDelegate,
 };
 use webrender_api::units::DevicePoint;
 
@@ -74,9 +74,7 @@ impl ServoTest {
         &self.servo
     }
 
-    /// Spin the Servo event loop until one of:
-    ///  - The given callback returns `Ok(false)`.
-    ///  - The given callback returns an `Error`, in which case the `Error` will be returned.
+    /// Spin the Servo event loop until the provided callback returns `false`.
     pub fn spin(&self, callback: impl Fn() -> bool + 'static) {
         while callback() {
             self.servo.spin_event_loop();
@@ -96,6 +94,9 @@ pub(crate) struct WebViewDelegateImpl {
     pub(crate) number_of_controls_shown: Cell<usize>,
     pub(crate) number_of_controls_hidden: Cell<usize>,
     pub(crate) last_accesskit_tree_updates: RefCell<Vec<accesskit::TreeUpdate>>,
+    pub(crate) console_messages: RefCell<Vec<(ConsoleLogLevel, String)>>,
+    pub(crate) fullscreen: Cell<bool>,
+    pub(crate) crashes: Cell<usize>,
 }
 
 #[allow(dead_code)] // Used by some tests and not others
@@ -108,6 +109,9 @@ impl WebViewDelegateImpl {
         self.number_of_controls_shown.set(0);
         self.number_of_controls_hidden.set(0);
         self.last_accesskit_tree_updates.borrow_mut().clear();
+        self.console_messages.borrow_mut().clear();
+        self.fullscreen.set(false);
+        self.crashes.set(0);
     }
 }
 
@@ -159,6 +163,18 @@ impl WebViewDelegate for WebViewDelegateImpl {
             .borrow_mut()
             .push(tree_update);
     }
+
+    fn show_console_message(&self, _webview: WebView, level: ConsoleLogLevel, message: String) {
+        self.console_messages.borrow_mut().push((level, message));
+    }
+
+    fn notify_fullscreen_state_changed(&self, _webview: WebView, fullscreen: bool) {
+        self.fullscreen.set(fullscreen);
+    }
+
+    fn notify_crashed(&self, _webview: WebView, _reason: String, _backtrace: Option<String>) {
+        self.crashes.set(self.crashes.get() + 1);
+    }
 }
 
 // Used by some unit tests only. Since they compile into different binaries,
@@ -169,12 +185,12 @@ pub(crate) fn click_at_point(webview: &WebView, point: DevicePoint) {
     webview.notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(point)));
     webview.notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
         MouseButtonAction::Down,
-        MouseButton::Left,
+        MouseButton::Primary,
         point,
     )));
     webview.notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
         MouseButtonAction::Up,
-        MouseButton::Left,
+        MouseButton::Primary,
         point,
     )));
 }
@@ -231,4 +247,20 @@ pub(crate) fn show_webview_and_wait_for_rendering_to_be_ready(
     // Wait for at least one frame after the load completes.
     let captured_delegate = delegate.clone();
     servo_test.spin(move || !captured_delegate.new_frame_ready.get());
+}
+
+/// Wait for the WebRender scene to reflect the current state of the WebView
+/// by triggering a screenshot, waiting for it to be ready, and then throwing
+/// away the results.
+// Used by some unit tests only. Since they compile into different binaries,
+// it will be flagged as unused for certain unit tests.
+#[allow(dead_code)]
+pub fn wait_for_webview_scene_to_be_up_to_date(servo_test: &ServoTest, webview: &WebView) {
+    let waiting = Rc::new(Cell::new(true));
+    let callback_waiting = waiting.clone();
+    webview.take_screenshot(None, move |result| {
+        assert!(result.is_ok());
+        callback_waiting.set(false);
+    });
+    servo_test.spin(move || waiting.get());
 }

@@ -7,8 +7,8 @@ use std::f32::consts::PI;
 use euclid::default::Vector3D;
 use malloc_size_of_derive::MallocSizeOf;
 
+use crate::audio_node::{AudioNodeEngine, AudioNodeMessage, AudioNodeType, BlockInfo, ChannelInfo};
 use crate::block::{Block, Chunk, FRAMES_PER_BLOCK, Tick};
-use crate::node::{AudioNodeEngine, AudioNodeMessage, AudioNodeType, BlockInfo, ChannelInfo};
 use crate::param::{Param, ParamDir, ParamType};
 
 // .normalize(), but it takes into account zero vectors
@@ -206,8 +206,8 @@ impl PannerNode {
             self.orientation_z.value(),
         );
 
-        if source_orientation == Vector3D::zero()
-            || (self.cone_inner_angle == 360. && self.cone_outer_angle == 360.)
+        if source_orientation == Vector3D::zero() ||
+            (self.cone_inner_angle == 360. && self.cone_outer_angle == 360.)
         {
             return 0.;
         }

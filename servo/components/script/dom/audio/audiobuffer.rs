@@ -5,25 +5,24 @@
 use std::cmp::min;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use js::rust::{CustomAutoRooterGuard, HandleObject};
 use js::typedarray::{Float32, Float32Array, HeapFloat32Array};
+use script_bindings::cell::{DomRefCell, Ref};
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use script_bindings::trace::RootedTraceableBox;
 use servo_media::audio::buffer_source_node::AudioBuffer as ServoMediaAudioBuffer;
 
 use crate::dom::audio::audionode::MAX_CHANNEL_COUNT;
 use crate::dom::bindings::buffer_source::HeapBufferSource;
-use crate::dom::bindings::cell::{DomRefCell, Ref};
 use crate::dom::bindings::codegen::Bindings::AudioBufferBinding::{
     AudioBufferMethods, AudioBufferOptions,
 };
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::num::Finite;
-use crate::dom::bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use crate::dom::bindings::root::DomRoot;
-use crate::dom::globalscope::GlobalScope;
 use crate::dom::window::Window;
-use crate::realms::enter_realm;
-use crate::script_runtime::{CanGc, JSContext};
+use crate::realms::enter_auto_realm;
 
 // Spec mandates at least [8000, 96000], we use [8000, 192000] to match Firefox
 // https://webaudio.github.io/web-audio-api/#dom-baseaudiocontext-createbuffer
@@ -60,6 +59,7 @@ pub(crate) struct AudioBuffer {
 }
 
 impl AudioBuffer {
+    #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn new_inherited(
         number_of_channels: u32,
         length: u32,
@@ -80,36 +80,36 @@ impl AudioBuffer {
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         global: &Window,
         number_of_channels: u32,
         length: u32,
         sample_rate: f32,
         initial_data: Option<&[Vec<f32>]>,
-        can_gc: CanGc,
     ) -> DomRoot<AudioBuffer> {
         Self::new_with_proto(
+            cx,
             global,
             None,
             number_of_channels,
             length,
             sample_rate,
             initial_data,
-            can_gc,
         )
     }
 
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     fn new_with_proto(
+        cx: &mut JSContext,
         global: &Window,
         proto: Option<HandleObject>,
         number_of_channels: u32,
         length: u32,
         sample_rate: f32,
         initial_data: Option<&[Vec<f32>]>,
-        can_gc: CanGc,
     ) -> DomRoot<AudioBuffer> {
         let buffer = AudioBuffer::new_inherited(number_of_channels, length, sample_rate);
-        let buffer = reflect_dom_object_with_proto(Box::new(buffer), global, proto, can_gc);
+        let buffer = reflect_dom_object_with_proto(cx, Box::new(buffer), global, proto);
         buffer.set_initial_data(initial_data);
         buffer
     }
@@ -131,8 +131,9 @@ impl AudioBuffer {
         *self.shared_channels.borrow_mut() = Some(channels);
     }
 
-    fn restore_js_channel_data(&self, cx: JSContext, can_gc: CanGc) -> bool {
-        let _ac = enter_realm(self);
+    fn restore_js_channel_data(&self, cx: &mut JSContext) -> bool {
+        let mut realm = enter_auto_realm(cx, self);
+        let cx = &mut realm.current_realm();
         for (i, channel) in self.js_channels.borrow().iter().enumerate() {
             if channel.is_initialized() {
                 // Already have data in JS array.
@@ -144,10 +145,7 @@ impl AudioBuffer {
                 // https://webaudio.github.io/web-audio-api/#acquire-the-content
                 // "Attach ArrayBuffers containing copies of the data to the AudioBuffer,
                 // to be returned by the next call to getChannelData()".
-                if channel
-                    .set_data(cx, &shared_channels.buffers[i], can_gc)
-                    .is_err()
-                {
+                if channel.set_data(cx, &shared_channels.buffers[i]).is_err() {
                     return false;
                 }
             }
@@ -159,14 +157,13 @@ impl AudioBuffer {
     }
 
     /// <https://webaudio.github.io/web-audio-api/#acquire-the-content>
-    fn acquire_contents(&self) -> Option<ServoMediaAudioBuffer> {
+    fn acquire_contents(&self, cx: &mut JSContext) -> Option<ServoMediaAudioBuffer> {
         let mut result = ServoMediaAudioBuffer::new(
             self.number_of_channels as u8,
             self.length as usize,
             self.sample_rate,
         );
-        let cx = GlobalScope::get_cx();
-        for (i, channel) in self.js_channels.borrow_mut().iter().enumerate() {
+        for (i, channel) in self.js_channels.borrow().iter().enumerate() {
             // Step 1.
             if !channel.is_initialized() {
                 return None;
@@ -179,11 +176,14 @@ impl AudioBuffer {
         Some(result)
     }
 
-    pub(crate) fn get_channels(&self) -> Ref<'_, Option<ServoMediaAudioBuffer>> {
+    pub(crate) fn get_channels(
+        &self,
+        cx: &mut JSContext,
+    ) -> Ref<'_, Option<ServoMediaAudioBuffer>> {
         if self.shared_channels.borrow().is_none() {
-            let channels = self.acquire_contents();
+            let channels = self.acquire_contents(cx);
             if channels.is_some() {
-                *self.shared_channels.borrow_mut() = channels;
+                *self.shared_channels.safe_borrow_mut(cx.no_gc()) = channels;
             }
         }
         self.shared_channels.borrow()
@@ -193,27 +193,27 @@ impl AudioBuffer {
 impl AudioBufferMethods<crate::DomTypeHolder> for AudioBuffer {
     /// <https://webaudio.github.io/web-audio-api/#dom-audiobuffer-audiobuffer>
     fn Constructor(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
         options: &AudioBufferOptions,
     ) -> Fallible<DomRoot<AudioBuffer>> {
-        if options.length == 0
-            || options.numberOfChannels == 0
-            || options.numberOfChannels > MAX_CHANNEL_COUNT
-            || *options.sampleRate < MIN_SAMPLE_RATE
-            || *options.sampleRate > MAX_SAMPLE_RATE
+        if options.length == 0 ||
+            options.numberOfChannels == 0 ||
+            options.numberOfChannels > MAX_CHANNEL_COUNT ||
+            *options.sampleRate < MIN_SAMPLE_RATE ||
+            *options.sampleRate > MAX_SAMPLE_RATE
         {
             return Err(Error::NotSupported(None));
         }
         Ok(AudioBuffer::new_with_proto(
+            cx,
             window,
             proto,
             options.numberOfChannels,
             options.length,
             *options.sampleRate,
             None,
-            can_gc,
         ))
     }
 
@@ -240,15 +240,14 @@ impl AudioBufferMethods<crate::DomTypeHolder> for AudioBuffer {
     /// <https://webaudio.github.io/web-audio-api/#dom-audiobuffer-getchanneldata>
     fn GetChannelData(
         &self,
-        cx: JSContext,
+        cx: &mut JSContext,
         channel: u32,
-        can_gc: CanGc,
     ) -> Fallible<RootedTraceableBox<HeapFloat32Array>> {
         if channel >= self.number_of_channels {
             return Err(Error::IndexSize(None));
         }
 
-        if !self.restore_js_channel_data(cx, can_gc) {
+        if !self.restore_js_channel_data(cx) {
             return Err(Error::JSFailed);
         }
 
@@ -260,6 +259,7 @@ impl AudioBufferMethods<crate::DomTypeHolder> for AudioBuffer {
     // https://webaudio.github.io/web-audio-api/#dom-audiobuffer-copyfromchannel
     fn CopyFromChannel(
         &self,
+        cx: &mut JSContext,
         mut destination: CustomAutoRooterGuard<Float32Array>,
         channel_number: u32,
         start_in_channel: u32,
@@ -273,7 +273,6 @@ impl AudioBufferMethods<crate::DomTypeHolder> for AudioBuffer {
         }
 
         let bytes_to_copy = min(self.length - start_in_channel, destination.len() as u32) as usize;
-        let cx = GlobalScope::get_cx();
         let channel_number = channel_number as usize;
         let offset = start_in_channel as usize;
         let mut dest = vec![0.0_f32; bytes_to_copy];
@@ -287,10 +286,10 @@ impl AudioBufferMethods<crate::DomTypeHolder> for AudioBuffer {
             {
                 return Err(Error::IndexSize(None));
             }
-        } else if let Some(ref shared_channels) = *self.shared_channels.borrow() {
-            if let Some(shared_channel) = shared_channels.buffers.get(channel_number) {
-                dest.extend_from_slice(&shared_channel.as_slice()[offset..offset + bytes_to_copy]);
-            }
+        } else if let Some(ref shared_channels) = *self.shared_channels.borrow() &&
+            let Some(shared_channel) = shared_channels.buffers.get(channel_number)
+        {
+            dest.extend_from_slice(&shared_channel.as_slice()[offset..offset + bytes_to_copy]);
         }
 
         destination.update(&dest);
@@ -301,10 +300,10 @@ impl AudioBufferMethods<crate::DomTypeHolder> for AudioBuffer {
     /// <https://webaudio.github.io/web-audio-api/#dom-audiobuffer-copytochannel>
     fn CopyToChannel(
         &self,
+        cx: &mut JSContext,
         source: CustomAutoRooterGuard<Float32Array>,
         channel_number: u32,
         start_in_channel: u32,
-        can_gc: CanGc,
     ) -> Fallible<()> {
         if source.is_shared() {
             return Err(Error::Type(c"Cannot copy from shared buffer".to_owned()));
@@ -314,8 +313,7 @@ impl AudioBufferMethods<crate::DomTypeHolder> for AudioBuffer {
             return Err(Error::IndexSize(None));
         }
 
-        let cx = GlobalScope::get_cx();
-        if !self.restore_js_channel_data(cx, can_gc) {
+        if !self.restore_js_channel_data(cx) {
             return Err(Error::JSFailed);
         }
 

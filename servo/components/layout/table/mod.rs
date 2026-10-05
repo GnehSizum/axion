@@ -76,7 +76,7 @@ pub(crate) use construct::AnonymousTableContent;
 pub use construct::TableBuilder;
 use euclid::{Point2D, Size2D, UnknownUnit, Vector2D};
 use malloc_size_of_derive::MallocSizeOf;
-use script::layout_dom::{ServoLayoutElement, ServoThreadSafeLayoutNode};
+use script::layout_dom::{ServoDangerousStyleElement, ServoLayoutNode};
 use servo_arc::Arc;
 use style::context::SharedStyleContext;
 use style::properties::ComputedValues;
@@ -203,11 +203,21 @@ impl Table {
         new_style: &Arc<ComputedValues>,
     ) {
         self.style = new_style.clone();
-        self.grid_style = context.stylist.style_for_anonymous::<ServoLayoutElement>(
-            &context.guards,
-            &PseudoElement::ServoTableGrid,
-            new_style,
-        );
+        self.grid_style = context
+            .stylist
+            .style_for_anonymous::<ServoDangerousStyleElement>(
+                &context.guards,
+                &PseudoElement::ServoTableGrid,
+                new_style,
+            );
+    }
+
+    pub(crate) fn subtree_size(&self) -> usize {
+        self.slots
+            .iter()
+            .flat_map(|row| row.iter())
+            .map(TableSlot::subtree_size)
+            .sum()
     }
 }
 
@@ -294,6 +304,13 @@ impl std::fmt::Debug for TableSlot {
 impl TableSlot {
     fn new_spanned(offset: TableSlotOffset) -> Self {
         Self::Spanned(vec![offset])
+    }
+
+    pub(crate) fn subtree_size(&self) -> usize {
+        match self {
+            TableSlot::Cell(cell) => cell.borrow().context.subtree_size(),
+            TableSlot::Spanned(..) | TableSlot::Empty => 0,
+        }
     }
 }
 
@@ -420,7 +437,7 @@ impl TableLevelBox {
     pub(crate) fn repair_style(
         &self,
         context: &SharedStyleContext<'_>,
-        node: &ServoThreadSafeLayoutNode,
+        node: &ServoLayoutNode,
         new_style: &Arc<ComputedValues>,
     ) {
         match self {

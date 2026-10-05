@@ -4,12 +4,15 @@
 
 use malloc_size_of::malloc_size_of_is_0;
 use serde::{Deserialize, Serialize};
-use servo_base::generic_channel::{self, GenericSend, GenericSender, SendResult};
+use servo_base::generic_channel::{self, GenericCallback, GenericSend, GenericSender, SendResult};
+use servo_url::ImmutableOrigin;
 
-use crate::client_storage::ClientStorageThreadMessage;
+use crate::cache_storage::CacheStorageThreadMessage;
+use crate::client_storage::{ClientStorageThreadHandle, ClientStorageThreadMessage};
 use crate::indexeddb::IndexedDBThreadMsg;
 use crate::webstorage_thread::{OriginDescriptor, WebStorageThreadMsg, WebStorageType};
 
+pub mod cache_storage;
 pub mod client_storage;
 pub mod indexeddb;
 pub mod webstorage_thread;
@@ -19,6 +22,7 @@ pub struct StorageThreads {
     client_storage_thread: GenericSender<ClientStorageThreadMessage>,
     idb_thread: GenericSender<IndexedDBThreadMsg>,
     web_storage_thread: GenericSender<WebStorageThreadMsg>,
+    cache_storage_thread: GenericSender<CacheStorageThreadMessage>,
 }
 
 impl StorageThreads {
@@ -26,12 +30,50 @@ impl StorageThreads {
         client_storage_thread: GenericSender<ClientStorageThreadMessage>,
         idb_thread: GenericSender<IndexedDBThreadMsg>,
         web_storage_thread: GenericSender<WebStorageThreadMsg>,
+        cache_storage_thread: GenericSender<CacheStorageThreadMessage>,
     ) -> StorageThreads {
         StorageThreads {
             client_storage_thread,
             idb_thread,
             web_storage_thread,
+            cache_storage_thread,
         }
+    }
+
+    pub fn persisted(
+        &self,
+        origin: ImmutableOrigin,
+        sender: GenericCallback<Result<bool, String>>,
+    ) -> SendResult {
+        self.client_storage_thread
+            .send(ClientStorageThreadMessage::Persisted { origin, sender })
+    }
+
+    pub fn persist(
+        &self,
+        origin: ImmutableOrigin,
+        permission_granted: bool,
+        sender: GenericCallback<Result<bool, String>>,
+    ) -> SendResult {
+        self.client_storage_thread
+            .send(ClientStorageThreadMessage::Persist {
+                origin,
+                permission_granted,
+                sender,
+            })
+    }
+
+    pub fn estimate(
+        &self,
+        origin: ImmutableOrigin,
+        sender: GenericCallback<Result<(u64, u64), String>>,
+    ) -> SendResult {
+        self.client_storage_thread
+            .send(ClientStorageThreadMessage::Estimate { origin, sender })
+    }
+
+    pub fn client_storage_handle(&self) -> ClientStorageThreadHandle {
+        self.client_storage_thread.clone().into()
     }
 
     // TODO: Consider changing to `webstorage_sites`
@@ -84,6 +126,16 @@ impl GenericSend<WebStorageThreadMsg> for StorageThreads {
 
     fn sender(&self) -> GenericSender<WebStorageThreadMsg> {
         self.web_storage_thread.clone()
+    }
+}
+
+impl GenericSend<CacheStorageThreadMessage> for StorageThreads {
+    fn send(&self, msg: CacheStorageThreadMessage) -> SendResult {
+        self.cache_storage_thread.send(msg)
+    }
+
+    fn sender(&self) -> GenericSender<CacheStorageThreadMessage> {
+        self.cache_storage_thread.clone()
     }
 }
 

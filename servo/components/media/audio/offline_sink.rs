@@ -59,8 +59,8 @@ impl AudioSink for OfflineAudioSink {
     }
 
     fn has_enough_data(&self) -> bool {
-        self.has_enough_data.get()
-            || (self.rendered_blocks.get() * FRAMES_PER_BLOCK_USIZE >= self.length)
+        self.has_enough_data.get() ||
+            (self.rendered_blocks.get() * FRAMES_PER_BLOCK_USIZE >= self.length)
     }
 
     fn push_data(&self, mut chunk: Chunk) -> Result<(), AudioSinkError> {
@@ -90,11 +90,9 @@ impl AudioSink for OfflineAudioSink {
         };
         self.rendered_blocks.set(self.rendered_blocks.get() + 1);
 
-        if last {
-            if let Some(callback) = self.eos_callback.borrow_mut().take() {
-                let processed_audio = ProcessedAudio(buffer.take().unwrap().into_boxed_slice());
-                callback(Box::new(processed_audio));
-            }
+        if last && let Some(callback) = self.eos_callback.borrow_mut().take() {
+            let processed_audio = ProcessedAudio(buffer.take().unwrap().into_boxed_slice());
+            callback(Box::new(processed_audio));
         }
 
         Ok(())

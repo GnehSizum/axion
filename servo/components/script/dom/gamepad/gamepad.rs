@@ -2,30 +2,28 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use dom_struct::dom_struct;
 use embedder_traits::{GamepadSupportedHapticEffects, GamepadUpdateType};
-use js::typedarray::{Float64, HeapFloat64Array};
-use script_bindings::trace::RootedTraceableBox;
+use js::context::JSContext;
+use js::rust::MutableHandleValue;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 
-use super::gamepadbuttonlist::GamepadButtonList;
+use super::gamepadbutton::GamepadButton;
 use super::gamepadhapticactuator::GamepadHapticActuator;
 use super::gamepadpose::GamepadPose;
-use crate::dom::bindings::buffer_source::HeapBufferSource;
 use crate::dom::bindings::codegen::Bindings::GamepadBinding::{GamepadHand, GamepadMethods};
-use crate::dom::bindings::codegen::Bindings::GamepadButtonListBinding::GamepadButtonListMethods;
+use crate::dom::bindings::frozenarray::CachedFrozenArray;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::num::Finite;
-use crate::dom::bindings::reflector::{DomGlobal, Reflector, reflect_dom_object};
-use crate::dom::bindings::root::{Dom, DomRoot};
+use crate::dom::bindings::reflector::DomGlobal;
+use crate::dom::bindings::root::{Dom, DomRoot, DomSlice};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::Event;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::gamepadevent::{GamepadEvent, GamepadEventType};
-use crate::dom::globalscope::GlobalScope;
 use crate::dom::window::Window;
-use crate::script_runtime::{CanGc, JSContext};
 
 // This value is for determining when to consider a gamepad as having a user gesture
 // from an axis tilt. This matches the threshold in Chromium.
@@ -44,8 +42,11 @@ pub(crate) struct Gamepad {
     timestamp: Cell<f64>,
     mapping_type: String,
     #[ignore_malloc_size_of = "mozjs"]
-    axes: HeapBufferSource<Float64>,
-    buttons: Dom<GamepadButtonList>,
+    frozen_buttons: CachedFrozenArray,
+    buttons: Vec<Dom<GamepadButton>>,
+    #[ignore_malloc_size_of = "mozjs"]
+    frozen_axes: CachedFrozenArray,
+    axes: RefCell<Vec<f64>>,
     pose: Option<Dom<GamepadPose>>,
     #[ignore_malloc_size_of = "Defined in rust-webvr"]
     hand: GamepadHand,
@@ -64,7 +65,7 @@ impl Gamepad {
         connected: bool,
         timestamp: f64,
         mapping_type: String,
-        buttons: &GamepadButtonList,
+        buttons: &[&GamepadButton],
         pose: Option<&GamepadPose>,
         hand: GamepadHand,
         axis_bounds: (f64, f64),
@@ -79,8 +80,13 @@ impl Gamepad {
             connected: Cell::new(connected),
             timestamp: Cell::new(timestamp),
             mapping_type,
-            axes: HeapBufferSource::default(),
-            buttons: Dom::from_ref(buttons),
+            frozen_buttons: CachedFrozenArray::new(),
+            buttons: buttons
+                .iter()
+                .map(|button| Dom::from_ref(*button))
+                .collect(),
+            frozen_axes: CachedFrozenArray::new(),
+            axes: RefCell::new(Vec::new()),
             pose: pose.map(Dom::from_ref),
             hand,
             axis_bounds,
@@ -90,13 +96,18 @@ impl Gamepad {
         }
     }
 
-    /// When we construct a new gamepad, we initialize the number of buttons and
-    /// axes corresponding to the "standard" gamepad mapping.
-    /// The spec says UAs *may* do this for fingerprint mitigation, and it also
-    /// happens to simplify implementation
-    /// <https://www.w3.org/TR/gamepad/#fingerprinting-mitigation>
+    /// From: <https://www.w3.org/TR/gamepad/#fingerprinting-mitigation>
+    /// The user agent MAY alter the device information exposed through the API to reduce the
+    /// fingerprinting surface. As an example, an implementation can require that a Gamepad
+    /// object have exactly the number of buttons and axes defined in the Standard Gamepad layout
+    /// even if more or fewer inputs are present on the connected device.
+    ///
+    /// So, we initialize the number of buttons and axes corresponding to the "standard" gamepad
+    /// mapping and happens to simplify implementation.
+    /// <https://www.w3.org/TR/gamepad/#dfn-a-new-gamepad>
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        cx: &mut JSContext,
         window: &Window,
         gamepad_id: u32,
         id: String,
@@ -105,13 +116,13 @@ impl Gamepad {
         button_bounds: (f64, f64),
         supported_haptic_effects: GamepadSupportedHapticEffects,
         xr: bool,
-        can_gc: CanGc,
     ) -> DomRoot<Gamepad> {
-        let button_list = GamepadButtonList::init_buttons(window, can_gc);
+        let buttons = Gamepad::init_buttons(cx, window);
+        rooted_vec!(let buttons <- buttons.iter().map(DomRoot::as_traced));
         let vibration_actuator =
-            GamepadHapticActuator::new(window, gamepad_id, supported_haptic_effects, can_gc);
+            GamepadHapticActuator::new(cx, window, gamepad_id, supported_haptic_effects);
         let index = if xr { -1 } else { 0 };
-        let gamepad = reflect_dom_object(
+        let gamepad = reflect_dom_object_with_cx(
             Box::new(Gamepad::new_inherited(
                 gamepad_id,
                 id,
@@ -119,7 +130,7 @@ impl Gamepad {
                 true,
                 0.,
                 mapping_type,
-                &button_list,
+                buttons.r(),
                 None,
                 GamepadHand::_empty,
                 axis_bounds,
@@ -127,9 +138,9 @@ impl Gamepad {
                 &vibration_actuator,
             )),
             window,
-            can_gc,
+            cx,
         );
-        gamepad.init_axes(can_gc);
+        gamepad.init_axes();
         gamepad
     }
 }
@@ -161,15 +172,23 @@ impl GamepadMethods<crate::DomTypeHolder> for Gamepad {
     }
 
     /// <https://w3c.github.io/gamepad/#dom-gamepad-axes>
-    fn Axes(&self, _cx: JSContext) -> RootedTraceableBox<HeapFloat64Array> {
-        self.axes
-            .get_typed_array()
-            .expect("Failed to get gamepad axes.")
+    fn Axes(&self, cx: &mut JSContext, retval: MutableHandleValue) {
+        self.frozen_axes
+            .get_or_init(cx, || self.axes.borrow().clone(), retval);
     }
 
     /// <https://w3c.github.io/gamepad/#dom-gamepad-buttons>
-    fn Buttons(&self) -> DomRoot<GamepadButtonList> {
-        DomRoot::from_ref(&*self.buttons)
+    fn Buttons(&self, cx: &mut JSContext, retval: MutableHandleValue) {
+        self.frozen_buttons.get_or_init(
+            cx,
+            || {
+                self.buttons
+                    .iter()
+                    .map(|b| DomRoot::from_ref(&**b))
+                    .collect()
+            },
+            retval,
+        );
     }
 
     /// <https://w3c.github.io/gamepad/#dom-gamepad-vibrationactuator>
@@ -194,21 +213,32 @@ impl Gamepad {
         self.gamepad_id
     }
 
-    pub(crate) fn update_connected(&self, connected: bool, has_gesture: bool, can_gc: CanGc) {
-        if self.connected.get() == connected {
-            return;
-        }
+    /// Initialize the standard buttons for a gamepad.
+    /// <https://www.w3.org/TR/gamepad/#dfn-initializing-buttons>
+    fn init_buttons(cx: &mut JSContext, window: &Window) -> Vec<DomRoot<GamepadButton>> {
+        vec![
+            GamepadButton::new(cx, window, false, false), // Bottom button in right cluster
+            GamepadButton::new(cx, window, false, false), // Right button in right cluster
+            GamepadButton::new(cx, window, false, false), // Left button in right cluster
+            GamepadButton::new(cx, window, false, false), // Top button in right cluster
+            GamepadButton::new(cx, window, false, false), // Top left front button
+            GamepadButton::new(cx, window, false, false), // Top right front button
+            GamepadButton::new(cx, window, false, false), // Bottom left front button
+            GamepadButton::new(cx, window, false, false), // Bottom right front button
+            GamepadButton::new(cx, window, false, false), // Left button in center cluster
+            GamepadButton::new(cx, window, false, false), // Right button in center cluster
+            GamepadButton::new(cx, window, false, false), // Left stick pressed button
+            GamepadButton::new(cx, window, false, false), // Right stick pressed button
+            GamepadButton::new(cx, window, false, false), // Top button in left cluster
+            GamepadButton::new(cx, window, false, false), // Bottom button in left cluster
+            GamepadButton::new(cx, window, false, false), // Left button in left cluster
+            GamepadButton::new(cx, window, false, false), // Right button in left cluster
+            GamepadButton::new(cx, window, false, false), // Center button in center cluster
+        ]
+    }
+
+    pub(crate) fn update_connected(&self, connected: bool) {
         self.connected.set(connected);
-
-        let event_type = if connected {
-            GamepadEventType::Connected
-        } else {
-            GamepadEventType::Disconnected
-        };
-
-        if has_gesture {
-            self.notify_event(event_type, can_gc);
-        }
     }
 
     pub(crate) fn index(&self) -> i32 {
@@ -223,29 +253,28 @@ impl Gamepad {
         self.timestamp.set(timestamp);
     }
 
-    pub(crate) fn notify_event(&self, event_type: GamepadEventType, can_gc: CanGc) {
-        let event =
-            GamepadEvent::new_with_type(self.global().as_window(), event_type, self, can_gc);
+    pub(crate) fn notify_event(
+        &self,
+        cx: &mut js::context::JSContext,
+        event_type: GamepadEventType,
+    ) {
+        let event = GamepadEvent::new_with_type(cx, self.global().as_window(), event_type, self);
         event
             .upcast::<Event>()
-            .fire(self.global().as_window().upcast::<EventTarget>(), can_gc);
+            .fire(cx, self.global().as_window().upcast::<EventTarget>());
     }
 
     /// Initialize the number of axes in the "standard" gamepad mapping.
     /// <https://www.w3.org/TR/gamepad/#dfn-initializing-axes>
-    fn init_axes(&self, can_gc: CanGc) {
-        let initial_axes: Vec<f64> = vec![
+    fn init_axes(&self) {
+        *self.axes.borrow_mut() = vec![
             0., // Horizontal axis for left stick (negative left/positive right)
             0., // Vertical axis for left stick (negative up/positive down)
             0., // Horizontal axis for right stick (negative left/positive right)
             0., // Vertical axis for right stick (negative up/positive down)
         ];
-        self.axes
-            .set_data(GlobalScope::get_cx(), &initial_axes, can_gc)
-            .expect("Failed to set axes data on gamepad.")
     }
 
-    #[expect(unsafe_code)]
     /// <https://www.w3.org/TR/gamepad/#dfn-map-and-normalize-axes>
     pub(crate) fn map_and_normalize_axes(&self, axis_index: usize, value: f64) {
         // Let normalizedValue be 2 (logicalValue − logicalMinimum) / (logicalMaximum − logicalMinimum) − 1.
@@ -254,13 +283,8 @@ impl Gamepad {
         if denominator != 0.0 && denominator.is_finite() {
             let normalized_value: f64 = 2.0 * numerator / denominator - 1.0;
             if normalized_value.is_finite() {
-                let mut axis_vec = self
-                    .axes
-                    .typed_array_to_option()
-                    .expect("Axes have not been initialized!");
-                unsafe {
-                    axis_vec.as_mut_slice()[axis_index] = normalized_value;
-                }
+                self.axes.borrow_mut()[axis_index] = normalized_value;
+                self.frozen_axes.clear();
             } else {
                 warn!("Axis value is not finite!");
             }
@@ -279,8 +303,9 @@ impl Gamepad {
             if normalized_value.is_finite() {
                 let pressed = normalized_value >= BUTTON_PRESS_THRESHOLD;
                 // TODO: Determine a way of getting touch capability for button
-                if let Some(button) = self.buttons.IndexedGetter(button_index as u32) {
+                if let Some(button) = self.buttons.get(button_index) {
                     button.update(pressed, /*touched*/ pressed, normalized_value);
+                    self.frozen_buttons.clear();
                 }
             } else {
                 warn!("Button value is not finite!");
@@ -288,6 +313,10 @@ impl Gamepad {
         } else {
             warn!("Button bounds difference is either 0 or non-finite!");
         }
+    }
+
+    pub(crate) fn connected(&self) -> bool {
+        self.connected.get()
     }
 
     /// <https://www.w3.org/TR/gamepad/#dfn-exposed>

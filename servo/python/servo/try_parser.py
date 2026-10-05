@@ -23,6 +23,7 @@ from enum import Enum
 
 class Workflow(str, Enum):
     LINUX = "linux"
+    LINUX_ARM = "linux-arm64"
     MACOS = "macos"
     MACOS_ARM = "macos-arm64"
     WINDOWS = "windows"
@@ -36,11 +37,13 @@ class JobConfig(object):
     name: str
     workflow: Workflow = Workflow.LINUX
     wpt: bool = False
-    profile: str = "release"
+    profile: str = "checked-release"
     unit_tests: bool = False
+    devtools_tests: bool = False
     build_libservo: bool = False
     bencher: bool = False
     coverage: bool = False
+    capi: bool = False
     build_args: str = ""
     wpt_args: str = ""
     number_of_wpt_chunks: int = 20
@@ -57,9 +60,11 @@ class JobConfig(object):
 
         self.wpt |= other.wpt
         self.unit_tests |= other.unit_tests
+        self.devtools_tests |= other.devtools_tests
         self.build_libservo |= other.build_libservo
         self.bencher |= other.bencher
         self.coverage |= other.coverage
+        self.capi |= other.capi
         self.number_of_wpt_chunks = max(self.number_of_wpt_chunks, other.number_of_wpt_chunks)
         self.update_name()
         return True
@@ -67,6 +72,8 @@ class JobConfig(object):
     def update_name(self) -> None:
         if self.workflow is Workflow.LINUX:
             self.name = "Linux"
+        elif self.workflow is Workflow.LINUX_ARM:
+            self.name = "Linux Arm64"
         elif self.workflow is Workflow.MACOS:
             self.name = "MacOS"
         elif self.workflow is Workflow.MACOS_ARM:
@@ -78,10 +85,14 @@ class JobConfig(object):
         elif self.workflow is Workflow.OHOS:
             self.name = "OpenHarmony"
         modifier = []
-        if self.profile != "release":
+        if self.profile != "checked-release":
             modifier.append(self.profile.title())
+        if "--debug-mozjs" in self.build_args:
+            modifier.append("Debug Mozjs")
         if self.unit_tests:
             modifier.append("Unit Tests")
+        if self.devtools_tests:
+            modifier.append("Devtools Tests")
         if self.build_libservo:
             modifier.append("Build libservo")
         if self.wpt:
@@ -90,6 +101,8 @@ class JobConfig(object):
             modifier.append("Bencher")
         if self.coverage:
             modifier.append("Coverage")
+        if self.capi:
+            modifier.append("C API")
         if modifier:
             self.name += " (" + ", ".join(modifier) + ")"
 
@@ -97,7 +110,9 @@ class JobConfig(object):
 def handle_preset(s: str) -> Optional[JobConfig]:
     s = s.lower()
 
-    if any(word in s for word in ["linux"]):
+    if any(word in s for word in ["linux-arm", "linux-arm64"]):
+        return JobConfig("Linux Arm64", Workflow.LINUX_ARM)
+    elif any(word in s for word in ["linux"]):
         return JobConfig("Linux", Workflow.LINUX)
     elif any(word in s for word in ["mac-arm", "macos-arm", "mac-arm64", "macos-arm64"]):
         return JobConfig("MacOS Arm64", Workflow.MACOS_ARM)
@@ -114,7 +129,7 @@ def handle_preset(s: str) -> Optional[JobConfig]:
             "WebGPU CTS",
             Workflow.LINUX,
             wpt=True,
-            wpt_args="_webgpu",  # run only webgpu cts
+            wpt_args="_webgpu --processes 1",  # run only webgpu cts
             profile="production",  # WebGPU works to slow with debug assert
             unit_tests=False,
             number_of_wpt_chunks=20,
@@ -154,14 +169,27 @@ def handle_modifier(config: Optional[JobConfig], s: str) -> Optional[JobConfig]:
     s = s.lower()
     if "unit-tests" in s:
         config.unit_tests = True
+    if "devtools" in s:
+        config.devtools_tests = True
     if "build-libservo" in s:
         config.build_libservo = True
+    if "debugmozjs" in s:
+        # We need to remove the modifier here, so the profile check
+        # below doesn't match on `debug` and force the `dev` profile.
+        s = s.replace("debugmozjs", "")
+        config.build_args = f"{config.build_args} --debug-mozjs".strip()
     if "production" in s:
         config.profile = "production"
+    elif "release" in s:
+        config.profile = "release"
+    elif "debug" in s:
+        config.profile = "dev"
     if "bencher" in s:
         config.bencher = True
     if "coverage" in s:
         config.coverage = True
+    if "capi" in s:
+        config.capi = True
     elif "wpt" in s:
         config.wpt = True
     config.update_name()
@@ -204,6 +232,7 @@ class Config(object):
                 words.extend(["linux-wpt", "linux-bencher"])
                 words.extend(["android", "ohos", "lint"])
                 words.extend(["linux-build-libservo", "windows-build-libservo"])
+                words.extend(["linux-capi", "windows-capi"])
                 continue  # skip over keyword
             if word == "bencher":
                 words.extend(
@@ -270,10 +299,12 @@ class TestParser(unittest.TestCase):
                 "matrix": [
                     {
                         "bencher": False,
+                        "capi": False,
                         "name": "Linux (Unit Tests)",
                         "number_of_wpt_chunks": 20,
-                        "profile": "release",
+                        "profile": "checked-release",
                         "unit_tests": True,
+                        "devtools_tests": False,
                         "build_libservo": False,
                         "workflow": "linux",
                         "wpt": False,
@@ -292,27 +323,31 @@ class TestParser(unittest.TestCase):
                 "fail_fast": False,
                 "matrix": [
                     {
-                        "name": "Linux (Unit Tests, Build libservo, WPT, Bencher)",
+                        "name": "Linux (Unit Tests, Build libservo, WPT, Bencher, C API)",
                         "workflow": "linux",
                         "wpt": True,
-                        "profile": "release",
+                        "profile": "checked-release",
                         "unit_tests": True,
+                        "devtools_tests": False,
                         "build_libservo": True,
                         "bencher": True,
                         "build_args": "",
+                        "capi": True,
                         "coverage": False,
                         "wpt_args": "",
                         "number_of_wpt_chunks": 20,
                     },
                     {
-                        "name": "Windows (Unit Tests, Build libservo)",
+                        "name": "Windows (Unit Tests, Build libservo, C API)",
                         "workflow": "windows",
                         "wpt": False,
-                        "profile": "release",
+                        "profile": "checked-release",
                         "unit_tests": True,
+                        "devtools_tests": False,
                         "build_libservo": True,
                         "bencher": False,
                         "build_args": "",
+                        "capi": True,
                         "coverage": False,
                         "wpt_args": "",
                         "number_of_wpt_chunks": 20,
@@ -321,11 +356,13 @@ class TestParser(unittest.TestCase):
                         "name": "MacOS Arm64 (Unit Tests)",
                         "workflow": "macos-arm64",
                         "wpt": False,
-                        "profile": "release",
+                        "profile": "checked-release",
                         "unit_tests": True,
+                        "devtools_tests": False,
                         "build_libservo": False,
                         "bencher": False,
                         "build_args": "",
+                        "capi": False,
                         "coverage": False,
                         "wpt_args": "",
                         "number_of_wpt_chunks": 20,
@@ -334,11 +371,13 @@ class TestParser(unittest.TestCase):
                         "name": "Android",
                         "workflow": "android",
                         "wpt": False,
-                        "profile": "release",
+                        "profile": "checked-release",
                         "unit_tests": False,
+                        "devtools_tests": False,
                         "build_libservo": False,
                         "bencher": False,
                         "build_args": "",
+                        "capi": False,
                         "coverage": False,
                         "wpt_args": "",
                         "number_of_wpt_chunks": 20,
@@ -347,11 +386,13 @@ class TestParser(unittest.TestCase):
                         "name": "OpenHarmony",
                         "workflow": "ohos",
                         "wpt": False,
-                        "profile": "release",
+                        "profile": "checked-release",
                         "unit_tests": False,
+                        "devtools_tests": False,
                         "build_libservo": False,
                         "bencher": False,
                         "build_args": "",
+                        "capi": False,
                         "coverage": False,
                         "wpt_args": "",
                         "number_of_wpt_chunks": 20,
@@ -360,11 +401,13 @@ class TestParser(unittest.TestCase):
                         "name": "Lint",
                         "workflow": "lint",
                         "wpt": False,
-                        "profile": "release",
+                        "profile": "checked-release",
                         "unit_tests": False,
+                        "devtools_tests": False,
                         "build_libservo": False,
                         "bencher": False,
                         "build_args": "",
+                        "capi": False,
                         "coverage": False,
                         "wpt_args": "",
                         "number_of_wpt_chunks": 20,
@@ -381,9 +424,11 @@ class TestParser(unittest.TestCase):
                 "matrix": [
                     {
                         "bencher": False,
+                        "capi": False,
                         "name": "Linux (WPT)",
                         "number_of_wpt_chunks": 20,
-                        "profile": "release",
+                        "profile": "checked-release",
+                        "devtools_tests": False,
                         "unit_tests": False,
                         "build_libservo": False,
                         "workflow": "linux",
@@ -433,8 +478,57 @@ class TestParser(unittest.TestCase):
     def test_full(self) -> None:
         self.assertDictEqual(json.loads(Config("full").to_json()), json.loads(Config("").to_json()))
 
+    def test_capi(self) -> None:
+        self.assertDictEqual(
+            json.loads(Config("linux-capi").to_json()),
+            {
+                "fail_fast": False,
+                "matrix": [
+                    {
+                        "bencher": False,
+                        "capi": True,
+                        "name": "Linux (C API)",
+                        "number_of_wpt_chunks": 20,
+                        "profile": "checked-release",
+                        "unit_tests": False,
+                        "devtools_tests": False,
+                        "build_libservo": False,
+                        "workflow": "linux",
+                        "wpt": False,
+                        "wpt_args": "",
+                        "build_args": "",
+                        "coverage": False,
+                    }
+                ],
+            },
+        )
+
     def test_wpt_alias(self) -> None:
         self.assertDictEqual(json.loads(Config("wpt").to_json()), json.loads(Config("linux-wpt").to_json()))
+
+    def test_debugmozjs(self) -> None:
+        matrix_result = json.loads(Config("linux-debugmozjs").to_json())["matrix"][0]
+
+        self.assertEqual(matrix_result["name"], "Linux (Debug Mozjs)")
+        self.assertEqual(matrix_result["workflow"], "linux")
+        self.assertEqual(matrix_result["build_args"], "--debug-mozjs")
+        # `debugmozjs` should not force the `dev` profile.
+        self.assertEqual(matrix_result["profile"], "checked-release")
+
+        matrix_result = json.loads(Config("linux-debugmozjs-wpt").to_json())["matrix"][0]
+        self.assertEqual(matrix_result["name"], "Linux (Debug Mozjs, WPT)")
+        self.assertEqual(matrix_result["build_args"], "--debug-mozjs")
+        self.assertEqual(matrix_result["profile"], "checked-release")
+        self.assertTrue(matrix_result["wpt"])
+
+    def test_devtools_tests(self) -> None:
+        matrix_result = json.loads(Config("linux-devtools").to_json())["matrix"][0]
+
+        self.assertEqual(matrix_result["name"], "Linux (Devtools Tests)")
+        self.assertEqual(matrix_result["workflow"], "linux")
+        self.assertTrue(matrix_result["devtools_tests"])
+        self.assertFalse(matrix_result["unit_tests"])
+        self.assertFalse(matrix_result["wpt"])
 
 
 def run_tests() -> bool:

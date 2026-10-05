@@ -4,10 +4,12 @@
 
 use std::path::PathBuf;
 
+use cookie::Cookie;
 use embedder_traits::{
     AuthenticationResponse, EmbedderControlId, FilePickerRequest, WebResourceRequest,
     WebResourceResponseMsg,
 };
+use net_traits::CookieOperationId;
 use servo_base::id::WebViewId;
 use servo_url::ServoUrl;
 use tokio::sync::mpsc::UnboundedSender as TokioSender;
@@ -33,4 +35,8 @@ pub enum NetToEmbedderMsg {
         bool, /* for proxy */
         TokioOneshotSender<Option<AuthenticationResponse>>,
     ),
+    /// Response to an asynchronous request from SiteDataManager with cookies result.
+    EmbedderCookieOperationResponseWithCookies(CookieOperationId, Vec<Cookie<'static>>),
+    /// Response to an asynchronous request from SiteDataManager.
+    EmbedderCookieOperationResponse(CookieOperationId),
 }

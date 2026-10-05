@@ -1,0 +1,5 @@
+# Copy to .cargo/config.toml, or merge with an existing local configuration.
+# Servo requires these crate-scoped unstable Rust features on its stable toolchain.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "13.0"
+RUSTC_BOOTSTRAP = "crown,script,script_bindings,script_webgpu,style_tests,mozjs,mozjs_sys"

@@ -4,31 +4,34 @@
 
 #![expect(unsafe_code)]
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::fmt::Debug;
-use std::process;
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 
 use app_units::Au;
 use bitflags::bitflags;
-use embedder_traits::{Theme, ViewportDetails};
+use embedder_traits::{
+    EmbedderMsg, ScriptToEmbedderChan, Theme, UntrustedNodeAddress, ViewportDetails,
+};
 use euclid::{Point2D, Rect, Scale, Size2D};
-use fonts::{FontContext, FontContextWebFontMethods, WebFontDocumentContext};
-use fonts_traits::StylesheetWebFontLoadFinishedCallback;
-use layout_api::wrapper_traits::LayoutNode;
+use fonts::{FontContext, FontContextWebFontMethods};
+use fonts_traits::{StylesheetWebFontLoadFinishedCallback, WebFontSetDifference};
+use icu_locale_core::subtags::Language;
 use layout_api::{
-    AxesOverflow, BoxAreaType, CSSPixelRectIterator, IFrameSizes, Layout, LayoutConfig,
-    LayoutFactory, OffsetParentResponse, PhysicalSides, QueryMsg, ReflowGoal, ReflowPhasesRun,
+    AxesOverflow, BoxAreaType, CSSPixelRectVec, DangerousStyleNode, HitTestFlags, HitTestResult,
+    IFrameSizes, Layout, LayoutConfig, LayoutDamage, LayoutElement, LayoutFactory, LayoutNode,
+    NodeRenderingType, OffsetParentResponse, PhysicalSides, QueryMsg, ReflowGoal, ReflowPhasesRun,
     ReflowRequest, ReflowRequestRestyle, ReflowResult, ReflowStatistics, ScrollContainerQueryFlags,
     ScrollContainerResponse, TrustedNodeAddress, with_layout_state,
 };
-use log::{debug, error, warn};
+use log::{debug, warn};
 use malloc_size_of::{MallocConditionalSizeOf, MallocSizeOf, MallocSizeOfOps};
 use net_traits::image_cache::ImageCache;
 use paint_api::CrossProcessPaintApi;
-use paint_api::display_list::ScrollType;
+use paint_api::display_list::{AxesScrollSensitivity, PaintDisplayListInfo, ScrollType};
 use parking_lot::{Mutex, RwLock};
 use profile_traits::mem::{Report, ReportKind};
 use profile_traits::time::{
@@ -36,12 +39,15 @@ use profile_traits::time::{
 };
 use profile_traits::{path, time_profile};
 use rustc_hash::FxHashMap;
-use script::layout_dom::{ServoLayoutDocument, ServoLayoutElement, ServoLayoutNode};
+use script::layout_dom::{
+    ServoDangerousStyleDocument, ServoDangerousStyleElement, ServoLayoutElement, ServoLayoutNode,
+};
 use script_traits::{DrawAPaintImageResult, PaintWorkletError, Painter, ScriptThreadMessage};
 use servo_arc::Arc as ServoArc;
-use servo_base::generic_channel::GenericSender;
+use servo_base::Epoch;
 use servo_base::id::{PipelineId, WebViewId};
-use servo_config::opts::{self, DiagnosticsLogging};
+use servo_base::text::Utf32CodeUnits;
+use servo_config::opts::{self, DiagnosticsLogging, DiagnosticsLoggingOption};
 use servo_config::pref;
 use servo_url::ServoUrl;
 use style::animation::DocumentAnimationSet;
@@ -50,25 +56,24 @@ use style::context::{
 };
 use style::device::Device;
 use style::device::servo::FontMetricsProvider;
-use style::dom::{OpaqueNode, ShowSubtreeDataAndPrimaryValues, TElement, TNode};
+use style::dom::{OpaqueNode, ShowSubtreeDataAndPrimaryValues, TDocument, TElement, TNode};
 use style::font_metrics::FontMetrics;
 use style::global_style_data::GLOBAL_STYLE_DATA;
 use style::invalidation::element::restyle_hints::RestyleHint;
 use style::invalidation::stylesheets::StylesheetInvalidationSet;
 use style::media_queries::{MediaList, MediaType};
 use style::properties::style_structs::Font;
-use style::properties::{ComputedValues, PropertyId};
+use style::properties::{ComputedValues, LonghandId, NonCustomPropertyId, PropertyId, ShorthandId};
 use style::queries::values::PrefersColorScheme;
-use style::selector_parser::{PseudoElement, RestyleDamage, SnapshotMap};
-use style::shared_lock::{SharedRwLock, SharedRwLockReadGuard, StylesheetGuards};
-use style::stylesheets::{
-    CustomMediaMap, DocumentStyleSheet, Origin, Stylesheet, StylesheetInDocument,
-};
+use style::selector_parser::{PseudoElement, SnapshotMap};
+use style::servo::media_features::PointerCapabilities;
+use style::shared_lock::{SharedRwLock, StylesheetGuards};
+use style::stylesheets::{DocumentStyleSheet, Origin, Stylesheet};
 use style::stylist::Stylist;
 use style::traversal::DomTraversal;
 use style::traversal_flags::TraversalFlags;
 use style::values::computed::font::GenericFontFamily;
-use style::values::computed::{CSSPixelLength, FontSize, Length, NonNegativeLength, XLang};
+use style::values::computed::{CSSPixelLength, FontSize, Length, NonNegativeLength};
 use style::values::specified::font::{KeywordInfo, QueryFontMetricsFlags};
 use style::{Zero, driver};
 use style_traits::{CSSPixel, SpeculativePainter};
@@ -77,14 +82,18 @@ use url::Url;
 use webrender_api::ExternalScrollId;
 use webrender_api::units::{DevicePixel, LayoutVector2D};
 
+use crate::accessibility_tree::{AccessibilityContext, AccessibilityDamageMap, AccessibilityTree};
 use crate::context::{CachedImageOrError, ImageResolver, LayoutContext};
 use crate::display_list::{DisplayListBuilder, HitTest, PaintTimingHandler, StackingContextTree};
+use crate::dom::NodeExt;
 use crate::query::{
     find_character_offset_in_fragment_descendants, get_the_text_steps, process_box_area_request,
-    process_box_areas_request, process_client_rect_request, process_current_css_zoom_query,
-    process_effective_overflow_query, process_node_scroll_area_request,
-    process_offset_parent_query, process_padding_request, process_resolved_font_style_query,
-    process_resolved_style_request, process_scroll_container_query,
+    process_box_areas_request, process_client_rect_request,
+    process_containing_block_descendant_query, process_containing_block_query,
+    process_current_css_zoom_query, process_effective_overflow_query,
+    process_node_scroll_area_request, process_offset_parent_query, process_padding_request,
+    process_resolved_font_style_query, process_resolved_style_request,
+    process_scroll_container_query,
 };
 use crate::traversal::{RecalcStyle, compute_damage_and_rebuild_box_tree};
 use crate::{BoxTree, FragmentTree};
@@ -99,6 +108,9 @@ static STYLE_THREAD_POOL: Mutex<&LazyLock<style::global_style_data::StyleThreadP
 
 /// A CSS file to style the user agent stylesheet.
 static USER_AGENT_CSS: &[u8] = include_bytes!("./stylesheets/user-agent.css");
+
+/// A CSS file to style the user agent stylesheet in HTML documents.
+static HTML_MODE_CSS: &[u8] = include_bytes!("./stylesheets/html-mode.css");
 
 /// A CSS file to style the Servo browser.
 static SERVO_CSS: &[u8] = include_bytes!("./stylesheets/servo.css");
@@ -126,11 +138,11 @@ pub struct LayoutThread {
     /// Is the current reflow of an iframe, as opposed to a root window?
     is_iframe: bool,
 
-    /// The channel on which messages can be sent to the script thread.
-    script_chan: GenericSender<ScriptThreadMessage>,
-
     /// The channel on which messages can be sent to the time profiler.
     time_profiler_chan: profile_time::ProfilerChan,
+
+    /// The channel to send messages to the Embedder.
+    embedder_chan: ScriptToEmbedderChan,
 
     /// Reference to the script thread image cache.
     image_cache: Arc<dyn ImageCache>,
@@ -153,9 +165,8 @@ pub struct LayoutThread {
     /// Is this the first reflow in this LayoutThread?
     have_ever_generated_display_list: Cell<bool>,
 
-    /// Whether a new overflow calculation needs to happen due to changes to the fragment
-    /// tree. This is set to true every time a restyle requests overflow calculation.
-    need_overflow_calculation: Cell<bool>,
+    /// Whether the last display list we sent was effectively empty.
+    last_display_list_was_empty: Cell<bool>,
 
     /// Whether a new display list is necessary due to changes to layout or stacking
     /// contexts. This is set to true every time layout changes, even when a display list
@@ -163,6 +174,12 @@ pub struct LayoutThread {
     /// layout requests a display list, it is produced unconditionally, even when the
     /// layout trees remain the same.
     need_new_display_list: Cell<bool>,
+
+    /// Whether or not cumulative containing blocks offsets have been set into the
+    /// [`FragmentTree`]. This typically happens during [`StackingContextTree`]
+    /// construction, but if a layout query needs these value beforehand, they are
+    /// eagerly calculated.
+    need_containing_block_calculation: Cell<bool>,
 
     /// Whether or not the existing stacking context tree is dirty and needs to be
     /// rebuilt. This happens after a relayout or overflow update. The reason that we
@@ -202,9 +219,18 @@ pub struct LayoutThread {
     /// Handler for all Paint Timings
     paint_timing_handler: RefCell<Option<PaintTimingHandler>>,
 
-    /// Whether accessibility is active in this layout.
-    /// (Note: this is a temporary field which will be replaced with an optional accessibility tree member.)
+    /// Whether accessibility is active for this Layout.
     accessibility_active: Cell<bool>,
+
+    /// Layout's internal representation of its accessibility tree.
+    /// This is `None` if accessibility is not active.
+    accessibility_tree: RefCell<Option<AccessibilityTree>>,
+
+    /// See [Layout::force_accessibility_update()].
+    force_accessibility_update: Cell<bool>,
+
+    /// A callback to run whenever a web font from a `@font-face` rule finishes loading.
+    web_font_finished_loading_callback: StylesheetWebFontLoadFinishedCallback,
 }
 
 pub struct LayoutFactoryImpl();
@@ -245,29 +271,19 @@ impl Layout for LayoutThread {
     fn set_viewport_details(&mut self, viewport_details: ViewportDetails) -> bool {
         let device = self.stylist.device_mut();
         let device_pixel_ratio = Scale::new(viewport_details.hidpi_scale_factor.get());
-        if device.viewport_size() == viewport_details.size
-            && device.device_pixel_ratio() == device_pixel_ratio
+        let device_size = viewport_details.device_size.cast_unit();
+        if device.viewport_size() == viewport_details.size &&
+            device.device_pixel_ratio() == device_pixel_ratio &&
+            device.device_size() == device_size
         {
             return false;
         }
 
         device.set_viewport_size(viewport_details.size);
         device.set_device_pixel_ratio(device_pixel_ratio);
+        device.set_device_size(device_size);
         self.device_has_changed = true;
         true
-    }
-
-    fn load_web_fonts_from_stylesheet(
-        &self,
-        stylesheet: &ServoArc<Stylesheet>,
-        document_context: &WebFontDocumentContext,
-    ) {
-        let guard = stylesheet.shared_lock.read();
-        self.load_all_web_fonts_from_stylesheet_with_guard(
-            &DocumentStyleSheet(stylesheet.clone()),
-            &guard,
-            document_context,
-        );
     }
 
     #[servo_tracing::instrument(skip_all)]
@@ -275,11 +291,9 @@ impl Layout for LayoutThread {
         &mut self,
         stylesheet: ServoArc<Stylesheet>,
         before_stylesheet: Option<ServoArc<Stylesheet>>,
-        document_context: &WebFontDocumentContext,
     ) {
         let guard = stylesheet.shared_lock.read();
         let stylesheet = DocumentStyleSheet(stylesheet.clone());
-        self.load_all_web_fonts_from_stylesheet_with_guard(&stylesheet, &guard, document_context);
 
         match before_stylesheet {
             Some(insertion_point) => self.stylist.insert_stylesheet_before(
@@ -295,15 +309,67 @@ impl Layout for LayoutThread {
     fn remove_stylesheet(&mut self, stylesheet: ServoArc<Stylesheet>) {
         let guard = stylesheet.shared_lock.read();
         let stylesheet = DocumentStyleSheet(stylesheet.clone());
-        self.stylist.remove_stylesheet(stylesheet.clone(), &guard);
-        self.font_context
-            .remove_all_web_fonts_from_stylesheet(&stylesheet);
+        self.stylist.remove_stylesheet(stylesheet, &guard);
     }
 
     #[servo_tracing::instrument(skip_all)]
     fn remove_cached_image(&mut self, url: &ServoUrl) {
         let mut resolved_images_cache = self.resolved_images_cache.write();
         resolved_images_cache.remove(url);
+    }
+
+    fn node_rendering_type(
+        &self,
+        node: TrustedNodeAddress,
+        pseudo: Option<PseudoElement>,
+    ) -> NodeRenderingType {
+        with_layout_state(|| {
+            let node = unsafe { ServoLayoutNode::new(&node) };
+
+            // Nodes that are not currently styled are never being rendered.
+            if node
+                .as_element()
+                .is_none_or(|element| element.style_data().is_none())
+            {
+                return NodeRenderingType::NotRendered;
+            }
+
+            let node = match pseudo {
+                Some(pseudo) => node.with_pseudo(pseudo),
+                None => Some(node),
+            };
+            let Some(node) = node else {
+                return NodeRenderingType::NotRendered;
+            };
+            node.rendering_type()
+        })
+    }
+
+    /// Return the node corresponding to the containing block of the provided node.
+    #[servo_tracing::instrument(skip_all)]
+    fn query_containing_block(&self, node: TrustedNodeAddress) -> Option<UntrustedNodeAddress> {
+        with_layout_state(|| {
+            let node = unsafe { ServoLayoutNode::new(&node) };
+            process_containing_block_query(node)
+        })
+    }
+
+    /// Return the node corresponding to the containing block of the provided node.
+    #[servo_tracing::instrument(skip_all)]
+    fn query_containing_block_is_descendant(
+        &self,
+        root: TrustedNodeAddress,
+        possible_descendant: TrustedNodeAddress,
+    ) -> bool {
+        with_layout_state(|| {
+            let (root, possible_descendant) = unsafe {
+                (
+                    ServoLayoutNode::new(&root),
+                    ServoLayoutNode::new(&possible_descendant),
+                )
+            };
+            process_containing_block_descendant_query(root, possible_descendant)
+        })
     }
 
     /// Return the resolved values of this node's padding rect.
@@ -317,7 +383,7 @@ impl Layout for LayoutThread {
             }
 
             let node = unsafe { ServoLayoutNode::new(&node) };
-            process_padding_request(node.to_threadsafe())
+            process_padding_request(node)
         })
     }
 
@@ -342,12 +408,11 @@ impl Layout for LayoutThread {
 
             let node = unsafe { ServoLayoutNode::new(&node) };
             let stacking_context_tree = self.stacking_context_tree.borrow();
-            let stacking_context_tree = stacking_context_tree
-                .as_ref()
-                .expect("Should always have a StackingContextTree for box area queries");
+            let stacking_context_tree = stacking_context_tree.as_ref()?;
             process_box_area_request(
+                self,
                 stacking_context_tree,
-                node.to_threadsafe(),
+                node,
                 area,
                 exclude_transform_and_inline,
             )
@@ -359,28 +424,32 @@ impl Layout for LayoutThread {
     ///
     /// See <https://drafts.csswg.org/cssom-view/#dom-element-getclientrects>.
     #[servo_tracing::instrument(skip_all)]
-    fn query_box_areas(&self, node: TrustedNodeAddress, area: BoxAreaType) -> CSSPixelRectIterator {
+    fn query_box_areas(&self, node: TrustedNodeAddress, area: BoxAreaType) -> CSSPixelRectVec {
         with_layout_state(|| {
             // If we have not built a fragment tree yet, there is no way we have layout information for
             // this query, which can be run without forcing a layout (for IntersectionObserver).
             if self.fragment_tree.borrow().is_none() {
-                return Box::new(std::iter::empty()) as CSSPixelRectIterator;
+                return None;
             }
 
             let node = unsafe { ServoLayoutNode::new(&node) };
             let stacking_context_tree = self.stacking_context_tree.borrow();
-            let stacking_context_tree = stacking_context_tree
-                .as_ref()
-                .expect("Should always have a StackingContextTree for box area queries");
-            process_box_areas_request(stacking_context_tree, node.to_threadsafe(), area)
+            let stacking_context_tree = stacking_context_tree.as_ref()?;
+            Some(process_box_areas_request(
+                self,
+                stacking_context_tree,
+                node,
+                area,
+            ))
         })
+        .unwrap_or_default()
     }
 
     #[servo_tracing::instrument(skip_all)]
     fn query_client_rect(&self, node: TrustedNodeAddress) -> Rect<i32, CSSPixel> {
         with_layout_state(|| {
             let node = unsafe { ServoLayoutNode::new(&node) };
-            process_client_rect_request(node.to_threadsafe())
+            process_client_rect_request(node)
         })
     }
 
@@ -404,12 +473,10 @@ impl Layout for LayoutThread {
         with_layout_state(|| {
             let node = unsafe { ServoLayoutNode::new(&node) };
             let stacking_context_tree = self.stacking_context_tree.borrow();
-            let stacking_context_tree = stacking_context_tree
-                .as_ref()
-                .expect("Should always have a StackingContextTree for offset parent queries");
-            process_offset_parent_query(&stacking_context_tree.paint_info.scroll_tree, node)
-                .unwrap_or_default()
+            let stacking_context_tree = stacking_context_tree.as_ref()?;
+            process_offset_parent_query(self, &stacking_context_tree.paint_info.scroll_tree, node)
         })
+        .unwrap_or_default()
     }
 
     #[servo_tracing::instrument(skip_all)]
@@ -420,12 +487,7 @@ impl Layout for LayoutThread {
     ) -> Option<ScrollContainerResponse> {
         with_layout_state(|| {
             let node = unsafe { node.as_ref().map(|node| ServoLayoutNode::new(node)) };
-            let viewport_overflow = self
-                .box_tree
-                .borrow()
-                .as_ref()
-                .expect("Should have a BoxTree for all scroll container queries.")
-                .viewport_overflow;
+            let viewport_overflow = self.box_tree.borrow().as_ref()?.viewport_overflow;
             process_scroll_container_query(node, flags, viewport_overflow)
         })
     }
@@ -441,11 +503,11 @@ impl Layout for LayoutThread {
     ) -> String {
         with_layout_state(|| {
             let node = unsafe { ServoLayoutNode::new(&node) };
-            let document = node.owner_doc();
-            let document_shared_lock = document.style_shared_lock();
+            let document = unsafe { node.dangerous_style_node() }.owner_doc();
+            let shared_locks = document.shared_style_locks();
             let guards = StylesheetGuards {
-                author: &document_shared_lock.read(),
-                ua_or_user: &GLOBAL_STYLE_DATA.shared_lock.read(),
+                author: &shared_locks.author.read(),
+                ua_or_user: &shared_locks.ua_or_user.read(),
             };
             let snapshot_map = SnapshotMap::new();
 
@@ -457,7 +519,7 @@ impl Layout for LayoutThread {
                 TraversalFlags::empty(),
             );
 
-            process_resolved_style_request(&shared_style_context, node, &pseudo, &property_id)
+            process_resolved_style_request(self, &shared_style_context, node, &pseudo, &property_id)
         })
     }
 
@@ -471,11 +533,12 @@ impl Layout for LayoutThread {
     ) -> Option<ServoArc<Font>> {
         with_layout_state(|| {
             let node = unsafe { ServoLayoutNode::new(&node) };
-            let document = node.owner_doc();
-            let document_shared_lock = document.style_shared_lock();
+            let document = unsafe { node.dangerous_style_node() }.owner_doc();
+            let shared_locks = document.shared_style_locks();
+            let shared_author_lock = &shared_locks.author;
             let guards = StylesheetGuards {
-                author: &document_shared_lock.read(),
-                ua_or_user: &GLOBAL_STYLE_DATA.shared_lock.read(),
+                author: &shared_author_lock.read(),
+                ua_or_user: &shared_locks.ua_or_user.read(),
             };
             let snapshot_map = SnapshotMap::new();
             let shared_style_context = self.build_shared_style_context(
@@ -491,7 +554,7 @@ impl Layout for LayoutThread {
                 node,
                 value,
                 self.url.clone(),
-                document_shared_lock,
+                shared_author_lock,
             )
         })
     }
@@ -499,8 +562,8 @@ impl Layout for LayoutThread {
     #[servo_tracing::instrument(skip_all)]
     fn query_scrolling_area(&self, node: Option<TrustedNodeAddress>) -> Rect<i32, CSSPixel> {
         with_layout_state(|| {
-            let node = node.map(|node| unsafe { ServoLayoutNode::new(&node).to_threadsafe() });
-            process_node_scroll_area_request(node, self.fragment_tree.borrow().clone())
+            let node = node.map(|node| unsafe { ServoLayoutNode::new(&node) });
+            process_node_scroll_area_request(self, node, self.fragment_tree.borrow().clone())
         })
     }
 
@@ -508,31 +571,31 @@ impl Layout for LayoutThread {
     fn query_text_index(
         &self,
         node: TrustedNodeAddress,
-        point_in_node: Point2D<Au, CSSPixel>,
-    ) -> Option<usize> {
+        point_in_viewport: Point2D<Au, CSSPixel>,
+    ) -> Option<(OpaqueNode, Utf32CodeUnits)> {
         with_layout_state(|| {
-            let node = unsafe { ServoLayoutNode::new(&node).to_threadsafe() };
-            let stacking_context_tree = self.stacking_context_tree.borrow_mut();
+            let node = unsafe { ServoLayoutNode::new(&node) };
+            let stacking_context_tree = self.stacking_context_tree.borrow();
             let stacking_context_tree = stacking_context_tree.as_ref()?;
             find_character_offset_in_fragment_descendants(
                 &node,
                 stacking_context_tree,
-                point_in_node,
+                point_in_viewport,
             )
         })
     }
 
     #[servo_tracing::instrument(skip_all)]
-    fn query_elements_from_point(
+    fn hit_test(
         &self,
+        flags: HitTestFlags,
         point: webrender_api::units::LayoutPoint,
-        flags: layout_api::ElementsFromPointFlags,
-    ) -> Vec<layout_api::ElementsFromPointResult> {
+    ) -> HitTestResult {
         with_layout_state(|| {
             self.stacking_context_tree
                 .borrow_mut()
                 .as_mut()
-                .map(|tree| HitTest::run(tree, point, flags))
+                .map(|tree| HitTest::run(flags, tree, point))
                 .unwrap_or_default()
         })
     }
@@ -540,7 +603,7 @@ impl Layout for LayoutThread {
     #[servo_tracing::instrument(skip_all)]
     fn query_effective_overflow(&self, node: TrustedNodeAddress) -> Option<AxesOverflow> {
         with_layout_state(|| {
-            let node = unsafe { ServoLayoutNode::new(&node).to_threadsafe() };
+            let node = unsafe { ServoLayoutNode::new(&node) };
             process_effective_overflow_query(node)
         })
     }
@@ -613,8 +676,8 @@ impl Layout for LayoutThread {
 
     fn ensure_stacking_context_tree(&self, viewport_details: ViewportDetails) {
         with_layout_state(|| {
-            if self.stacking_context_tree.borrow().is_some()
-                && !self.need_new_stacking_context_tree.get()
+            if self.stacking_context_tree.borrow().is_some() &&
+                !self.need_new_stacking_context_tree.get()
             {
                 return;
             }
@@ -640,10 +703,24 @@ impl Layout for LayoutThread {
             return;
         };
 
-        stacking_context_tree
+        let offsets = stacking_context_tree
             .paint_info
             .scroll_tree
             .set_all_scroll_offsets(scroll_states);
+
+        // Accessibility node bounds are relative to the viewport origin, so a renderer scroll
+        // makes every one of them stale without any reflow occurring. Requesting an accessibility
+        // update schedules a rendering update and prevents that update's reflow from being skipped,
+        // allowing the bounds to be recomputed against the new scroll offsets. See #47161 for a
+        // transform-based alternative to recomputing every node.
+        if self.accessibility_active() {
+            let mut accessibility_tree = self.accessibility_tree.borrow_mut();
+            if let Some(accessibility_tree) = accessibility_tree.as_mut() {
+                accessibility_tree.add_pending_scroll_updates(offsets);
+            };
+
+            self.set_force_accessibility_update();
+        }
     }
 
     fn scroll_offset(&self, id: ExternalScrollId) -> Option<LayoutVector2D> {
@@ -666,12 +743,35 @@ impl Layout for LayoutThread {
         &mut self.stylist
     }
 
-    fn set_accessibility_active(&self, active: bool) {
-        if !(pref!(accessibility_enabled)) {
+    fn set_accessibility_active(&self, active: bool, epoch: Epoch) {
+        self.accessibility_active.set(active);
+        if !active {
+            self.accessibility_tree.replace(None);
             return;
         }
 
-        self.accessibility_active.replace(active);
+        self.set_force_accessibility_update();
+        let mut accessibility_tree = self.accessibility_tree.borrow_mut();
+        if accessibility_tree.is_some() {
+            return;
+        }
+        *accessibility_tree = Some(AccessibilityTree::new(self.id.into(), epoch));
+    }
+
+    fn accessibility_active(&self) -> bool {
+        self.accessibility_active.get()
+    }
+
+    fn force_accessibility_update(&self) -> bool {
+        self.force_accessibility_update.get()
+    }
+
+    fn set_force_accessibility_update(&self) {
+        self.force_accessibility_update.set(true);
+    }
+
+    fn font_context(&self) -> &Arc<FontContext> {
+        &self.font_context
     }
 }
 
@@ -696,26 +796,38 @@ impl LayoutThread {
             MediaType::screen(),
             QuirksMode::NoQuirks,
             config.viewport_details.size,
+            config.viewport_details.device_size.cast_unit(),
             Scale::new(config.viewport_details.hidpi_scale_factor.get()),
             Box::new(LayoutFontMetricsProvider(config.font_context.clone())),
             ComputedValues::initial_values_with_font_override(font),
             config.theme.into(),
+            PointerCapabilities::default(),
+            PointerCapabilities::default(),
         );
+
+        let locked_script_channel = Mutex::new(config.script_chan.clone());
+        let pipeline_id = config.id;
+        let web_font_finished_loading_callback = move |event| {
+            let _ = locked_script_channel
+                .lock()
+                .send(ScriptThreadMessage::WebFontLoadFinished(pipeline_id, event));
+        };
 
         LayoutThread {
             id: config.id,
             webview_id: config.webview_id,
             url: config.url,
             is_iframe: config.is_iframe,
-            script_chan: config.script_chan.clone(),
             time_profiler_chan: config.time_profiler_chan,
+            embedder_chan: config.embedder_chan.clone(),
             registered_painters: RegisteredPaintersImpl(Default::default()),
             image_cache: config.image_cache,
             font_context: config.font_context,
             have_added_user_agent_stylesheets: false,
             have_ever_generated_display_list: Cell::new(false),
+            last_display_list_was_empty: Cell::new(true),
             device_has_changed: false,
-            need_overflow_calculation: Cell::new(false),
+            need_containing_block_calculation: Cell::new(false),
             need_new_display_list: Cell::new(false),
             need_new_stacking_context_tree: Cell::new(false),
             box_tree: Default::default(),
@@ -729,6 +841,10 @@ impl LayoutThread {
             paint_timing_handler: Default::default(),
             user_stylesheets: config.user_stylesheets,
             accessibility_active: Cell::new(false),
+            accessibility_tree: Default::default(),
+            force_accessibility_update: Cell::new(false),
+            web_font_finished_loading_callback: Arc::new(web_font_finished_loading_callback)
+                as StylesheetWebFontLoadFinishedCallback,
         }
     }
 
@@ -753,37 +869,6 @@ impl LayoutThread {
         }
     }
 
-    fn load_all_web_fonts_from_stylesheet_with_guard(
-        &self,
-        stylesheet: &DocumentStyleSheet,
-        guard: &SharedRwLockReadGuard,
-        document_context: &WebFontDocumentContext,
-    ) {
-        let custom_media = &CustomMediaMap::default();
-        if !stylesheet.is_effective_for_device(self.stylist.device(), custom_media, guard) {
-            return;
-        }
-
-        let locked_script_channel = Mutex::new(self.script_chan.clone());
-        let pipeline_id = self.id;
-        let web_font_finished_loading_callback = move |succeeded: bool| {
-            if succeeded {
-                let _ = locked_script_channel
-                    .lock()
-                    .send(ScriptThreadMessage::WebFontLoaded(pipeline_id));
-            }
-        };
-
-        self.font_context.add_all_web_fonts_from_stylesheet(
-            self.webview_id,
-            stylesheet,
-            guard,
-            self.stylist.device(),
-            Arc::new(web_font_finished_loading_callback) as StylesheetWebFontLoadFinishedCallback,
-            document_context,
-        );
-    }
-
     /// In some cases, if a restyle isn't necessary we can skip doing any work for layout
     /// entirely. This check allows us to return early from layout without doing any work
     /// at all.
@@ -794,6 +879,10 @@ impl LayoutThread {
         }
         // We always need to at least build a fragment tree.
         if self.fragment_tree.borrow().is_none() {
+            return false;
+        }
+        // If the accessibility tree needs an update, we need reflow to build the accessibility tree.
+        if self.force_accessibility_update() || reflow_request.accessibility_damage.is_some() {
             return false;
         }
 
@@ -807,8 +896,8 @@ impl LayoutThread {
         // If only the stacking context tree is required, and it's up-to-date,
         // layout is unnecessary, otherwise a layout is necessary.
         if necessary_phases == ReflowPhases::StackingContextTreeConstruction {
-            return self.stacking_context_tree.borrow().is_some()
-                && !self.need_new_stacking_context_tree.get();
+            return self.stacking_context_tree.borrow().is_some() &&
+                !self.need_new_stacking_context_tree.get();
         }
 
         // Otherwise, the only interesting thing is whether the current display
@@ -821,7 +910,10 @@ impl LayoutThread {
     }
 
     fn maybe_print_reflow_event(&self, reflow_request: &ReflowRequest) {
-        if !self.debug.relayout_event {
+        if !self
+            .debug
+            .is_enabled(DiagnosticsLoggingOption::RelayoutEvent)
+        {
             return;
         }
 
@@ -848,8 +940,85 @@ impl LayoutThread {
         }
     }
 
+    fn handle_accessibility_tree_update(
+        &self,
+        root_element: &ServoLayoutNode,
+        reflow_request: &mut ReflowRequest,
+        reflow_statistics: &mut ReflowStatistics,
+    ) -> bool {
+        let Some(accessibility_damage) = std::mem::take(&mut reflow_request.accessibility_damage)
+        else {
+            return false;
+        };
+        if !self.force_accessibility_update() && accessibility_damage.is_empty() {
+            return false;
+        }
+
+        let mut accessibility_tree = self.accessibility_tree.borrow_mut();
+        let Some(accessibility_tree) = accessibility_tree.as_mut() else {
+            return false;
+        };
+
+        let accessibility_tree = &mut *accessibility_tree;
+
+        // Check for the stacking context tree before draining any state out of `reflow_request`, so
+        // that we don't discard accessibility damage if it is missing. In practice it is always
+        // present here, since we only reach this method for an `UpdateTheRendering` reflow.
+        let stacking_context_tree = self.stacking_context_tree.borrow();
+        let Some(stacking_context_tree) = stacking_context_tree.as_ref() else {
+            return false;
+        };
+        debug_assert!(!self.need_new_stacking_context_tree.get());
+
+        let rooted_nodes =
+            std::mem::take(&mut reflow_request.rooted_nodes_for_accessibility_integrity_check);
+
+        let damage: AccessibilityDamageMap = accessibility_damage
+            .into_iter()
+            .map(|(address, damage)| {
+                let node = unsafe { ServoLayoutNode::new(&address) };
+                (node.opaque(), (node, damage))
+            })
+            .collect();
+
+        let accessibility_context = AccessibilityContext {
+            layout_thread: self,
+            stacking_context_tree,
+        };
+
+        let (tree_update, counters) = accessibility_tree.update_tree(
+            root_element,
+            damage,
+            accessibility_context,
+            rooted_nodes,
+        );
+        if let Some(tree_update) = tree_update {
+            // FIXME: Handle send error. Could have a method on accessibility tree to
+            // finalise after sending, removing accessibility damage? On fail, retain damage
+            // for next reflow, as well as retaining document.needs_accessibility_update.
+            let _ = self
+                .embedder_chan
+                .send(EmbedderMsg::AccessibilityTreeUpdate(
+                    self.webview_id,
+                    tree_update,
+                    accessibility_tree.embedder_epoch(),
+                ));
+        }
+
+        reflow_statistics.nodes_updated_from_dom = counters.nodes_updated_from_dom;
+        reflow_statistics.nodes_updated_from_tree = counters.nodes_updated_from_tree;
+        reflow_statistics.nodes_updated_bounds = counters.nodes_updated_bounds;
+        reflow_statistics.nodes_in_tree_update = counters.nodes_in_tree_update;
+
+        self.force_accessibility_update.set(false);
+        true
+    }
+
     /// The high-level routine that performs layout.
-    #[servo_tracing::instrument(skip_all)]
+    #[servo_tracing::instrument(
+        skip_all,
+        fields(goal = tracing::field::debug(&reflow_request.reflow_goal))
+    )]
     fn handle_reflow(&mut self, mut reflow_request: ReflowRequest) -> Option<ReflowResult> {
         self.maybe_print_reflow_event(&reflow_request);
 
@@ -864,8 +1033,13 @@ impl LayoutThread {
         }
 
         let document = unsafe { ServoLayoutNode::new(&reflow_request.document) };
-        let document = document.as_document().unwrap();
+        let document = unsafe { document.dangerous_style_node() }
+            .as_document()
+            .unwrap();
         let Some(root_element) = document.root_element() else {
+            if !self.last_display_list_was_empty.get() {
+                return self.clear_layout_trees_and_send_empty_display_list(&reflow_request);
+            }
             debug!("layout: No root node: bailing");
             return None;
         };
@@ -882,15 +1056,8 @@ impl LayoutThread {
         });
         let mut reflow_statistics = Default::default();
 
-        let (mut reflow_phases_run, iframe_sizes) = self.restyle_and_build_trees(
-            &mut reflow_request,
-            document,
-            root_element,
-            &image_resolver,
-        );
-        if self.calculate_overflow() {
-            reflow_phases_run.insert(ReflowPhasesRun::CalculatedOverflow);
-        }
+        let (mut reflow_phases_run, iframe_sizes, changed_web_fonts) = self
+            .restyle_and_build_trees(&mut reflow_request, document, root_element, &image_resolver);
         if self.build_stacking_context_tree_for_reflow(&reflow_request) {
             reflow_phases_run.insert(ReflowPhasesRun::BuiltStackingContextTree);
         }
@@ -900,12 +1067,40 @@ impl LayoutThread {
         if self.handle_update_scroll_node_request(&reflow_request) {
             reflow_phases_run.insert(ReflowPhasesRun::UpdatedScrollNodeOffset);
         }
+        if self.handle_accessibility_tree_update(
+            &root_element.as_node(),
+            &mut reflow_request,
+            &mut reflow_statistics,
+        ) {
+            reflow_phases_run.insert(ReflowPhasesRun::UpdatedAccessibilityTree);
+        }
+
+        if self.debug.is_enabled(DiagnosticsLoggingOption::FlowTree) &&
+            reflow_phases_run.contains(ReflowPhasesRun::RanLayout) &&
+            let Some(fragment_tree) = &*self.fragment_tree.borrow()
+        {
+            fragment_tree.print();
+        }
 
         let pending_images = std::mem::take(&mut *image_resolver.pending_images.lock());
         let pending_rasterization_images =
             std::mem::take(&mut *image_resolver.pending_rasterization_images.lock());
         let pending_svg_elements_for_serialization =
             std::mem::take(&mut *image_resolver.pending_svg_elements_for_serialization.lock());
+
+        let (lcp_candidate, lcp_node_address) = self
+            .paint_timing_handler
+            .borrow()
+            .as_ref()
+            .map(|handler| {
+                (
+                    handler.largest_contentful_paint_candidate(),
+                    handler
+                        .lcp_node()
+                        .map(|node| UntrustedNodeAddress(node.id() as *const c_void)),
+                )
+            })
+            .unwrap_or_default();
 
         Some(ReflowResult {
             reflow_phases_run,
@@ -914,6 +1109,9 @@ impl LayoutThread {
             pending_svg_elements_for_serialization,
             iframe_sizes: Some(iframe_sizes),
             reflow_statistics,
+            changed_web_fonts,
+            lcp_candidate,
+            lcp_node_address,
         })
     }
 
@@ -921,40 +1119,33 @@ impl LayoutThread {
     fn prepare_stylist_for_reflow<'dom>(
         &mut self,
         reflow_request: &ReflowRequest,
-        document: ServoLayoutDocument<'dom>,
+        document: ServoDangerousStyleDocument<'dom>,
         guards: &StylesheetGuards,
         ua_stylesheets: &UserAgentStylesheets,
-    ) -> StylesheetInvalidationSet {
-        if !self.have_added_user_agent_stylesheets {
+    ) -> StylistStylesheetUpdate {
+        let need_user_agent_stylesheet_addition = !self.have_added_user_agent_stylesheets;
+        if need_user_agent_stylesheet_addition {
             for stylesheet in &ua_stylesheets.user_agent_stylesheets {
                 self.stylist
                     .append_stylesheet(stylesheet.clone(), guards.ua_or_user);
-                self.load_all_web_fonts_from_stylesheet_with_guard(
-                    stylesheet,
+            }
+
+            if document.is_html_document() {
+                self.stylist.append_stylesheet(
+                    ua_stylesheets.html_mode_stylesheet.clone(),
                     guards.ua_or_user,
-                    &reflow_request.document_context,
                 );
             }
 
             for user_stylesheet in self.user_stylesheets.iter() {
                 self.stylist
                     .append_stylesheet(user_stylesheet.clone(), guards.ua_or_user);
-                self.load_all_web_fonts_from_stylesheet_with_guard(
-                    user_stylesheet,
-                    guards.ua_or_user,
-                    &reflow_request.document_context,
-                );
             }
 
             if self.stylist.quirks_mode() == QuirksMode::Quirks {
                 self.stylist.append_stylesheet(
                     ua_stylesheets.quirks_mode_stylesheet.clone(),
                     guards.ua_or_user,
-                );
-                self.load_all_web_fonts_from_stylesheet_with_guard(
-                    &ua_stylesheets.quirks_mode_stylesheet,
-                    guards.ua_or_user,
-                    &reflow_request.document_context,
                 );
             }
             self.have_added_user_agent_stylesheets = true;
@@ -965,32 +1156,51 @@ impl LayoutThread {
                 .force_stylesheet_origins_dirty(Origin::Author.into());
         }
 
-        // Flush shadow roots stylesheets if dirty.
-        document.flush_shadow_roots_stylesheets(&mut self.stylist, guards.author);
+        document.flush_shadow_root_stylesheets_if_necessary(&mut self.stylist, guards.author);
 
-        self.stylist.flush(guards)
+        let invalidation_set = self.stylist.flush(guards);
+
+        let changed_web_fonts =
+            if need_user_agent_stylesheet_addition || reflow_request.stylesheets_changed() {
+                self.font_context.invalidate_font_feature_values_map();
+                // Load new @font-face rules and remove old ones if necessary.
+                // TODO: Can we make the invalidation set tell us whether any @font-face rules changed?
+                self.font_context.rebuild_font_face_set(
+                    self.webview_id,
+                    &self.stylist,
+                    guards,
+                    self.web_font_finished_loading_callback.clone(),
+                    &reflow_request.document_context,
+                )
+            } else {
+                WebFontSetDifference::default()
+            };
+
+        StylistStylesheetUpdate {
+            invalidation_set,
+            changed_web_fonts,
+        }
     }
 
     #[servo_tracing::instrument(skip_all)]
     fn restyle_and_build_trees(
         &mut self,
         reflow_request: &mut ReflowRequest,
-        document: ServoLayoutDocument<'_>,
+        document: ServoDangerousStyleDocument<'_>,
         root_element: ServoLayoutElement<'_>,
         image_resolver: &Arc<ImageResolver>,
-    ) -> (ReflowPhasesRun, IFrameSizes) {
+    ) -> (ReflowPhasesRun, IFrameSizes, WebFontSetDifference) {
         let mut snapshot_map = SnapshotMap::new();
         let _snapshot_setter = match reflow_request.restyle.as_mut() {
             Some(restyle) => SnapshotSetter::new(restyle, &mut snapshot_map),
             None => return Default::default(),
         };
 
-        let document_shared_lock = document.style_shared_lock();
-        let author_guard = document_shared_lock.read();
-        let ua_stylesheets = &*UA_STYLESHEETS;
+        let shared_locks = document.shared_style_locks();
+        let user_agent_stylesheets = get_ua_stylesheets(&shared_locks.ua_or_user);
         let guards = StylesheetGuards {
-            author: &author_guard,
-            ua_or_user: &GLOBAL_STYLE_DATA.shared_lock.read(),
+            author: &shared_locks.author.read(),
+            ua_or_user: &shared_locks.ua_or_user.read(),
         };
 
         let rayon_pool = STYLE_THREAD_POOL.lock();
@@ -998,6 +1208,7 @@ impl LayoutThread {
         let rayon_pool = rayon_pool.as_ref();
 
         let device_has_changed = std::mem::replace(&mut self.device_has_changed, false);
+        let dangerous_root_element = unsafe { root_element.dangerous_style_element() };
         if device_has_changed {
             let sheet_origins_affected_by_device_change = self
                 .stylist
@@ -1005,13 +1216,20 @@ impl LayoutThread {
             self.stylist
                 .force_stylesheet_origins_dirty(sheet_origins_affected_by_device_change);
 
-            if let Some(mut data) = root_element.mutate_data() {
+            if let Some(mut data) = dangerous_root_element.mutate_data() {
                 data.hint.insert(RestyleHint::recascade_subtree());
             }
         }
 
-        self.prepare_stylist_for_reflow(reflow_request, document, &guards, ua_stylesheets)
-            .process_style(root_element, Some(&snapshot_map));
+        let stylist_update = self.prepare_stylist_for_reflow(
+            reflow_request,
+            document,
+            &guards,
+            &user_agent_stylesheets,
+        );
+        stylist_update
+            .invalidation_set
+            .process_style(dangerous_root_element, Some(&snapshot_map));
 
         if self.previously_highlighted_dom_node.get() != reflow_request.highlighted_dom_node {
             // Need to manually force layout to build a new display list regardless of whether the box tree
@@ -1032,9 +1250,12 @@ impl LayoutThread {
             ),
             font_context: self.font_context.clone(),
             iframe_sizes: Mutex::default(),
-            use_rayon: rayon_pool.is_some(),
+            allow_parallel_layout: rayon_pool.is_some(),
             image_resolver: image_resolver.clone(),
             painter_id: self.webview_id.into(),
+            parallelism_job_count_minimum: pref!(layout_parallelism_job_count_minimum) as usize,
+            parallelism_job_size_minimum: pref!(layout_parallelism_job_size_minimum) as usize,
+            device_size: reflow_request.viewport_details.device_size.cast_unit(),
         };
 
         let restyle = reflow_request
@@ -1051,12 +1272,14 @@ impl LayoutThread {
                 ServoLayoutNode::new(&restyle.dirty_root.unwrap())
                     .as_element()
                     .unwrap()
+                    .dangerous_style_element()
             };
 
             recalc_style_traversal = RecalcStyle::new(&layout_context);
             let token = {
-                let shared =
-                    DomTraversal::<ServoLayoutElement>::shared_context(&recalc_style_traversal);
+                let shared = DomTraversal::<ServoDangerousStyleElement>::shared_context(
+                    &recalc_style_traversal,
+                );
                 RecalcStyle::pre_traverse(original_dirty_root, shared)
             };
 
@@ -1070,21 +1293,23 @@ impl LayoutThread {
 
         let root_node = root_element.as_node();
         let damage_from_environment = if device_has_changed {
-            RestyleDamage::RELAYOUT
+            LayoutDamage::Relayout
         } else {
-            Default::default()
+            LayoutDamage::empty()
         };
 
         let mut box_tree = self.box_tree.borrow_mut();
+        let mut layout_roots = Vec::new();
         let damage = {
             let box_tree = &mut *box_tree;
             let mut compute_damage_and_build_box_tree = || {
                 compute_damage_and_rebuild_box_tree(
                     box_tree,
                     &layout_context,
-                    dirty_root,
+                    dirty_root.layout_node(),
                     root_node,
                     damage_from_environment,
+                    &mut layout_roots,
                 )
             };
 
@@ -1095,18 +1320,57 @@ impl LayoutThread {
             }
         };
 
-        if damage.contains(RestyleDamage::RECALCULATE_OVERFLOW) {
-            self.need_overflow_calculation.set(true);
-        }
-        if damage.contains(RestyleDamage::REBUILD_STACKING_CONTEXT) {
+        if damage.contains(LayoutDamage::RebuildStackingContextTree) {
             self.need_new_stacking_context_tree.set(true);
         }
-        if damage.contains(RestyleDamage::REPAINT) {
+        if damage.contains(LayoutDamage::Repaint) {
             self.need_new_display_list.set(true);
         }
-        if !damage.contains(RestyleDamage::RELAYOUT) {
-            layout_context.style_context.stylist.rule_tree().maybe_gc();
-            return (ReflowPhasesRun::empty(), IFrameSizes::default());
+
+        if !damage.contains(LayoutDamage::Relayout) {
+            if damage.contains(LayoutDamage::RecalculateOverflow) {
+                assert!(self.need_new_display_list.get());
+                assert!(self.need_new_stacking_context_tree.get());
+                self.fragment_tree
+                    .borrow()
+                    .as_ref()
+                    .expect("Should always have a FragmentTree when layout unnecessary")
+                    .clear_scrollable_overflow();
+            }
+
+            if !damage.contains(LayoutDamage::DescendantCollectedAsLayoutRoot) {
+                layout_context.style_context.stylist.rule_tree().maybe_gc();
+                return (
+                    ReflowPhasesRun::empty(),
+                    IFrameSizes::default(),
+                    stylist_update.changed_web_fonts,
+                );
+            }
+
+            debug_assert!(!layout_roots.is_empty());
+            if layout_roots
+                .iter()
+                .all(|layout_root| layout_root.try_layout(&layout_context))
+            {
+                if self.accessibility_active() {
+                    // TODO(#47162) Compute accessibility damage rather than forcing a full update.
+                    self.set_force_accessibility_update();
+                }
+
+                return (
+                    ReflowPhasesRun::RanLayout,
+                    std::mem::take(&mut *layout_context.iframe_sizes.lock()),
+                    stylist_update.changed_web_fonts,
+                );
+            }
+
+            // LayoutRoot layout has failed and now the layout root and descendants may have
+            // been only partially laid out. As the next step is to do a full `FragmentTree`
+            // layout, we need to ensure that none of the partial layout results corrupt
+            // the upcoming full layout.
+            for layout_root in layout_roots {
+                layout_root.handle_failed_layout_root_layout();
+            }
         }
 
         let box_tree = &*box_tree;
@@ -1125,19 +1389,24 @@ impl LayoutThread {
 
         *self.fragment_tree.borrow_mut() = Some(fragment_tree);
 
-        if self.debug.style_tree {
+        if self.debug.is_enabled(DiagnosticsLoggingOption::StyleTree) {
             println!(
                 "{:?}",
-                ShowSubtreeDataAndPrimaryValues(root_element.as_node())
+                ShowSubtreeDataAndPrimaryValues(dangerous_root_element.as_node())
             );
         }
-        if self.debug.rule_tree {
+        if self.debug.is_enabled(DiagnosticsLoggingOption::RuleTree) {
             recalc_style_traversal
                 .context()
                 .style_context
                 .stylist
                 .rule_tree()
                 .dump_stdout(&layout_context.style_context.guards);
+        }
+
+        if self.accessibility_active() {
+            // TODO(#47162) Compute accessibility damage rather than forcing a full upate.
+            self.set_force_accessibility_update();
         }
 
         // GC the rule tree if some heuristics are met.
@@ -1147,27 +1416,8 @@ impl LayoutThread {
         (
             ReflowPhasesRun::RanLayout,
             std::mem::take(&mut *iframe_sizes),
+            stylist_update.changed_web_fonts,
         )
-    }
-
-    #[servo_tracing::instrument(name = "Overflow Calculation", skip_all)]
-    fn calculate_overflow(&self) -> bool {
-        if !self.need_overflow_calculation.get() {
-            return false;
-        }
-
-        if let Some(fragment_tree) = &*self.fragment_tree.borrow() {
-            fragment_tree.calculate_scrollable_overflow();
-            if self.debug.flow_tree {
-                fragment_tree.print();
-            }
-        }
-
-        self.need_overflow_calculation.set(false);
-        assert!(self.need_new_display_list.get());
-        assert!(self.need_new_stacking_context_tree.get());
-
-        true
     }
 
     fn build_stacking_context_tree_for_reflow(&self, reflow_request: &ReflowRequest) -> bool {
@@ -1194,6 +1444,9 @@ impl LayoutThread {
             .as_ref()
             .map(|tree| tree.paint_info.scroll_tree.scroll_offsets());
 
+        // This will be done during `StackingContextTree::new` below
+        self.need_containing_block_calculation.set(false);
+
         // Build the StackingContextTree. This turns the `FragmentTree` into a
         // tree of fragments in CSS painting order and also creates all
         // applicable spatial and clip nodes.
@@ -1215,7 +1468,7 @@ impl LayoutThread {
                 .set_all_scroll_offsets(&old_scroll_offsets);
         }
 
-        if self.debug.scroll_tree {
+        if self.debug.is_enabled(DiagnosticsLoggingOption::ScrollTree) {
             new_stacking_context_tree
                 .paint_info
                 .scroll_tree
@@ -1289,22 +1542,23 @@ impl LayoutThread {
             paint_timing_handler,
             reflow_statistics,
         );
+        paint_timing_handler.mark_paint_timing(reflow_request.halt_lcp);
         self.paint_api.send_display_list(
             self.webview_id,
             &stacking_context_tree.paint_info,
             built_display_list,
         );
 
-        if paint_timing_handler.did_lcp_candidate_update() {
-            if let Some(lcp_candidate) = paint_timing_handler.largest_contentful_paint_candidate() {
-                self.paint_api.send_lcp_candidate(
-                    lcp_candidate,
-                    self.webview_id,
-                    self.id,
-                    stacking_context_tree.paint_info.epoch,
-                );
-                paint_timing_handler.unset_lcp_candidate_updated();
-            }
+        if paint_timing_handler.did_lcp_candidate_update() &&
+            let Some(lcp_candidate) = paint_timing_handler.largest_contentful_paint_candidate()
+        {
+            self.paint_api.send_lcp_candidate(
+                lcp_candidate,
+                self.webview_id,
+                self.id,
+                stacking_context_tree.paint_info.epoch,
+            );
+            paint_timing_handler.unset_lcp_candidate_updated();
         }
 
         let (keys, instance_keys) = self
@@ -1312,7 +1566,7 @@ impl LayoutThread {
             .collect_unused_webrender_resources(false /* all */);
         self.paint_api
             .remove_unused_font_resources(self.webview_id.into(), keys, instance_keys);
-
+        self.last_display_list_was_empty.set(false);
         self.have_ever_generated_display_list.set(true);
         self.need_new_display_list.set(false);
         self.previously_highlighted_dom_node
@@ -1345,6 +1599,16 @@ impl LayoutThread {
                 offset,
                 external_scroll_id,
             );
+
+            if self.accessibility_active() &&
+                let Some(accessibility_tree) = self.accessibility_tree.borrow_mut().as_mut()
+            {
+                accessibility_tree.add_pending_scroll_update(external_scroll_id, offset);
+
+                // Ensure the scroll updates are applied in the accessibility tree and sent to the
+                // embedder, even if there are no other changes which affect the accessibility tree.
+                self.set_force_accessibility_update();
+            }
             true
         } else {
             false
@@ -1367,18 +1631,76 @@ impl LayoutThread {
             },
         })
     }
+
+    /// Clear all cached layout trees and send an empty display list to paint.
+    fn clear_layout_trees_and_send_empty_display_list(
+        &self,
+        reflow_request: &ReflowRequest,
+    ) -> Option<ReflowResult> {
+        // Clear layout trees.
+        self.box_tree.borrow_mut().take();
+        self.fragment_tree.borrow_mut().take();
+        self.stacking_context_tree.borrow_mut().take();
+
+        // Send empty display list.
+        let paint_info = PaintDisplayListInfo::new(
+            reflow_request.viewport_details,
+            Size2D::zero(),
+            self.id.into(),
+            reflow_request.epoch,
+            AxesScrollSensitivity {
+                x: ScrollType::InputEvents | ScrollType::Script,
+                y: ScrollType::InputEvents | ScrollType::Script,
+            },
+            !self.have_ever_generated_display_list.get(),
+        );
+        let mut builder = webrender_api::DisplayListBuilder::new(paint_info.pipeline_id);
+        builder.begin();
+        let (_, empty_display_list) = builder.end();
+
+        self.paint_api
+            .send_display_list(self.webview_id, &paint_info, empty_display_list);
+        self.last_display_list_was_empty.set(true);
+        self.have_ever_generated_display_list.set(true);
+
+        Some(ReflowResult {
+            reflow_phases_run: ReflowPhasesRun::BuiltDisplayList,
+            ..Default::default()
+        })
+    }
+
+    pub(crate) fn ensure_containing_block_calculation(&self) {
+        if !self.need_containing_block_calculation.get() {
+            return;
+        }
+        let fragment_tree = self.fragment_tree.borrow();
+        fragment_tree.as_ref().expect("missing fragment tree").find(
+            |fragment, _level, containing_block| {
+                fragment.set_containing_block(containing_block);
+                None::<()>
+            },
+        );
+        self.need_containing_block_calculation.set(false)
+    }
 }
 
-fn get_ua_stylesheets() -> Result<UserAgentStylesheets, &'static str> {
+fn get_ua_stylesheets(shared_lock: &SharedRwLock) -> Rc<UserAgentStylesheets> {
+    // There is an assumption here that there is only a single ScriptThread per thread, which
+    // is currently the case in Servo. If this were to change, these user agent stylesheets
+    // would need to be managed by the ScriptThread instance.
+    thread_local! {
+        static USER_AGENT_STYLESHEETS: OnceCell<Rc<UserAgentStylesheets>> = const { OnceCell::new() };
+    }
+
     fn parse_ua_stylesheet(
         shared_lock: &SharedRwLock,
         filename: &str,
         content: &[u8],
-    ) -> Result<DocumentStyleSheet, &'static str> {
-        let url = Url::parse(&format!("chrome://resources/{:?}", filename))
-            .ok()
-            .unwrap();
-        Ok(DocumentStyleSheet(ServoArc::new(Stylesheet::from_bytes(
+    ) -> DocumentStyleSheet {
+        let url = Url::parse(&format!("chrome://resources/{filename}")).unwrap_or_else(|_| {
+            panic!("Could not parse user stylesheet URL: {filename}");
+        });
+        DocumentStyleSheet(ServoArc::new(Stylesheet::from_bytes(
             content,
             url.into(),
             None,
@@ -1389,29 +1711,37 @@ fn get_ua_stylesheets() -> Result<UserAgentStylesheets, &'static str> {
             None,
             None,
             QuirksMode::NoQuirks,
-        ))))
+        )))
     }
 
-    let shared_lock = &GLOBAL_STYLE_DATA.shared_lock;
+    USER_AGENT_STYLESHEETS.with(|user_stylesheets| {
+        user_stylesheets
+            .get_or_init(|| {
+                // FIXME: presentational-hints.css should be at author origin with zero specificity.
+                //        (Does it make a difference?)
+                let user_agent_stylesheets = vec![
+                    parse_ua_stylesheet(shared_lock, "user-agent.css", USER_AGENT_CSS),
+                    parse_ua_stylesheet(shared_lock, "servo.css", SERVO_CSS),
+                    parse_ua_stylesheet(
+                        shared_lock,
+                        "presentational-hints.css",
+                        PRESENTATIONAL_HINTS_CSS,
+                    ),
+                ];
 
-    // FIXME: presentational-hints.css should be at author origin with zero specificity.
-    //        (Does it make a difference?)
-    let user_agent_stylesheets = vec![
-        parse_ua_stylesheet(shared_lock, "user-agent.css", USER_AGENT_CSS)?,
-        parse_ua_stylesheet(shared_lock, "servo.css", SERVO_CSS)?,
-        parse_ua_stylesheet(
-            shared_lock,
-            "presentational-hints.css",
-            PRESENTATIONAL_HINTS_CSS,
-        )?,
-    ];
+                let html_mode_stylesheet =
+                    parse_ua_stylesheet(shared_lock, "html-mode.css", HTML_MODE_CSS);
 
-    let quirks_mode_stylesheet =
-        parse_ua_stylesheet(shared_lock, "quirks-mode.css", QUIRKS_MODE_CSS)?;
+                let quirks_mode_stylesheet =
+                    parse_ua_stylesheet(shared_lock, "quirks-mode.css", QUIRKS_MODE_CSS);
 
-    Ok(UserAgentStylesheets {
-        user_agent_stylesheets,
-        quirks_mode_stylesheet,
+                Rc::new(UserAgentStylesheets {
+                    user_agent_stylesheets,
+                    html_mode_stylesheet,
+                    quirks_mode_stylesheet,
+                })
+            })
+            .clone()
     })
 }
 
@@ -1419,18 +1749,11 @@ fn get_ua_stylesheets() -> Result<UserAgentStylesheets, &'static str> {
 pub struct UserAgentStylesheets {
     /// The user agent stylesheets.
     pub user_agent_stylesheets: Vec<DocumentStyleSheet>,
+    /// The user agent stylesheet for HTML documents.
+    pub html_mode_stylesheet: DocumentStyleSheet,
     /// The quirks mode stylesheet.
     pub quirks_mode_stylesheet: DocumentStyleSheet,
 }
-
-static UA_STYLESHEETS: LazyLock<UserAgentStylesheets> =
-    LazyLock::new(|| match get_ua_stylesheets() {
-        Ok(stylesheets) => stylesheets,
-        Err(filename) => {
-            error!("Failed to load UA stylesheet {}!", filename);
-            process::exit(1);
-        },
-    });
 
 struct RegisteredPainterImpl {
     painter: Box<dyn Painter>,
@@ -1514,7 +1837,7 @@ impl FontMetricsProvider for LayoutFontMetricsProvider {
             .zero_horizontal_advance
             .or_else(|| {
                 font_group
-                    .find_by_codepoint(font_context, '0', None, XLang::get_initial_value())?
+                    .find_by_codepoint(font_context, '0', None, Language::UNKNOWN)?
                     .metrics
                     .zero_horizontal_advance
             })
@@ -1524,7 +1847,7 @@ impl FontMetricsProvider for LayoutFontMetricsProvider {
             .ic_horizontal_advance
             .or_else(|| {
                 font_group
-                    .find_by_codepoint(font_context, '\u{6C34}', None, XLang::get_initial_value())?
+                    .find_by_codepoint(font_context, '\u{6C34}', None, Language::UNKNOWN)?
                     .metrics
                     .ic_horizontal_advance
             })
@@ -1576,14 +1899,17 @@ impl SnapshotSetter<'_> {
 
             // If we haven't styled this node yet, we don't need to track a
             // restyle.
-            let Some(mut style_data) = element.mutate_data() else {
-                unsafe { element.unset_snapshot_flags() };
+            let Some(mut style_data) = element
+                .style_data()
+                .map(|data| data.element_data.borrow_mut())
+            else {
+                element.unset_snapshot_flags();
                 continue;
             };
 
             debug!("Noting restyle for {:?}: {:?}", element, style_data);
             if let Some(s) = restyle.snapshot {
-                unsafe { element.set_has_snapshot() };
+                element.set_has_snapshot();
                 snapshot_map.insert(element.as_node().opaque(), s);
             }
 
@@ -1600,7 +1926,7 @@ impl SnapshotSetter<'_> {
 impl Drop for SnapshotSetter<'_> {
     fn drop(&mut self) {
         for element in &self.elements_with_snapshot {
-            unsafe { element.unset_snapshot_flags() }
+            element.unset_snapshot_flags();
         }
     }
 }
@@ -1618,31 +1944,69 @@ impl ReflowPhases {
     /// [`ReflowGoals`] need the basic restyle + box tree layout + fragment tree layout,
     /// so [`ReflowPhases::empty()`] implies that.
     fn necessary(reflow_goal: &ReflowGoal) -> Self {
+        let is_inset_longhand = |longhand: LonghandId| {
+            matches!(
+                longhand,
+                LonghandId::Top |
+                    LonghandId::Right |
+                    LonghandId::Bottom |
+                    LonghandId::Left |
+                    LonghandId::InsetInlineStart |
+                    LonghandId::InsetInlineEnd |
+                    LonghandId::InsetBlockStart |
+                    LonghandId::InsetBlockEnd
+            )
+        };
+
+        let is_inset_property =
+            |property: NonCustomPropertyId| match property.longhand_or_shorthand() {
+                Ok(longhand) => is_inset_longhand(longhand),
+                // Special case for the `All` shorthand as it has many longhands.
+                Err(ShorthandId::All) => true,
+                Err(shorthand) => shorthand.longhands().any(is_inset_longhand),
+            };
+
         match reflow_goal {
             ReflowGoal::LayoutQuery(query) => match query {
+                // Resolving insets requires the creation of the stacking context, but other style properties
+                // do not. This should be kept in sync with `LayoutThread::query_resolved_style()`.
+                QueryMsg::ResolvedStyleQuery(PropertyId::NonCustom(non_custom_property_id))
+                    if is_inset_property(*non_custom_property_id) =>
+                {
+                    Self::StackingContextTreeConstruction
+                },
+                QueryMsg::ResolvedStyleQuery(_) => Self::empty(),
                 QueryMsg::NodesFromPointQuery => {
                     Self::StackingContextTreeConstruction | Self::DisplayListConstruction
                 },
-                QueryMsg::BoxArea
-                | QueryMsg::BoxAreas
-                | QueryMsg::ElementsFromPoint
-                | QueryMsg::OffsetParentQuery
-                | QueryMsg::ResolvedStyleQuery
-                | QueryMsg::ScrollingAreaOrOffsetQuery
-                | QueryMsg::TextIndexQuery => Self::StackingContextTreeConstruction,
-                QueryMsg::ClientRectQuery
-                | QueryMsg::CurrentCSSZoomQuery
-                | QueryMsg::EffectiveOverflow
-                | QueryMsg::ElementInnerOuterTextQuery
-                | QueryMsg::InnerWindowDimensionsQuery
-                | QueryMsg::PaddingQuery
-                | QueryMsg::ResolvedFontStyleQuery
-                | QueryMsg::ScrollParentQuery
-                | QueryMsg::StyleQuery => Self::empty(),
+                QueryMsg::BoxArea |
+                QueryMsg::BoxAreas |
+                QueryMsg::ElementsFromPoint |
+                QueryMsg::FlushForUpdateTheRenderingQuery |
+                QueryMsg::OffsetParentQuery |
+                QueryMsg::ScrollingAreaOrOffsetQuery |
+                QueryMsg::TextIndexQuery => Self::StackingContextTreeConstruction,
+                QueryMsg::ClientRectQuery |
+                QueryMsg::CurrentCSSZoomQuery |
+                QueryMsg::EffectiveOverflow |
+                QueryMsg::ElementInnerOuterTextQuery |
+                QueryMsg::InnerWindowDimensionsQuery |
+                QueryMsg::PaddingQuery |
+                QueryMsg::ResolvedFontStyleQuery |
+                QueryMsg::ScrollParentQuery |
+                QueryMsg::StyleQuery => Self::empty(),
             },
             ReflowGoal::UpdateScrollNode(..) | ReflowGoal::UpdateTheRendering => {
                 Self::StackingContextTreeConstruction | Self::DisplayListConstruction
             },
         }
     }
+}
+
+/// Summarizes changes after flushing stylesheets on the `Stylist`.
+struct StylistStylesheetUpdate {
+    /// Information about what kind of selectors changed.
+    invalidation_set: StylesheetInvalidationSet,
+    /// A list of changes to the set of web fonts.
+    changed_web_fonts: WebFontSetDifference,
 }

@@ -1,6 +1,6 @@
 # Packaging
 
-Axion v0.1.33.0 provides bundle scaffolds and preview release artifacts for local validation and early distribution experiments. These bundles are not signed installers yet.
+Axion v0.6.0 provides bundle scaffolds and preview release artifacts for local validation and early distribution experiments. These bundles are not signed installers yet.
 
 ## Bundle Command
 
@@ -77,7 +77,7 @@ icon = "icons/app.icns"
 Before sharing a bundle, run:
 
 ```sh
-cargo fmt --all --check
+cargo fmt --check
 cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo run -p axion-cli -- doctor --manifest-path path/to/axion.toml

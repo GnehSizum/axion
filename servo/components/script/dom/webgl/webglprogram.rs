@@ -7,17 +7,19 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
+use script_bindings::cell::{DomRefCell, Ref};
+use script_bindings::reflector::reflect_dom_object_with_cx;
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::{
     ActiveAttribInfo, ActiveUniformBlockInfo, ActiveUniformInfo, WebGLCommand, WebGLError,
     WebGLProgramId, WebGLResult, webgl_channel,
 };
 
-use crate::dom::bindings::cell::{DomRefCell, Ref};
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants2;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants as constants;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{DomGlobal, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::webgl::webglactiveinfo::WebGLActiveInfo;
@@ -26,7 +28,6 @@ use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext}
 use crate::dom::webgl::webglshader::WebGLShader;
 use crate::dom::webgl::webgluniformlocation::WebGLUniformLocation;
 use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
-use crate::script_runtime::CanGc;
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLProgram {
@@ -209,26 +210,26 @@ impl WebGLProgram {
     }
 
     pub(crate) fn maybe_new(
+        cx: &mut JSContext,
         context: &WebGLRenderingContext,
-        can_gc: CanGc,
     ) -> Option<DomRoot<Self>> {
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::CreateProgram(sender));
         receiver
             .recv()
             .unwrap()
-            .map(|id| WebGLProgram::new(context, id, can_gc))
+            .map(|id| WebGLProgram::new(cx, context, id))
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         context: &WebGLRenderingContext,
         id: WebGLProgramId,
-        can_gc: CanGc,
     ) -> DomRoot<Self> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(WebGLProgram::new_inherited(context, id)),
             &*context.global(),
-            can_gc,
+            cx,
         )
     }
 }
@@ -442,8 +443,8 @@ impl WebGLProgram {
 
     pub(crate) fn get_active_uniform(
         &self,
+        cx: &mut JSContext,
         index: u32,
-        can_gc: CanGc,
     ) -> WebGLResult<DomRoot<WebGLActiveInfo>> {
         if self.is_deleted() {
             return Err(WebGLError::InvalidValue);
@@ -453,19 +454,19 @@ impl WebGLProgram {
             .get(index as usize)
             .ok_or(WebGLError::InvalidValue)?;
         Ok(WebGLActiveInfo::new(
+            cx,
             self.global().as_window(),
             data.size.unwrap_or(1),
             data.type_,
             data.name().into(),
-            can_gc,
         ))
     }
 
     /// glGetActiveAttrib
     pub(crate) fn get_active_attrib(
         &self,
+        cx: &mut JSContext,
         index: u32,
-        can_gc: CanGc,
     ) -> WebGLResult<DomRoot<WebGLActiveInfo>> {
         if self.is_deleted() {
             return Err(WebGLError::InvalidValue);
@@ -475,11 +476,11 @@ impl WebGLProgram {
             .get(index as usize)
             .ok_or(WebGLError::InvalidValue)?;
         Ok(WebGLActiveInfo::new(
+            cx,
             self.global().as_window(),
             data.size,
             data.type_,
             data.name.clone().into(),
-            can_gc,
         ))
     }
 
@@ -532,8 +533,8 @@ impl WebGLProgram {
     /// glGetUniformLocation
     pub(crate) fn get_uniform_location(
         &self,
+        cx: &mut JSContext,
         name: DOMString,
-        can_gc: CanGc,
     ) -> WebGLResult<Option<DomRoot<WebGLUniformLocation>>> {
         if !self.is_linked() || self.is_deleted() {
             return Err(WebGLError::InvalidOperation);
@@ -577,6 +578,7 @@ impl WebGLProgram {
         let context_id = self.upcast().context_id();
 
         Ok(Some(WebGLUniformLocation::new(
+            cx,
             self.global().as_window(),
             location,
             context_id,
@@ -584,7 +586,6 @@ impl WebGLProgram {
             self.link_generation.get(),
             size,
             type_,
-            can_gc,
         )))
     }
 
@@ -639,13 +640,13 @@ impl WebGLProgram {
         }
 
         match pname {
-            constants2::UNIFORM_TYPE
-            | constants2::UNIFORM_SIZE
-            | constants2::UNIFORM_BLOCK_INDEX
-            | constants2::UNIFORM_OFFSET
-            | constants2::UNIFORM_ARRAY_STRIDE
-            | constants2::UNIFORM_MATRIX_STRIDE
-            | constants2::UNIFORM_IS_ROW_MAJOR => {},
+            constants2::UNIFORM_TYPE |
+            constants2::UNIFORM_SIZE |
+            constants2::UNIFORM_BLOCK_INDEX |
+            constants2::UNIFORM_OFFSET |
+            constants2::UNIFORM_ARRAY_STRIDE |
+            constants2::UNIFORM_MATRIX_STRIDE |
+            constants2::UNIFORM_IS_ROW_MAJOR => {},
             _ => return Err(WebGLError::InvalidEnum),
         }
 
@@ -677,12 +678,12 @@ impl WebGLProgram {
         }
 
         match pname {
-            constants2::UNIFORM_BLOCK_BINDING
-            | constants2::UNIFORM_BLOCK_DATA_SIZE
-            | constants2::UNIFORM_BLOCK_ACTIVE_UNIFORMS
-            | constants2::UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES
-            | constants2::UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER
-            | constants2::UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER => {},
+            constants2::UNIFORM_BLOCK_BINDING |
+            constants2::UNIFORM_BLOCK_DATA_SIZE |
+            constants2::UNIFORM_BLOCK_ACTIVE_UNIFORMS |
+            constants2::UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES |
+            constants2::UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER |
+            constants2::UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER => {},
             _ => return Err(WebGLError::InvalidEnum),
         }
 
@@ -813,40 +814,40 @@ fn validate_glsl_name(name: &DOMString) -> WebGLResult<bool> {
 
 fn validate_glsl_char(c: char) -> WebGLResult<()> {
     match c {
-        'a'..='z'
-        | 'A'..='Z'
-        | '0'..='9'
-        | ' '
-        | '\t'
-        | '\u{11}'
-        | '\u{12}'
-        | '\r'
-        | '\n'
-        | '_'
-        | '.'
-        | '+'
-        | '-'
-        | '/'
-        | '*'
-        | '%'
-        | '<'
-        | '>'
-        | '['
-        | ']'
-        | '('
-        | ')'
-        | '{'
-        | '}'
-        | '^'
-        | '|'
-        | '&'
-        | '~'
-        | '='
-        | '!'
-        | ':'
-        | ';'
-        | ','
-        | '?' => Ok(()),
+        'a'..='z' |
+        'A'..='Z' |
+        '0'..='9' |
+        ' ' |
+        '\t' |
+        '\u{11}' |
+        '\u{12}' |
+        '\r' |
+        '\n' |
+        '_' |
+        '.' |
+        '+' |
+        '-' |
+        '/' |
+        '*' |
+        '%' |
+        '<' |
+        '>' |
+        '[' |
+        ']' |
+        '(' |
+        ')' |
+        '{' |
+        '}' |
+        '^' |
+        '|' |
+        '&' |
+        '~' |
+        '=' |
+        '!' |
+        ':' |
+        ';' |
+        ',' |
+        '?' => Ok(()),
         _ => Err(WebGLError::InvalidValue),
     }
 }

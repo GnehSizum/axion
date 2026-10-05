@@ -6,7 +6,8 @@
 use std::cell::Cell;
 
 use dom_struct::dom_struct;
-use script_bindings::reflector::DomObject;
+use js::context::JSContext;
+use script_bindings::reflector::{DomObject, reflect_dom_object_with_cx};
 use script_bindings::weakref::WeakRef;
 use servo_base::generic_channel;
 use servo_canvas_traits::webgl::{
@@ -16,15 +17,14 @@ use servo_canvas_traits::webgl::{
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants;
 use crate::dom::bindings::codegen::Bindings::WebGLRenderingContextBinding::WebGLRenderingContextConstants;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{DomGlobal, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
-use crate::script_runtime::CanGc;
 
 fn target_is_copy_buffer(target: u32) -> bool {
-    target == WebGL2RenderingContextConstants::COPY_READ_BUFFER
-        || target == WebGL2RenderingContextConstants::COPY_WRITE_BUFFER
+    target == WebGL2RenderingContextConstants::COPY_READ_BUFFER ||
+        target == WebGL2RenderingContextConstants::COPY_WRITE_BUFFER
 }
 
 #[derive(JSTraceable, MallocSizeOf)]
@@ -137,26 +137,26 @@ impl WebGLBuffer {
     }
 
     pub(crate) fn maybe_new(
+        cx: &mut JSContext,
         context: &WebGLRenderingContext,
-        can_gc: CanGc,
     ) -> Option<DomRoot<Self>> {
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::CreateBuffer(sender));
         receiver
             .recv()
             .unwrap()
-            .map(|id| WebGLBuffer::new(context, id, can_gc))
+            .map(|id| WebGLBuffer::new(cx, context, id))
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         context: &WebGLRenderingContext,
         id: WebGLBufferId,
-        can_gc: CanGc,
     ) -> DomRoot<Self> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(WebGLBuffer::new_inherited(context, id)),
             &*context.global(),
-            can_gc,
+            cx,
         )
     }
 }
@@ -168,15 +168,15 @@ impl WebGLBuffer {
 
     pub(crate) fn buffer_data(&self, target: u32, data: &[u8], usage: u32) -> WebGLResult<()> {
         match usage {
-            WebGLRenderingContextConstants::STREAM_DRAW
-            | WebGLRenderingContextConstants::STATIC_DRAW
-            | WebGLRenderingContextConstants::DYNAMIC_DRAW
-            | WebGL2RenderingContextConstants::STATIC_READ
-            | WebGL2RenderingContextConstants::DYNAMIC_READ
-            | WebGL2RenderingContextConstants::STREAM_READ
-            | WebGL2RenderingContextConstants::STATIC_COPY
-            | WebGL2RenderingContextConstants::DYNAMIC_COPY
-            | WebGL2RenderingContextConstants::STREAM_COPY => (),
+            WebGLRenderingContextConstants::STREAM_DRAW |
+            WebGLRenderingContextConstants::STATIC_DRAW |
+            WebGLRenderingContextConstants::DYNAMIC_DRAW |
+            WebGL2RenderingContextConstants::STATIC_READ |
+            WebGL2RenderingContextConstants::DYNAMIC_READ |
+            WebGL2RenderingContextConstants::STREAM_READ |
+            WebGL2RenderingContextConstants::STATIC_COPY |
+            WebGL2RenderingContextConstants::DYNAMIC_COPY |
+            WebGL2RenderingContextConstants::STREAM_COPY => (),
             _ => return Err(WebGLError::InvalidEnum),
         }
 
@@ -226,12 +226,11 @@ impl WebGLBuffer {
 
     /// <https://registry.khronos.org/webgl/specs/latest/2.0/#5.1>
     fn can_bind_to(&self, new_target: u32) -> bool {
-        if let Some(current_target) = self.target.get() {
-            if [current_target, new_target]
+        if let Some(current_target) = self.target.get() &&
+            [current_target, new_target]
                 .contains(&WebGLRenderingContextConstants::ELEMENT_ARRAY_BUFFER)
-            {
-                return target_is_copy_buffer(new_target) || new_target == current_target;
-            }
+        {
+            return target_is_copy_buffer(new_target) || new_target == current_target;
         }
         true
     }

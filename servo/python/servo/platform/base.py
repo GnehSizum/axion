@@ -12,7 +12,7 @@ import shutil
 import subprocess
 from typing import Optional
 
-from .build_target import BuildTarget
+from .build_target import BuildTarget, OpenHarmonyTarget
 
 
 class Base:
@@ -32,7 +32,7 @@ class Base:
     def _platform_bootstrap(self, force: bool, yes: bool) -> bool:
         raise NotImplementedError("Bootstrap installation detection not yet available.")
 
-    def _platform_bootstrap_gstreamer(self, target: BuildTarget, force: bool) -> bool:
+    def _platform_bootstrap_gstreamer(self, target: BuildTarget, force: bool, yes: bool) -> bool:
         raise NotImplementedError("GStreamer bootstrap support is not yet available for your OS.")
 
     def is_gstreamer_installed(self, target: BuildTarget) -> bool:
@@ -54,7 +54,9 @@ class Base:
         except FileNotFoundError:
             return False
 
-    def bootstrap(self, force: bool, yes: bool, skip_platform: bool, skip_lints: bool, skip_nextest: bool) -> None:
+    def bootstrap(
+        self, force: bool, yes: bool, skip_platform: bool, skip_lints: bool, skip_nextest: bool, install_ohos: bool
+    ) -> None:
         installed_something = False
         if not skip_platform:
             installed_something |= self._platform_bootstrap(force, yes)
@@ -62,15 +64,24 @@ class Base:
         if not skip_nextest:
             installed_something |= self.install_cargo_nextest(force)
         if not skip_lints:
-            installed_something |= self.install_cargo_about(force)
             installed_something |= self.install_taplo(force)
             installed_something |= self.install_cargo_deny(force)
             installed_something |= self.install_crown(force)
+        # Optional and non-default, since most people won't be compiling for OpenHarmony
+        if install_ohos:
+            installed_something |= self.install_ohos(force)
 
         if not installed_something:
             print("Dependencies were already installed!")
 
     def install_rust_toolchain(self) -> None:
+        if shutil.which("rustup") is None:
+            if shutil.which("rustc") is None or shutil.which("cargo") is None:
+                print(" * Warning: rustup, rustc, or cargo not found.")
+                print("   Please install rustup or make sure rustc and cargo are in PATH.")
+            else:
+                print(" * rustup not found. Skipping Rust toolchain installation.")
+            return
         # rustup 1.28.0, and rustup 1.28.1+ with RUSTUP_AUTO_INSTALL=0, require us to explicitly
         # install the Rust toolchain before trying to use it.
         print(" * Installing Rust toolchain...")
@@ -88,6 +99,16 @@ class Base:
 
         return True
 
+    def install_ohos(self, force: bool) -> bool:
+        (is_installed_and_compatible, _reason) = OpenHarmonyTarget.is_cargo_ohos_compatible()
+        if is_installed_and_compatible and not force:
+            return False
+        print(" * Installing cargo-ohos...")
+        requested_version = OpenHarmonyTarget.REQUESTED_CARGO_OHOS_VERSION
+        if subprocess.call(["cargo", "install", f"cargo-ohos@^{requested_version}", "--locked"]) != 0:
+            raise EnvironmentError("Installation of cargo-ohos failed.")
+        return True
+
     def install_cargo_deny(self, force: bool) -> bool:
         def cargo_deny_installed() -> bool:
             if force or not shutil.which("cargo-deny"):
@@ -103,14 +124,6 @@ class Base:
         print(" * Installing cargo-deny...")
         if subprocess.call(["cargo", "install", "cargo-deny@0.19.0", "--locked"]) != 0:
             raise EnvironmentError("Installation of cargo-deny failed.")
-        return True
-
-    def install_cargo_about(self, force: bool) -> bool:
-        if not force and shutil.which("cargo-about") is not None:
-            return False
-        print(" * Installing cargo-about...")
-        if subprocess.call(["cargo", "install", "cargo-about", "--locked"]) != 0:
-            raise EnvironmentError("Installation of cargo-about failed.")
         return True
 
     def install_cargo_nextest(self, force: bool) -> bool:
@@ -134,9 +147,9 @@ class Base:
         as fast as possible."""
         return False
 
-    def bootstrap_gstreamer(self, force: bool) -> None:
+    def bootstrap_gstreamer(self, force: bool, yes: bool) -> None:
         target = BuildTarget.from_triple(self.triple)
-        if not self._platform_bootstrap_gstreamer(target, force):
+        if not self._platform_bootstrap_gstreamer(target, force, yes):
             root = self.gstreamer_root(target)
             if root:
                 print(f"GStreamer found at: {root}")

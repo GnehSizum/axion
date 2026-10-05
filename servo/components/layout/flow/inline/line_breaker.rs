@@ -4,7 +4,8 @@
 
 use std::ops::Range;
 
-use icu_segmenter::{LineBreakOptions, LineSegmenter};
+use icu_segmenter::LineSegmenter;
+use icu_segmenter::options::LineBreakOptions;
 
 pub(crate) struct LineBreaker {
     linebreaks: Vec<usize>,
@@ -12,8 +13,8 @@ pub(crate) struct LineBreaker {
 }
 
 impl LineBreaker {
-    pub(crate) fn new(string: &str, options: LineBreakOptions) -> Self {
-        let line_segmenter = LineSegmenter::new_auto_with_options(options);
+    pub(crate) fn new(string: &str, options: LineBreakOptions<'_>) -> Self {
+        let line_segmenter = LineSegmenter::new_auto(options);
         Self {
             // From https://docs.rs/icu_segmenter/1.5.0/icu_segmenter/struct.LineSegmenter.html
             // > For consistency with the grapheme, word, and sentence segmenters, there is always a
@@ -37,15 +38,15 @@ impl LineBreaker {
 
         let mut linebreaks_range = self.current_offset..self.linebreaks.len();
 
-        while self.linebreaks[linebreaks_range.start] < text_range.start
-            && linebreaks_range.len() > 1
+        while self.linebreaks[linebreaks_range.start] < text_range.start &&
+            linebreaks_range.len() > 1
         {
             linebreaks_range.start += 1;
         }
 
         let mut ending_linebreak_index = linebreaks_range.start;
-        while self.linebreaks[ending_linebreak_index] < text_range.end
-            && ending_linebreak_index < self.linebreaks.len() - 1
+        while self.linebreaks[ending_linebreak_index] < text_range.end &&
+            ending_linebreak_index < self.linebreaks.len() - 1
         {
             ending_linebreak_index += 1;
         }

@@ -8,20 +8,17 @@ pub extern crate servo_media_streams as streams;
 pub extern crate servo_media_traits as traits;
 pub extern crate servo_media_webrtc as webrtc;
 
-extern crate once_cell;
-
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use audio::context::{AudioContext, AudioContextOptions};
 use audio::sink::AudioSinkError;
-use once_cell::sync::OnceCell;
 use player::audio::AudioRenderer;
 use player::context::PlayerGLContext;
-use player::ipc_channel::ipc::IpcSender;
 use player::video::VideoFrameRenderer;
 use player::{Player, PlayerEvent, StreamType};
+use servo_base::generic_channel::GenericCallback;
 use streams::capture::MediaTrackConstraintSet;
 use streams::device_monitor::MediaDeviceMonitor;
 use streams::registry::MediaStreamId;
@@ -31,7 +28,7 @@ use webrtc::{WebRtcController, WebRtcSignaller};
 
 pub struct ServoMedia(Box<dyn Backend>);
 
-static INSTANCE: OnceCell<Arc<ServoMedia>> = OnceCell::new();
+static INSTANCE: OnceLock<Arc<ServoMedia>> = OnceLock::new();
 
 pub trait BackendInit {
     fn init() -> Box<dyn Backend>;
@@ -46,7 +43,7 @@ pub trait Backend: Send + Sync {
         &self,
         id: &ClientContextId,
         stream_type: StreamType,
-        sender: IpcSender<PlayerEvent>,
+        sender: GenericCallback<PlayerEvent>,
         video_renderer: Option<Arc<Mutex<dyn VideoFrameRenderer>>>,
         audio_renderer: Option<Arc<Mutex<dyn AudioRenderer>>>,
         gl_context: Box<dyn PlayerGLContext>,

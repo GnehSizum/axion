@@ -47,7 +47,7 @@ fn test_user_content_manager_user_script() {
 
     let webview = WebViewBuilder::new(servo_test.servo(), servo_test.rendering_context.clone())
         .user_content_manager(user_content_manager.clone())
-        .url(url.into_url())
+        .url(url.as_url().clone())
         .build();
 
     let result = evaluate_javascript(&servo_test, webview.clone(), "window.fromUserContentScript");
@@ -151,8 +151,8 @@ fn test_user_content_manager_for_auxiliary_webviews() {
     let load_webview = webview.clone();
     let delegate_clone = delegate.clone();
     let _ = servo_test.spin(move || {
-        load_webview.load_status() != LoadStatus::Complete
-            || delegate_clone
+        load_webview.load_status() != LoadStatus::Complete ||
+            delegate_clone
                 .auxiliary_webview
                 .borrow()
                 .as_ref()

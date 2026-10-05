@@ -6,19 +6,20 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use js::rust::MutableHandleValue;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 
 use crate::dom::bindings::codegen::Bindings::DataTransferItemListBinding::DataTransferItemListMethods;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::frozenarray::CachedFrozenArray;
-use crate::dom::bindings::reflector::{DomGlobal, Reflector, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::datatransferitem::DataTransferItem;
 use crate::dom::file::File;
 use crate::dom::window::Window;
-use crate::drag_data_store::{DragDataStore, Kind, Mode};
-use crate::script_runtime::{CanGc, JSContext};
+use crate::drag::drag_data_store::{DragDataStore, Kind, Mode};
 
 #[dom_struct]
 pub(crate) struct DataTransferItemList {
@@ -40,28 +41,27 @@ impl DataTransferItemList {
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         window: &Window,
         data_store: Rc<RefCell<Option<DragDataStore>>>,
-        can_gc: CanGc,
     ) -> DomRoot<DataTransferItemList> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(DataTransferItemList::new_inherited(data_store)),
             window,
-            can_gc,
+            cx,
         )
     }
 
-    pub(crate) fn frozen_types(&self, cx: JSContext, retval: MutableHandleValue, can_gc: CanGc) {
+    pub(crate) fn frozen_types(&self, cx: &mut js::context::JSContext, retval: MutableHandleValue) {
         self.frozen_types.get_or_init(
+            cx,
             || {
                 self.data_store
                     .borrow()
                     .as_ref()
                     .map_or(Vec::new(), |data_store| data_store.types())
             },
-            cx,
             retval,
-            can_gc,
         );
     }
 
@@ -82,7 +82,11 @@ impl DataTransferItemListMethods<crate::DomTypeHolder> for DataTransferItemList 
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-datatransferitemlist-item>
-    fn IndexedGetter(&self, index: u32, can_gc: CanGc) -> Option<DomRoot<DataTransferItem>> {
+    fn IndexedGetter(
+        &self,
+        cx: &mut js::context::JSContext,
+        index: u32,
+    ) -> Option<DomRoot<DataTransferItem>> {
         // Step 1 Return null if it isn't associated with a data store
         let option = self.data_store.borrow();
         let data_store = match option.as_ref() {
@@ -92,69 +96,79 @@ impl DataTransferItemListMethods<crate::DomTypeHolder> for DataTransferItemList 
 
         // Step 2
         data_store.get_by_index(index as usize).map(|(id, _)| {
-            DataTransferItem::new(&self.global(), Rc::clone(&self.data_store), *id, can_gc)
+            DataTransferItem::new(cx, &self.global(), Rc::clone(&self.data_store), *id)
         })
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-datatransferitemlist-add>
     fn Add(
         &self,
+        cx: &mut js::context::JSContext,
         data: DOMString,
         mut type_: DOMString,
-        can_gc: CanGc,
     ) -> Fallible<Option<DomRoot<DataTransferItem>>> {
         // Step 1 If the DataTransferItemList object is not in the read/write mode, return null.
-        let mut option = self.data_store.borrow_mut();
-        let data_store = match option.as_mut() {
-            Some(value) if value.mode() == Mode::ReadWrite => value,
-            _ => return Ok(None),
+        let index = {
+            let mut option = self.data_store.borrow_mut();
+            let data_store = match option.as_mut() {
+                Some(value) if value.mode() == Mode::ReadWrite => value,
+                _ => return Ok(None),
+            };
+
+            // Add an item to the drag data store item list whose kind is text,
+            // whose type string is equal to the value of the method's second argument, converted to ASCII lowercase,
+            // and whose data is the string given by the method's first argument.
+            type_.make_ascii_lowercase();
+            data_store.add(Kind::Text { data, type_ })
         };
 
-        // Add an item to the drag data store item list whose kind is text,
-        // whose type string is equal to the value of the method's second argument, converted to ASCII lowercase,
-        // and whose data is the string given by the method's first argument.
-        type_.make_ascii_lowercase();
-        data_store.add(Kind::Text { data, type_ }).map(|id| {
+        index.map(|id| {
             self.frozen_types.clear();
 
             // Step 3 Determine the value of the indexed property corresponding to the newly added item,
             // and return that value (a newly created DataTransferItem object).
             Some(DataTransferItem::new(
+                cx,
                 &self.global(),
                 Rc::clone(&self.data_store),
                 id,
-                can_gc,
             ))
         })
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-datatransferitemlist-add>
-    fn Add_(&self, data: &File, can_gc: CanGc) -> Fallible<Option<DomRoot<DataTransferItem>>> {
-        // Step 1 If the DataTransferItemList object is not in the read/write mode, return null.
-        let mut option = self.data_store.borrow_mut();
-        let data_store = match option.as_mut() {
-            Some(value) if value.mode() == Mode::ReadWrite => value,
-            _ => return Ok(None),
+    fn Add_(
+        &self,
+        cx: &mut js::context::JSContext,
+        data: &File,
+    ) -> Fallible<Option<DomRoot<DataTransferItem>>> {
+        let index = {
+            // Step 1 If the DataTransferItemList object is not in the read/write mode, return null.
+            let mut option = self.data_store.borrow_mut();
+            let data_store = match option.as_mut() {
+                Some(value) if value.mode() == Mode::ReadWrite => value,
+                _ => return Ok(None),
+            };
+
+            // Add an item to the drag data store item list whose kind is File,
+            // whose type string is the type of the File, converted to ASCII lowercase,
+            // and whose data is the same as the File's data.
+            let mut type_ = data.file_type();
+            type_.make_ascii_lowercase();
+            let bytes = data.file_bytes().unwrap_or_default();
+            let name = data.name().clone();
+            data_store.add(Kind::File { bytes, name, type_ })
         };
-
-        // Add an item to the drag data store item list whose kind is File,
-        // whose type string is the type of the File, converted to ASCII lowercase,
-        // and whose data is the same as the File's data.
-        let mut type_ = data.file_type();
-        type_.make_ascii_lowercase();
-        let bytes = data.file_bytes().unwrap_or_default();
-        let name = data.name().clone();
-
-        data_store.add(Kind::File { bytes, name, type_ }).map(|id| {
+        index.map(|id| {
             self.frozen_types.clear();
 
             // Step 3 Determine the value of the indexed property corresponding to the newly added item,
             // and return that value (a newly created DataTransferItem object).
             Some(DataTransferItem::new(
+                cx,
                 &self.global(),
                 Rc::clone(&self.data_store),
                 id,
-                can_gc,
             ))
         })
     }

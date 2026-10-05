@@ -7,7 +7,7 @@ Axion is a Rust workspace built around a vendored Servo engine. Keep changes foc
 Run the narrowest relevant checks while iterating, then run the release gate before opening a pull request:
 
 ```sh
-cargo fmt --all --check
+cargo fmt --check
 cargo test --workspace
 cargo run -p axion-cli -- self-test --manifest-path examples/hello-axion/axion.toml
 cargo run -p axion-cli -- self-test --manifest-path examples/multi-window/axion.toml

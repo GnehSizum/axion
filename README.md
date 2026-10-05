@@ -2,7 +2,7 @@
 
 Axion is a Rust desktop application framework built on a vendored Servo engine. It provides an explicit manifest, capability-gated JavaScript bridge, packaged app assets, runtime diagnostics, and a `winit` desktop backend.
 
-Axion is currently at the **v0.1.33.0 developer preview**. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
+Axion is currently at the **v0.6.0 developer preview**, using the vendored Servo **0.6.0** rendering engine. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
 
 ## What Works Today
 
@@ -29,6 +29,8 @@ Axion is currently at the **v0.1.33.0 developer preview**. It is suitable for fr
 - Run Servo-backed GUI smoke checks locally, with optional GitHub Actions artifact capture through `workflow_dispatch`.
 
 ## Quick Start
+
+Rust `1.97.1` is pinned by the repository. Before using `servo-runtime`, copy `.cargo/config.macos.example.toml` on macOS, or `.cargo/config.example.toml` on other platforms, to `.cargo/config.toml` (merge with an existing config). Install the native dependencies described in [Getting Started](docs/getting-started.md#prerequisites).
 
 Run the existing example:
 
@@ -101,7 +103,7 @@ Use this quick matrix to choose the right validation level:
 - `gui-smoke`: real Servo-backed window startup plus frontend `window.__AXION_GUI_SMOKE__()` checks.
 
 ```sh
-cargo fmt --all --check
+cargo fmt --check
 cargo test --workspace
 cargo check -p axion-cli --features servo-runtime
 cargo check -p hello-axion --features servo-runtime
@@ -134,4 +136,4 @@ Servo warnings from the vendored `servo/` subtree are not Axion release blockers
 
 ## Versioning
 
-Axion public releases use four-part tags such as `v0.1.33.0`: the first two components track the Servo baseline, the third tracks Axion feature milestones, and the fourth tracks bugfix releases. Cargo crates use compatible three-part versions such as `0.1.33`. See `docs/versioning.md`.
+Axion public releases use three-part SemVer tags such as `v0.6.0`, matching the Cargo workspace version `0.6.0`. The Servo baseline and internal feature milestone are recorded separately in workspace metadata. Older four-part tags remain historical releases. See `docs/versioning.md`.

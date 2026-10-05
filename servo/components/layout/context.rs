@@ -8,29 +8,30 @@ use std::sync::Arc;
 use embedder_traits::UntrustedNodeAddress;
 use euclid::Size2D;
 use fonts::FontContext;
-use layout_api::wrapper_traits::ThreadSafeLayoutNode;
 use layout_api::{
-    AnimatingImages, IFrameSizes, LayoutImageDestination, PendingImage, PendingImageState,
-    PendingRasterizationImage,
+    AnimatingImages, IFrameSizes, LayoutImageDestination, LayoutNode, PendingImage,
+    PendingImageState, PendingRasterizationImage,
 };
 use net_traits::image_cache::{
     Image as CachedImage, ImageCache, ImageCacheResult, ImageOrMetadataAvailable, PendingImageId,
 };
+use net_traits::request::InternalRequest;
 use parking_lot::{Mutex, RwLock};
 use pixels::RasterImage;
-use script::layout_dom::ServoThreadSafeLayoutNode;
+use script::layout_dom::ServoLayoutNode;
 use servo_base::id::PainterId;
 use servo_url::{ImmutableOrigin, ServoUrl};
 use style::context::SharedStyleContext;
 use style::dom::OpaqueNode;
+use style::values::computed::color::Color;
 use style::values::computed::image::{Gradient, Image};
+use style_traits::DevicePixel;
+use uuid::Uuid;
 use webrender_api::units::{DeviceIntSize, DeviceSize};
 
 pub(crate) type CachedImageOrError = Result<CachedImage, ResolveImageError>;
 
 pub(crate) struct LayoutContext<'a> {
-    pub use_rayon: bool,
-
     /// Bits shared by the layout and style system.
     pub style_context: SharedStyleContext<'a>,
 
@@ -46,10 +47,38 @@ pub(crate) struct LayoutContext<'a> {
 
     /// The [`PainterId`] that identifies which `RenderingContext` that this layout targets.
     pub painter_id: PainterId,
+
+    /// Whether or not parallel layout should be allowed for this layout.
+    pub allow_parallel_layout: bool,
+
+    /// The minimum number of jobs that need to be larger than
+    /// [`Self::parallelism_job_size_minimum`] in order to enable parallelism.
+    pub parallelism_job_count_minimum: usize,
+
+    /// The minimum size a job needs to be to be counted when determining if the number of
+    /// jobs exceeds [`Self::parallelism_job_count_minimum`].
+    pub parallelism_job_size_minimum: usize,
+
+    /// The device dimensions on which this layout is running, in device pixels.
+    pub device_size: Size2D<f32, DevicePixel>,
+}
+
+impl LayoutContext<'_> {
+    pub(crate) fn should_parallelize(&self, number_of_jobs: usize) -> bool {
+        self.allow_parallel_layout && number_of_jobs >= self.parallelism_job_count_minimum
+    }
+
+    pub(crate) fn should_parallelize_layout(&self, jobs: impl Iterator<Item = usize>) -> bool {
+        self.allow_parallel_layout &&
+            jobs.filter(|job| *job >= self.parallelism_job_size_minimum)
+                .count() >=
+                self.parallelism_job_count_minimum
+    }
 }
 
 pub enum ResolvedImage<'a> {
     Gradient(&'a Gradient),
+    Color(&'a Color),
     // The size is tracked explicitly as image-set images can specify their
     // natural resolution which affects the final size for raster images.
     Image {
@@ -130,6 +159,7 @@ impl ImageResolver {
         node: OpaqueNode,
         url: ServoUrl,
         destination: LayoutImageDestination,
+        is_internal_request: InternalRequest,
     ) -> LayoutImageCacheResult {
         // Check for available image or start tracking.
         let cache_result =
@@ -149,6 +179,7 @@ impl ImageResolver {
                     id,
                     origin: self.origin.clone(),
                     destination,
+                    is_internal_request,
                 };
                 self.pending_images.lock().push(image);
                 LayoutImageCacheResult::Pending
@@ -161,6 +192,7 @@ impl ImageResolver {
                     id,
                     origin: self.origin.clone(),
                     destination,
+                    is_internal_request,
                 };
                 self.pending_images.lock().push(image);
                 LayoutImageCacheResult::Pending
@@ -184,12 +216,14 @@ impl ImageResolver {
         node: OpaqueNode,
         url: ServoUrl,
         destination: LayoutImageDestination,
+        is_internal_request: InternalRequest,
     ) -> Result<CachedImage, ResolveImageError> {
         if let Some(cached_image) = self.resolved_images_cache.read().get(&url) {
             return cached_image.clone();
         }
 
-        let result = self.get_or_request_image_or_meta(node, url.clone(), destination);
+        let result =
+            self.get_or_request_image_or_meta(node, url.clone(), destination, is_internal_request);
         match result {
             LayoutImageCacheResult::DataAvailable(img_or_meta) => match img_or_meta {
                 ImageOrMetadataAvailable::ImageAvailable { image, .. } => {
@@ -221,7 +255,7 @@ impl ImageResolver {
         image_id: PendingImageId,
         size: DeviceIntSize,
         node: OpaqueNode,
-        svg_id: Option<String>,
+        svg_id: Option<Uuid>,
     ) -> Option<RasterImage> {
         let result = self
             .image_cache
@@ -238,10 +272,7 @@ impl ImageResolver {
         result
     }
 
-    pub(crate) fn queue_svg_element_for_serialization(
-        &self,
-        element: ServoThreadSafeLayoutNode<'_>,
-    ) {
+    pub(crate) fn queue_svg_element_for_serialization(&self, element: ServoLayoutNode<'_>) {
         self.pending_svg_elements_for_serialization
             .lock()
             .push(element.opaque().into())
@@ -258,6 +289,7 @@ impl ImageResolver {
             Image::CrossFade(_) => Result::Err(ResolveImageError::NotImplementedYet),
             Image::PaintWorklet(_) => Result::Err(ResolveImageError::NotImplementedYet),
             Image::Gradient(gradient) => Ok(ResolvedImage::Gradient(gradient)),
+            Image::Image(color) => Ok(ResolvedImage::Color(color)),
             Image::Url(image_url) => {
                 // FIXME: images won’t always have in intrinsic width or
                 // height when support for SVG is added, or a WebRender
@@ -271,6 +303,7 @@ impl ImageResolver {
                     node,
                     image_url.clone().into(),
                     LayoutImageDestination::DisplayListBuilding,
+                    InternalRequest::No,
                 )?;
                 let metadata = image.metadata();
                 let size = Size2D::new(metadata.width, metadata.height).to_f32();

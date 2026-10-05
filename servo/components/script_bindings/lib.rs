@@ -15,16 +15,20 @@ extern crate log;
 #[macro_use]
 extern crate malloc_size_of_derive;
 
+pub mod assert;
 pub mod callback;
+pub mod cell;
 mod constant;
 mod constructor;
 pub mod conversions;
+pub mod dom;
 pub mod domstring;
 pub mod error;
 mod finalize;
 mod guard;
 mod import;
 pub mod inheritance;
+mod init;
 pub mod interface;
 pub mod interfaces;
 pub mod iterable;
@@ -46,6 +50,7 @@ pub mod structuredclone;
 pub mod trace;
 pub mod utils;
 pub mod weakref;
+pub mod wrap;
 
 #[allow(non_snake_case, unsafe_op_in_unsafe_fn)]
 pub mod codegen {

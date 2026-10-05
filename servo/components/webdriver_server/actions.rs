@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use embedder_traits::{
     InputEvent, KeyboardEvent, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, TouchEvent,
-    TouchEventType, TouchId, WebDriverCommandMsg, WebDriverScriptCommand, WebViewPoint, WheelDelta,
-    WheelEvent, WheelMode,
+    TouchEventType, TouchId, TouchPointerType, WebDriverCommandMsg, WebDriverScriptCommand,
+    WebViewPoint, WheelDelta, WheelEvent, WheelMode,
 };
 use euclid::Point2D;
 use keyboard_types::webdriver::KeyInputState;
@@ -138,6 +138,16 @@ impl PointerInputState {
 }
 
 /// <https://w3c.github.io/webdriver/#dfn-computing-the-tick-duration>
+/// Map the webdriver-side `PointerType` to the embedder-side `TouchPointerType`.
+/// Only valid for `Pen` and `Touch`; `Mouse` should never reach the touch path.
+fn touch_pointer_type_for(subtype: PointerType) -> TouchPointerType {
+    match subtype {
+        PointerType::Pen => TouchPointerType::Pen,
+        PointerType::Touch => TouchPointerType::Touch,
+        PointerType::Mouse => unreachable!("mouse does not use the touch event path"),
+    }
+}
+
 fn compute_tick_duration(tick_actions: &TickActions) -> u64 {
     // Step 1. Let max duration be 0.
     // Step 2. For each action in tick actions:
@@ -307,10 +317,10 @@ impl Handler {
             // Step 6. Let subtype be action object's subtype.
             // Steps 7, 8. Try to run specific algorithm based on the action type.
             match action {
-                ActionItem::Null(_)
-                | ActionItem::Key(KeyActionItem::General(_))
-                | ActionItem::Pointer(PointerActionItem::General(_))
-                | ActionItem::Wheel(WheelActionItem::General(_)) => {
+                ActionItem::Null(_) |
+                ActionItem::Key(KeyActionItem::General(_)) |
+                ActionItem::Pointer(PointerActionItem::General(_)) |
+                ActionItem::Wheel(WheelActionItem::General(_)) => {
                     self.dispatch_pause_action(input_id);
                 },
                 ActionItem::Key(KeyActionItem::Key(KeyAction::Down(keydown_action))) => {
@@ -411,8 +421,8 @@ impl Handler {
         // https://github.com/servo/servo/issues/37579#issuecomment-2990762713
         let input_cancel_list = &mut session.input_cancel_list;
         if let Some(pos) = input_cancel_list.iter().rposition(|(id, item)| {
-            id == input_id
-                && matches!(item,
+            id == input_id &&
+                matches!(item,
                         ActionItem::Key(KeyActionItem::Key(KeyAction::Up(KeyUpAction { value })))
                     if *value == action.value )
         }) {
@@ -456,6 +466,7 @@ impl Handler {
                     TouchEventType::Cancel,
                     TouchId(pointer_id as i32),
                     WebViewPoint::Page(Point2D::new(x as f32, y as f32)),
+                    touch_pointer_type_for(subtype),
                 )));
             },
             PointerType::Mouse => {
@@ -490,6 +501,7 @@ impl Handler {
                 TouchEventType::Down,
                 TouchId(pointer_input_state.pointer_id as i32),
                 point,
+                touch_pointer_type_for(subtype),
             )),
         };
         self.send_blocking_input_event_to_embedder(input_event);
@@ -520,8 +532,8 @@ impl Handler {
         // https://github.com/servo/servo/issues/37579#issuecomment-2990762713
         let input_cancel_list = &mut self.session_mut().unwrap().input_cancel_list;
         if let Some(pos) = input_cancel_list.iter().position(|(id, item)| {
-            id == input_id
-                && matches!(item, ActionItem::Pointer(PointerActionItem::Pointer(PointerAction::Up(
+            id == input_id &&
+                matches!(item, ActionItem::Pointer(PointerActionItem::Pointer(PointerAction::Up(
                     PointerUpAction { button, .. },
                 ))) if *button == action.button )
         }) {
@@ -541,6 +553,7 @@ impl Handler {
                 TouchEventType::Up,
                 TouchId(pointer_id as i32),
                 point,
+                touch_pointer_type_for(subtype),
             )),
         };
         self.send_blocking_input_event_to_embedder(input_event);
@@ -679,6 +692,7 @@ impl Handler {
                             TouchEventType::Move,
                             TouchId(*pointer_id as i32),
                             point,
+                            touch_pointer_type_for(*subtype),
                         ));
                         // FIXME: Should replace with `send_blocking_input_event_to_embedder`
                         // after we revamp the touch chain.

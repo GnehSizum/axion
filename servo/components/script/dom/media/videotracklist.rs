@@ -3,19 +3,20 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
+use script_bindings::cell::DomRefCell;
+use script_bindings::reflector::reflect_dom_object_with_cx;
 
-use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::VideoTrackListBinding::VideoTrackListMethods;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
-use crate::dom::bindings::reflector::{DomGlobal, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::html::htmlmediaelement::HTMLMediaElement;
 use crate::dom::videotrack::VideoTrack;
 use crate::dom::window::Window;
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct VideoTrackList {
@@ -37,15 +38,15 @@ impl VideoTrackList {
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         window: &Window,
         tracks: &[&VideoTrack],
         media_element: Option<&HTMLMediaElement>,
-        can_gc: CanGc,
     ) -> DomRoot<VideoTrackList> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(VideoTrackList::new_inherited(tracks, media_element)),
             window,
-            can_gc,
+            cx,
         )
     }
 
@@ -95,18 +96,18 @@ impl VideoTrackList {
         self.global()
             .task_manager()
             .media_element_task_source()
-            .queue(task!(media_track_change: move || {
+            .queue(task!(media_track_change: move |cx| {
                 let this = this.root();
-                this.upcast::<EventTarget>().fire_event(atom!("change"), CanGc::note());
+                this.upcast::<EventTarget>().fire_event(cx, atom!("change"));
             }));
     }
 
     pub(crate) fn add(&self, track: &VideoTrack) {
         self.tracks.borrow_mut().push(Dom::from_ref(track));
-        if track.selected() {
-            if let Some(idx) = self.selected_index() {
-                self.set_selected(idx, false);
-            }
+        if track.selected() &&
+            let Some(idx) = self.selected_index()
+        {
+            self.set_selected(idx, false);
         }
         track.add_track_list(self);
     }

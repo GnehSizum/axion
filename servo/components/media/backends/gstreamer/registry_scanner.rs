@@ -4,14 +4,13 @@
 
 use std::collections::HashSet;
 use std::str::FromStr;
-
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 // The GStreamer registry holds the metadata of the set of plugins available in the host.
 // This scanner is used to lazily analyze the registry and to provide information about
 // the set of supported mime types and codecs that the backend is able to deal with.
-pub static GSTREAMER_REGISTRY_SCANNER: Lazy<GStreamerRegistryScanner> =
-    Lazy::new(GStreamerRegistryScanner::new);
+pub static GSTREAMER_REGISTRY_SCANNER: LazyLock<GStreamerRegistryScanner> =
+    LazyLock::new(GStreamerRegistryScanner::new);
 
 pub struct GStreamerRegistryScanner {
     supported_mime_types: HashSet<&'static str>,
@@ -33,7 +32,12 @@ impl GStreamerRegistryScanner {
     }
 
     fn is_codec_supported(&self, codec: &str) -> bool {
-        self.supported_codecs.contains(codec)
+        self.supported_codecs
+            .iter()
+            .any(|entry| match entry.strip_suffix('*') {
+                Some(prefix) => codec.starts_with(prefix),
+                None => codec == *entry,
+            })
     }
 
     pub fn are_all_codecs_supported(&self, codecs: &Vec<&str>) -> bool {
@@ -81,8 +85,8 @@ impl GStreamerRegistryScanner {
 
         let is_vorbis_supported =
             has_element_for_media_type(&audio_decoder_factories, "audio/x-vorbis");
-        if is_vorbis_supported
-            && has_element_for_media_type(&audio_parser_factories, "audio/x-vorbis")
+        if is_vorbis_supported &&
+            has_element_for_media_type(&audio_parser_factories, "audio/x-vorbis")
         {
             self.supported_codecs.insert("vorbis");
             self.supported_codecs.insert("x-vorbis");
@@ -119,8 +123,8 @@ impl GStreamerRegistryScanner {
             &video_decoder_factories,
             "video/x-h264, profile=(string){ constrained-baseline, baseline, high }",
         );
-        if is_h264_decoder_available
-            && has_element_for_media_type(&video_parser_factories, "video/x-h264")
+        if is_h264_decoder_available &&
+            has_element_for_media_type(&video_parser_factories, "video/x-h264")
         {
             self.supported_mime_types.insert("video/mp4");
             self.supported_mime_types.insert("video/x-m4v");
@@ -175,8 +179,8 @@ impl GStreamerRegistryScanner {
             self.supported_mime_types.insert("application/x-mpegurl");
         }
 
-        if has_element_for_media_type(&demux_factories, "application/x-wav")
-            || has_element_for_media_type(&demux_factories, "audio/x-wav")
+        if has_element_for_media_type(&demux_factories, "application/x-wav") ||
+            has_element_for_media_type(&demux_factories, "audio/x-wav")
         {
             self.supported_mime_types.insert("audio/wav");
             self.supported_mime_types.insert("audio/vnd.wav");
@@ -240,8 +244,8 @@ impl GStreamerRegistryScanner {
             }
         }
 
-        if (is_matroska_supported || self.is_container_type_supported("video/mp4"))
-            && has_element_for_media_type(&video_decoder_factories, "video/x-av1")
+        if (is_matroska_supported || self.is_container_type_supported("video/mp4")) &&
+            has_element_for_media_type(&video_decoder_factories, "video/x-av1")
         {
             self.supported_codecs.insert("av01*");
         }
@@ -255,7 +259,7 @@ fn has_element_for_media_type(
     match gstreamer::caps::Caps::from_str(media_type) {
         Ok(caps) => {
             for factory in factories {
-                if factory.can_sink_all_caps(&caps) {
+                if factory.can_sink_any_caps(&caps) {
                     return true;
                 }
             }

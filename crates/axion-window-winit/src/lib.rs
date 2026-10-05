@@ -85,8 +85,8 @@ mod enabled {
         Code, DevicePoint, InputEvent, Key, KeyState, KeyboardEvent, Location, Modifiers,
         MouseButton as ServoMouseButton, MouseButtonAction, MouseButtonEvent,
         MouseLeftViewportEvent, MouseMoveEvent, NamedKey, RenderingContext, Servo, ServoBuilder,
-        TouchEvent, TouchEventType, TouchId, UserContentManager, WebView, WebViewBuilder,
-        WheelDelta, WheelEvent, WheelMode, WindowRenderingContext,
+        TouchEvent, TouchEventType, TouchId, TouchPointerType, UserContentManager, WebView,
+        WebViewBuilder, WheelDelta, WheelEvent, WheelMode, WindowRenderingContext,
     };
     use tokio::sync::mpsc::unbounded_channel;
     use url::Url;
@@ -927,7 +927,6 @@ mod enabled {
                 .iter()
                 .find(|runtime_window| runtime_window.window.id() == window_id)
             {
-                runtime_window.rendering_context.resize(new_size);
                 runtime_window.webview.resize(new_size);
                 let payload_json = window_payload_with_size(runtime_window, new_size);
                 dispatch_to_webview(
@@ -1035,9 +1034,9 @@ mod enabled {
                 .find(|runtime_window| runtime_window.window.id() == window_id)
             {
                 let button = match button {
-                    MouseButton::Left => ServoMouseButton::Left,
-                    MouseButton::Right => ServoMouseButton::Right,
-                    MouseButton::Middle => ServoMouseButton::Middle,
+                    MouseButton::Left => ServoMouseButton::Primary,
+                    MouseButton::Right => ServoMouseButton::Secondary,
+                    MouseButton::Middle => ServoMouseButton::Auxiliary,
                     MouseButton::Back => ServoMouseButton::Back,
                     MouseButton::Forward => ServoMouseButton::Forward,
                     MouseButton::Other(value) => ServoMouseButton::Other(value),
@@ -1101,6 +1100,7 @@ mod enabled {
                         event_type,
                         TouchId(touch.id as i32),
                         point.into(),
+                        TouchPointerType::Touch,
                     )));
             }
         }
@@ -2555,7 +2555,7 @@ mod enabled {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned)
             .or_else(|| match &request.origin {
-                RequestOrigin::Origin(origin) => Some(origin.ascii_serialization()),
+                RequestOrigin::Origin(origin) => Some(origin.ascii_serialization().into_owned()),
                 RequestOrigin::Client => None,
             })
     }
@@ -2587,7 +2587,7 @@ mod enabled {
 
         let referrer_origin = match &request.referrer {
             Referrer::Client(url) | Referrer::ReferrerUrl(url) => {
-                Some(url.origin().ascii_serialization())
+                Some(url.origin().ascii_serialization().into_owned())
             }
             Referrer::NoReferrer => None,
         };

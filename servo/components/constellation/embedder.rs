@@ -2,7 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use accesskit::TreeId;
 use embedder_traits::{
     InputEventOutcome, JSValue, JavaScriptEvaluationError, JavaScriptEvaluationId,
     MediaSessionEvent, NewWebViewDetails, TraversalId,
@@ -17,9 +16,7 @@ pub enum ConstellationToEmbedderMsg {
     /// Required because the constellation can have pending calls to make
     /// (e.g. SetFrameTree) at the time that we send it an ExitMsg.
     ShutdownComplete,
-    /// Report a complete sampled profile
-    ReportProfile(Vec<u8>),
-    /// All webviews lost focus for keyboard events.
+    /// All `WebView`s lost focus for keyboard events.
     WebViewBlurred,
     /// A history traversal operation completed.
     HistoryTraversalComplete(WebViewId, TraversalId),
@@ -28,13 +25,13 @@ pub enum ConstellationToEmbedderMsg {
     MediaSessionEvent(WebViewId, MediaSessionEvent),
     /// A pipeline panicked. First string is the reason, second one is the backtrace.
     Panic(WebViewId, String, Option<String>),
-    /// A webview potentially gained focus for keyboard events.
-    /// If the boolean value is false, the webiew could not be focused.
+    /// A `WebView` potentially gained focus for keyboard events.
+    /// If the boolean value is false, the `WebView` could not be focused.
     WebViewFocused(WebViewId, bool),
     /// Inform the embedding layer that a particular `InputEvent` was handled by Servo
     /// and the embedder can continue processing it, if necessary.
     InputEventsHandled(WebViewId, Vec<InputEventOutcome>),
-    /// A webview was destroyed.
+    /// A `WebView` was destroyed.
     WebViewClosed(WebViewId),
     /// Inform the embedding layer that a JavaScript evaluation has
     /// finished with the given result.
@@ -48,7 +45,4 @@ pub enum ConstellationToEmbedderMsg {
     AllowNavigationRequest(WebViewId, PipelineId, ServoUrl),
     /// The history state has changed.
     HistoryChanged(WebViewId, Vec<ServoUrl>, usize),
-    /// Notifies the embedder that the AccessKit [`TreeId`] for the top-level document in this
-    /// WebView has been changed (or initially set).
-    AccessibilityTreeIdChanged(WebViewId, TreeId),
 }

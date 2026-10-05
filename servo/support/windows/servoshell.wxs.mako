@@ -1,43 +1,29 @@
-<?xml version="1.0" encoding="utf-8"?>
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="*"
-           Name="Servo Tech Demo"
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Servo Tech Demo"
            Manufacturer="The Servo Authors"
            UpgradeCode="060cd15d-eab1-4614-b438-3988e3efdcf1"
            Language="1033"
            Codepage="1252"
-           Version="0.1.0">
-    <Package Id="*"
-             Keywords="Installer"
-             Description="Servo Tech Demo Installer"
-             Manufacturer="The Servo Authors"
-             InstallerVersion="200"
-             Platform="x64"
-             Languages="1033"
-             SummaryCodepage="1252"
-             Compressed="yes"/>
+           Version="0.6.0"
+           InstallerVersion="200">
+    <SummaryInformation Keywords="Installer"
+                        Description="Servo Tech Demo Installer"
+                        Manufacturer="The Servo Authors"/>
     <MajorUpgrade AllowDowngrades="yes"/>
     <Media Id="1"
            Cabinet="Servo.cab"
            EmbedCab="yes"/>
-    <Directory Id="TARGETDIR" Name="SourceDir">
-      <Directory Id="ProgramFiles64Folder" Name="PFiles">
-        <Directory Id="Servo" Name="Servo">
-          <Directory Id="INSTALLDIR" Name="Servo Tech Demo">
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="Servo" Name="Servo">
+        <Directory Id="INSTALLDIR" Name="Servo Tech Demo">
             <Component Id="Servo"
                        Guid="95bcea71-78bb-4ec8-9766-44bc01443840"
-                       Win64="yes">
+                       Bitness="always64">
               <File Id="ServoEXE"
                     Name="servoshell.exe"
                     DiskId="1"
                     Source="${windowize(exe_path)}\servoshell.exe"
                     KeyPath="yes">
-                <Shortcut Id="StartMenuServoTechDemo"
-                          Directory="ProgramMenuDir"
-                          Name="Servo Tech Demo"
-                          WorkingDirectory="INSTALLDIR"
-                          Icon="servoshell.exe"
-                          Advertise="yes"/>
               </File>
 	            ${include_dependencies()}
             </Component>
@@ -45,9 +31,9 @@
             ${include_directory(resources_path, "resources")}
           </Directory>
         </Directory>
-      </Directory>
+      </StandardDirectory>
 
-      <Directory Id="ProgramMenuFolder" Name="Programs">
+      <StandardDirectory Id="ProgramMenuFolder">
         <Directory Id="ProgramMenuDir" Name="Servo Tech Demo">
           <Component Id="ProgramMenuDir" Guid="e04737ce-16eb-4977-9b4c-ed2db8a5a77d">
             <RemoveFolder Id="ProgramMenuDir" On="both"/>
@@ -56,21 +42,26 @@
                            Type="string"
                            Value=""
                            KeyPath="yes"/>
+            <Shortcut Id="StartMenuServoTechDemo"
+              Directory="ProgramMenuDir"
+              Name="Servo Tech Demo"
+              Target="[INSTALLDIR]servoshell.exe"
+              WorkingDirectory="INSTALLDIR"
+              Icon="servoshell.exe"/>
           </Component>
         </Directory>
-      </Directory>
-    </Directory>
+      </StandardDirectory>
 
-    <Feature Id="Complete" Level="1">
-      <ComponentRef Id="Servo"/>
-      % for c in components:
-      <ComponentRef Id="${c}"/>
-      % endfor
-      <ComponentRef Id="ProgramMenuDir"/>
-    </Feature>
+      <Feature Id="Complete" Level="1">
+        <ComponentRef Id="Servo"/>
+         % for c in components:
+         <ComponentRef Id="${c}"/>
+         % endfor
+        <ComponentRef Id="ProgramMenuDir"/>
+      </Feature>
 
-    <Icon Id="servoshell.exe" SourceFile="${windowize(exe_path)}\servoshell.exe"/>
-  </Product>
+      <Icon Id="servoshell.exe" SourceFile="${windowize(exe_path)}\servoshell.exe"/>
+    </Package>
 </Wix>
 <%!
 import os
@@ -115,7 +106,7 @@ components = []
 <Directory Id="${make_id(path.basename(d))}" Name="${n}">
   <Component Id="${make_id(path.basename(d))}"
              Guid="${uuid.uuid4()}"
-             Win64="yes">
+             Bitness="always64">
     <CreateFolder/>
     <% components.append(make_id(path.basename(d))) %>
     % for f in listfiles(d):

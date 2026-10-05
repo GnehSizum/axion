@@ -9,6 +9,7 @@
 mod actions;
 mod capabilities;
 mod script_argument_extraction;
+mod server;
 mod session;
 mod timeout;
 mod user_prompt;
@@ -42,6 +43,7 @@ use serde::de::{Deserializer, MapAccess, Visitor};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use server::{Session, SessionTeardownKind, WebDriverHandler};
 use servo_base::generic_channel::{self, GenericReceiver, GenericSender, RoutedReceiver};
 use servo_base::id::{BrowsingContextId, WebViewId};
 use servo_config::prefs::{self, PrefValue, Preferences};
@@ -71,11 +73,10 @@ use webdriver::response::{
     CloseWindowResponse, CookieResponse, CookiesResponse, ElementRectResponse, NewSessionResponse,
     NewWindowResponse, TimeoutsResponse, ValueResponse, WebDriverResponse, WindowRectResponse,
 };
-use webdriver::server::{self, Session, SessionTeardownKind, WebDriverHandler};
 
 use crate::actions::{ELEMENT_CLICK_BUTTON, InputSourceState, PendingActions, PointerInputState};
 use crate::session::{PageLoadStrategy, WebDriverSession};
-use crate::timeout::{DEFAULT_IMPLICIT_WAIT, DEFAULT_PAGE_LOAD_TIMEOUT, SCREENSHOT_TIMEOUT};
+use crate::timeout::{DEFAULT_PAGE_LOAD_TIMEOUT, SCREENSHOT_TIMEOUT};
 
 /// <https://262.ecma-international.org/6.0/#sec-number.max_safe_integer>
 /// 2^53 - 1
@@ -623,6 +624,7 @@ impl Handler {
         match self.focused_webview_id()? {
             Some(webview_id) => {
                 self.session_mut()?.set_webview_id(webview_id);
+                self.wait_until_browsing_context_is_open(BrowsingContextId::from(webview_id))?;
                 self.session_mut()?
                     .set_browsing_context_id(BrowsingContextId::from(webview_id));
             },
@@ -641,6 +643,7 @@ impl Handler {
                     .expect("IPC failure when creating new webview for new session");
                 self.focus_webview(webview_id)?;
                 self.session_mut()?.set_webview_id(webview_id);
+                self.wait_until_browsing_context_is_open(BrowsingContextId::from(webview_id))?;
                 self.session_mut()?
                     .set_browsing_context_id(BrowsingContextId::from(webview_id));
                 let _ = self.wait_document_ready(Some(DEFAULT_PAGE_LOAD_TIMEOUT));
@@ -907,7 +910,7 @@ impl Handler {
 
         // Step 11. In case the Set Window Rect command is partially supported
         // (i.e. some combinations of arguments are supported but not others),
-        // the implmentation is expected to continue with the remaining steps.
+        // the implementation is expected to continue with the remaining steps.
         // DO NOT return "unsupported operation".
 
         let webview_id = self.webview_id()?;
@@ -1866,13 +1869,13 @@ impl Handler {
         // Step 6. cookie expiry time is not an integer type,
         // or it less than 0 or greater than the maximum safe integer,
         // return error with error code invalid argument.
-        if let Some(ref expiry) = params.expiry {
-            if expiry.0 > MAXIMUM_SAFE_INTEGER {
-                return Err(WebDriverError::new(
-                    ErrorStatus::InvalidArgument,
-                    "expiry time greater than maximum safe integer",
-                ));
-            }
+        if let Some(ref expiry) = params.expiry &&
+            expiry.0 > MAXIMUM_SAFE_INTEGER
+        {
+            return Err(WebDriverError::new(
+                ErrorStatus::InvalidArgument,
+                "expiry time greater than maximum safe integer",
+            ));
         }
 
         let mut cookie_builder =
@@ -1947,8 +1950,8 @@ impl Handler {
         // Waiting for version bump together with geckodriver.
         let timeouts = TimeoutsResponse {
             script: timeouts.script,
-            page_load: timeouts.page_load.unwrap_or(DEFAULT_PAGE_LOAD_TIMEOUT),
-            implicit: timeouts.implicit_wait.unwrap_or(DEFAULT_IMPLICIT_WAIT),
+            page_load: timeouts.page_load,
+            implicit: timeouts.implicit_wait,
         };
 
         Ok(WebDriverResponse::Timeouts(timeouts))
@@ -1965,10 +1968,10 @@ impl Handler {
             session.session_timeouts_mut().script = timeout;
         }
         if let Some(timeout) = parameters.page_load {
-            session.session_timeouts_mut().page_load = Some(timeout);
+            session.session_timeouts_mut().page_load = timeout;
         }
         if let Some(timeout) = parameters.implicit {
-            session.session_timeouts_mut().implicit_wait = Some(timeout);
+            session.session_timeouts_mut().implicit_wait = timeout;
         }
 
         Ok(WebDriverResponse::Void)
@@ -2055,27 +2058,15 @@ impl Handler {
     ) -> WebDriverResult<WebDriverResponse> {
         // Step 1. Let body and arguments be the result of trying to extract the script arguments
         // from a request with argument parameters.
-        let (func_body, args_string) = self.extract_script_arguments(parameters)?;
+        let (function_body, arguments_vec) = self.extract_script_arguments(parameters)?;
+        let joined_arguments = arguments_vec.join(", ");
 
-        // This is pretty ugly; we really want something that acts like
-        // new Function() and then takes the resulting function and executes
-        // it with a vec of arguments.
         let script = format!(
             r#"(async function() {{
-                try {{
-                    let result = (async function() {{
-                        {func_body}
-                    }})({});
-                    let value = await result;
-                    window.webdriverCallback(value);
-                }} catch (err) {{
-                    window.webdriverException(err);
-                }}
-            }})();"#,
-            args_string.join(", ")
+                {function_body}
+               }})({joined_arguments})"#
         );
-
-        debug!("{}", script);
+        debug!("Executing {script}");
 
         // Step 2. If session's current browsing context is no longer open,
         // return error with error code no such window.
@@ -2106,23 +2097,21 @@ impl Handler {
     ) -> WebDriverResult<WebDriverResponse> {
         // Step 1. Let body and arguments be the result of trying to extract the script arguments
         // from a request with argument parameters.
-        let (function_body, mut args_string) = self.extract_script_arguments(parameters)?;
-        args_string.push("resolve".to_string());
+        let (function_body, mut arguments_vec) = self.extract_script_arguments(parameters)?;
+        arguments_vec.push("(value) => resolve(value)".into());
+        let joined_arguments = arguments_vec.join(", ");
 
-        let joined_args = args_string.join(", ");
         let script = format!(
             r#"(function() {{
-                new Promise(function(resolve, reject) {{
+                return new Promise(function(resolve, reject) {{
                   (async function() {{
                     {function_body}
-                  }})({joined_args})
+                  }}({joined_arguments}))
                     .catch(reject)
-              }})
-              .then((v) => window.webdriverCallback(v), (r) => window.webdriverException(r))
-              .catch((r) => window.webdriverException(r));
-            }})();"#,
+                  }});
+              }})()"#,
         );
-        debug!("{}", script);
+        debug!("Executing {script}");
 
         // Step 2. If session's current browsing context is no longer open,
         // return error with error code no such window.
@@ -2638,6 +2627,37 @@ impl Handler {
         }
     }
 
+    fn wait_until_browsing_context_is_open(
+        &self,
+        browsing_context_id: BrowsingContextId,
+    ) -> WebDriverResult<()> {
+        // We cannot use provided timeout from configuration, as `fn wait_until_browsing_context_is_open` is not a standard step in spec.
+        // Some tests use `page_load = 0` deliberately, which would always fail with the function.
+        const OPEN_BROWSING_CONTEXT_TIMEOUT: Duration =
+            Duration::from_millis(DEFAULT_PAGE_LOAD_TIMEOUT);
+        let now = Instant::now();
+        let timeouts = self.session()?.session_timeouts();
+
+        let sleep_interval = Duration::from_millis(timeouts.sleep_interval);
+
+        while now.elapsed() < OPEN_BROWSING_CONTEXT_TIMEOUT {
+            if self
+                .verify_browsing_context_is_open(browsing_context_id)
+                .is_ok()
+            {
+                return Ok(());
+            }
+
+            sleep(sleep_interval);
+        }
+        Err(WebDriverError::new(
+            ErrorStatus::Timeout,
+            format!(
+                "Timed out waiting for the top-level browsing context {browsing_context_id} to be ready"
+            ),
+        ))
+    }
+
     fn focus_webview(&self, webview_id: WebViewId) -> WebDriverResult<()> {
         self.send_message_to_embedder(WebDriverCommandMsg::FocusWebView(webview_id))
     }
@@ -2663,11 +2683,11 @@ impl WebDriverHandler<ServoExtensionRoute> for Handler {
         // Unless we are trying to create/delete a new session, check status, or shutdown Servo,
         // we need to ensure that a session has previously been created.
         match msg.command {
-            WebDriverCommand::NewSession(_)
-            | WebDriverCommand::Status
-            | WebDriverCommand::DeleteSession
-            | WebDriverCommand::Extension(ServoExtensionCommand::Shutdown)
-            | WebDriverCommand::Extension(ServoExtensionCommand::ResetAllCookies) => {},
+            WebDriverCommand::NewSession(_) |
+            WebDriverCommand::Status |
+            WebDriverCommand::DeleteSession |
+            WebDriverCommand::Extension(ServoExtensionCommand::Shutdown) |
+            WebDriverCommand::Extension(ServoExtensionCommand::ResetAllCookies) => {},
             _ => {
                 self.session()?;
             },

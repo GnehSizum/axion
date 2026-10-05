@@ -22,24 +22,25 @@ use std::thread;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use devtools_traits::{
     ChromeToDevtoolsControlMsg, ConsoleLogLevel, ConsoleMessage, ConsoleMessageFields,
-    DevtoolScriptControlMsg, DevtoolsControlMsg, DevtoolsPageInfo, DomMutation, EnvironmentInfo,
-    FrameInfo, FrameOffset, NavigationState, NetworkEvent, PauseReason, ScriptToDevtoolsControlMsg,
-    SourceInfo, WorkerId, get_time_stamp,
+    DebuggerValue, DevtoolScriptControlMsg, DevtoolsControlMsg, DevtoolsPageInfo, DomMutation,
+    EnvironmentInfo, FrameInfo, FrameOffset, NavigationState, NetworkEvent, PauseReason,
+    ScriptToDevtoolsControlMsg, SourceInfo, WorkerId, get_time_stamp,
 };
 use embedder_traits::{AllowOrDeny, EmbedderMsg, EmbedderProxy};
 use log::{trace, warn};
 use malloc_size_of::MallocSizeOf;
 use malloc_size_of_derive::MallocSizeOf;
 use profile_traits::path;
-use rand::{RngCore, rng};
+use rand::{Rng, rng};
 use resource::{ResourceArrayType, ResourceAvailable};
 use rustc_hash::FxHashMap;
 use serde::Serialize;
+use serde_json::{Map, Number, Value};
 use servo_base::generic_channel::{self, GenericSender};
 use servo_base::id::{BrowsingContextId, PipelineId, WebViewId};
 use servo_config::pref;
 
-use crate::actor::{Actor, ActorEncode, ActorError, ActorRegistry};
+use crate::actor::{Actor, ActorEncode, ActorError, ActorRegistry, new_actor_name};
 use crate::actors::browsing_context::BrowsingContextActor;
 use crate::actors::console::{ConsoleActor, ConsoleResource, DevtoolsConsoleMessage, Root};
 use crate::actors::environment::EnvironmentActor;
@@ -48,12 +49,13 @@ use crate::actors::framerate::FramerateActor;
 use crate::actors::inspector::InspectorActor;
 use crate::actors::inspector::walker::WalkerActor;
 use crate::actors::network_event::NetworkEventActor;
+use crate::actors::object::ObjectActor;
 use crate::actors::pause::PauseActor;
 use crate::actors::root::RootActor;
 use crate::actors::source::SourceActor;
 use crate::actors::thread::{ThreadActor, ThreadInterruptedReply};
 use crate::actors::watcher::WatcherActor;
-use crate::actors::worker::{WorkerActor, WorkerType};
+use crate::actors::worker::{WorkerTargetActor, WorkerType};
 use crate::id::IdMap;
 use crate::network_handler::handle_network_event;
 use crate::protocol::{DevtoolsConnection, JsonPacketStream};
@@ -61,6 +63,7 @@ use crate::protocol::{DevtoolsConnection, JsonPacketStream};
 mod actor;
 /// <https://searchfox.org/mozilla-central/source/devtools/server/actors>
 mod actors {
+    pub mod blackboxing;
     pub mod breakpoint;
     pub mod browsing_context;
     pub mod console;
@@ -82,6 +85,7 @@ mod actors {
     pub mod root;
     pub mod source;
     pub mod stylesheets;
+    pub mod symbol_iterator;
     pub mod tab;
     pub mod thread;
     pub mod timeline;
@@ -345,7 +349,7 @@ impl DevtoolsInstance {
                             column_number: css_error.column,
                             time_stamp: get_time_stamp(),
                         },
-                        arguments: vec![css_error.msg.into()],
+                        arguments: vec![DebuggerValue::StringValue(css_error.msg)],
                         stacktrace: None,
                     };
                     let console_message =
@@ -373,13 +377,20 @@ impl DevtoolsInstance {
                     pipeline_id,
                     frame_info,
                 )) => self.handle_create_frame_actor(result_sender, pipeline_id, frame_info),
+                DevtoolsControlMsg::FromScript(ScriptToDevtoolsControlMsg::CreateObjectActor(
+                    result_sender,
+                    value,
+                )) => self.handle_create_object_actor(result_sender, value),
                 DevtoolsControlMsg::FromScript(
                     ScriptToDevtoolsControlMsg::CreateEnvironmentActor(
                         result_sender,
                         environment,
                         parent,
+                        actor,
                     ),
-                ) => self.handle_create_environment_actor(result_sender, environment, parent),
+                ) => {
+                    self.handle_create_environment_actor(result_sender, environment, parent, actor)
+                },
                 DevtoolsControlMsg::FromChrome(ChromeToDevtoolsControlMsg::NetworkEvent(
                     request_id,
                     network_event,
@@ -435,26 +446,54 @@ impl DevtoolsInstance {
         framerate_actor.add_tick(tick);
     }
 
-    fn handle_navigate(&self, browsing_context_id: BrowsingContextId, state: NavigationState) {
-        let browsing_context_name = self.browsing_contexts.get(&browsing_context_id).unwrap();
+    fn handle_navigate(&mut self, browsing_context_id: BrowsingContextId, state: NavigationState) {
+        let Some(browsing_context_name) = self.browsing_contexts.get(&browsing_context_id) else {
+            return;
+        };
+        let browsing_context_name = browsing_context_name.clone();
         let browsing_context_actor = self
             .registry
-            .find::<BrowsingContextActor>(browsing_context_name);
+            .find::<BrowsingContextActor>(&browsing_context_name);
+        let watcher_actor = self
+            .registry
+            .find::<WatcherActor>(&browsing_context_actor.watcher_name);
         let mut id_map = self.id_map.lock().unwrap();
         let mut connections = self.connections.lock().unwrap();
-        if let NavigationState::Start(url) = &state {
-            let watcher_actor = self
-                .registry
-                .find::<WatcherActor>(&browsing_context_actor.watcher_name);
-            watcher_actor.emit_will_navigate(
-                browsing_context_id,
-                url.clone(),
-                &mut connections.values_mut(),
-                &mut id_map,
-            );
-        }
 
-        browsing_context_actor.handle_navigate(state, &mut id_map, connections.values_mut());
+        match &state {
+            NavigationState::Start(url) => {
+                watcher_actor.emit_will_navigate(
+                    browsing_context_id,
+                    url.clone(),
+                    &mut connections.values_mut(),
+                    &mut id_map,
+                );
+            },
+            NavigationState::Stop(pipeline_id, page_info) => {
+                watcher_actor.emit_target_available_or_destroyed(
+                    &browsing_context_actor,
+                    &self.registry,
+                    connections.values_mut(),
+                    false,
+                );
+
+                let outer_window_id = id_map.outer_window_id(*pipeline_id);
+                browsing_context_actor.update_pipeline(
+                    *pipeline_id,
+                    outer_window_id,
+                    page_info.clone(),
+                );
+
+                watcher_actor.emit_target_available_or_destroyed(
+                    &browsing_context_actor,
+                    &self.registry,
+                    connections.values_mut(),
+                    true,
+                );
+
+                // TODO: Correctly destroy targets, we probably need to create new browsing context actors too.
+            },
+        }
     }
 
     // We need separate actor representations for each script global that exists;
@@ -472,54 +511,49 @@ impl DevtoolsInstance {
         let devtools_browsing_context_id = id_map.browsing_context_id(browsing_context_id);
         let devtools_outer_window_id = id_map.outer_window_id(pipeline_id);
 
-        let console_name = self.registry.new_name::<ConsoleActor>();
+        let console_name = new_actor_name::<ConsoleActor>();
 
         let parent_actor = if let Some(id) = worker_id {
-            let thread = ThreadActor::new(
-                self.registry.new_name::<ThreadActor>(),
-                script_sender.clone(),
-                None,
-            );
-            let thread_name = thread.name();
-            self.registry.register(thread);
+            let thread_actor = ThreadActor::register(&self.registry, script_sender.clone(), None);
 
             let worker_type = if page_info.is_service_worker {
                 WorkerType::Service
             } else {
                 WorkerType::Dedicated
             };
-            let worker_name = self.registry.new_name::<WorkerActor>();
-            let worker = WorkerActor {
-                name: worker_name.clone(),
-                console_name: console_name.clone(),
-                thread_name,
-                worker_id: id,
-                url: page_info.url,
-                type_: worker_type,
-                script_chan: script_sender,
-                streams: Default::default(),
-            };
+            let worker_actor = WorkerTargetActor::register(
+                &self.registry,
+                console_name.clone(),
+                thread_actor.name().into(),
+                id,
+                page_info.url,
+                worker_type,
+                script_sender,
+            );
             let root_actor = self.registry.find::<RootActor>("root");
             if page_info.is_service_worker {
                 root_actor
                     .service_workers
                     .borrow_mut()
-                    .push(worker.name.clone());
+                    .push(worker_actor.name().into());
             } else {
-                root_actor.workers.borrow_mut().push(worker.name.clone());
+                root_actor
+                    .workers
+                    .borrow_mut()
+                    .push(worker_actor.name().into());
             }
 
-            self.actor_workers.insert(id, worker_name.clone());
-            self.registry.register(worker);
+            self.actor_workers.insert(id, worker_actor.name().into());
 
-            Root::DedicatedWorker(worker_name)
+            Root::DedicatedWorker(worker_actor.name().into())
         } else {
             self.pipelines.insert(pipeline_id, browsing_context_id);
             let browsing_context_name = self
                 .browsing_contexts
                 .entry(browsing_context_id)
                 .or_insert_with(|| {
-                    let browsing_context_actor = BrowsingContextActor::new(
+                    BrowsingContextActor::register(
+                        &self.registry,
                         console_name.clone(),
                         devtools_browser_id,
                         devtools_browsing_context_id,
@@ -527,11 +561,9 @@ impl DevtoolsInstance {
                         pipeline_id,
                         devtools_outer_window_id,
                         script_sender.clone(),
-                        &self.registry,
-                    );
-                    let browsing_context_name = browsing_context_actor.name();
-                    self.registry.register(browsing_context_actor);
-                    browsing_context_name
+                    )
+                    .name()
+                    .into()
                 });
             let browsing_context_actor = self
                 .registry
@@ -540,9 +572,7 @@ impl DevtoolsInstance {
             Root::BrowsingContext(browsing_context_name.clone())
         };
 
-        let console_actor = ConsoleActor::new(console_name, parent_actor);
-
-        self.registry.register(console_actor);
+        ConsoleActor::register(&self.registry, console_name, parent_actor);
     }
 
     fn handle_title_changed(&self, pipeline_id: PipelineId, title: String) {
@@ -601,7 +631,9 @@ impl DevtoolsInstance {
         let inspector_actor = self
             .registry
             .find::<InspectorActor>(&browsing_context_actor.inspector_name);
-        let walker_actor = self.registry.find::<WalkerActor>(&inspector_actor.walker);
+        let walker_actor = self
+            .registry
+            .find::<WalkerActor>(&inspector_actor.walker_name);
 
         for connection in self.connections.lock().unwrap().values_mut() {
             walker_actor.handle_dom_mutation(dom_mutation.clone(), connection)?;
@@ -632,7 +664,7 @@ impl DevtoolsInstance {
             let worker_name = self.actor_workers.get(&worker_id)?;
             Some(
                 self.registry
-                    .find::<WorkerActor>(worker_name)
+                    .find::<WorkerTargetActor>(worker_name)
                     .console_name
                     .clone(),
             )
@@ -664,15 +696,10 @@ impl DevtoolsInstance {
         let Some(browsing_context_name) = self.browsing_contexts.get(&browsing_context_id) else {
             return;
         };
-        let watcher_name = self
-            .registry
-            .find::<BrowsingContextActor>(browsing_context_name)
-            .watcher_name
-            .clone();
 
         let network_event_name = match self.actor_requests.get(&request_id) {
             Some(name) => name.clone(),
-            None => self.create_network_event_actor(request_id, watcher_name),
+            None => self.create_network_event_actor(request_id, browsing_context_name.clone()),
         };
 
         handle_network_event(
@@ -683,20 +710,22 @@ impl DevtoolsInstance {
         )
     }
 
-    /// Create a new NetworkEventActor for a given request ID and watcher name.
-    fn create_network_event_actor(&mut self, request_id: String, watcher_name: String) -> String {
+    /// Create a new NetworkEventActor for a given request ID and browsing context name.
+    fn create_network_event_actor(
+        &mut self,
+        request_id: String,
+        browsing_context_name: String,
+    ) -> String {
         let resource_id = self.next_resource_id;
         self.next_resource_id += 1;
 
-        let network_event_name = self.registry.new_name::<NetworkEventActor>();
         let network_event_actor =
-            NetworkEventActor::new(network_event_name.clone(), resource_id, watcher_name);
+            NetworkEventActor::register(&self.registry, resource_id, browsing_context_name);
 
         self.actor_requests
-            .insert(request_id, network_event_name.clone());
-        self.registry.register(network_event_actor);
+            .insert(request_id, network_event_actor.name().into());
 
-        network_event_name
+        network_event_actor.name().into()
     }
 
     fn handle_create_source_actor(
@@ -720,7 +749,7 @@ impl DevtoolsInstance {
         );
         let source_form = self
             .registry
-            .find::<SourceActor>(&source_actor)
+            .find::<SourceActor>(source_actor.name())
             .source_form();
 
         if let Some(worker_id) = source_info.worker_id {
@@ -730,14 +759,14 @@ impl DevtoolsInstance {
 
             let thread_actor_name = self
                 .registry
-                .find::<WorkerActor>(worker_name)
+                .find::<WorkerTargetActor>(worker_name)
                 .thread_name
                 .clone();
             let thread_actor = self.registry.find::<ThreadActor>(&thread_actor_name);
 
-            thread_actor.source_manager.add_source(&source_actor);
+            thread_actor.source_manager.add_source(source_actor.name());
 
-            let worker_actor = self.registry.find::<WorkerActor>(worker_name);
+            let worker_actor = self.registry.find::<WorkerTargetActor>(worker_name);
 
             for stream in self.connections.lock().unwrap().values_mut() {
                 worker_actor.resource_array(
@@ -756,20 +785,14 @@ impl DevtoolsInstance {
                 return;
             };
 
-            let thread_actor_name = {
-                let browsing_context_actor = self
-                    .registry
-                    .find::<BrowsingContextActor>(browsing_context_name);
-                browsing_context_actor.thread_name.clone()
-            };
-
-            let thread_actor = self.registry.find::<ThreadActor>(&thread_actor_name);
-            thread_actor.source_manager.add_source(&source_actor);
-
             // Notify browsing context about the new source
             let browsing_context_actor = self
                 .registry
                 .find::<BrowsingContextActor>(browsing_context_name);
+
+            let thread_actor_name = browsing_context_actor.thread_name.clone();
+            let thread_actor = self.registry.find::<ThreadActor>(&thread_actor_name);
+            thread_actor.source_manager.add_source(source_actor.name());
 
             for stream in self.connections.lock().unwrap().values_mut() {
                 browsing_context_actor.resource_array(
@@ -814,20 +837,17 @@ impl DevtoolsInstance {
         let browsing_context_actor = self
             .registry
             .find::<BrowsingContextActor>(browsing_context_name);
-        let thread = self
+        let thread_actor = self
             .registry
             .find::<ThreadActor>(&browsing_context_actor.thread_name);
 
-        let pause_name = self.registry.new_name::<PauseActor>();
-        self.registry.register(PauseActor {
-            name: pause_name.clone(),
-        });
+        let pause_name = PauseActor::register(&self.registry).name().into();
 
         let frame_actor = self.registry.find::<FrameActor>(&frame_offset.actor);
         frame_actor.set_offset(frame_offset.column, frame_offset.line);
 
         let msg = ThreadInterruptedReply {
-            from: thread.name(),
+            from: thread_actor.name().into(),
             type_: "paused".to_owned(),
             actor: pause_name,
             frame: frame_actor.encode(&self.registry),
@@ -845,45 +865,70 @@ impl DevtoolsInstance {
         pipeline_id: PipelineId,
         frame: FrameInfo,
     ) {
-        let Some(browsing_context_name) = self
-            .pipelines
-            .get(&pipeline_id)
-            .and_then(|id| self.browsing_contexts.get(id))
-        else {
+        let Some(browsing_context_id) = self.pipelines.get(&pipeline_id) else {
             return;
         };
-
+        let Some(browsing_context_name) = self.browsing_contexts.get(browsing_context_id) else {
+            return;
+        };
         let browsing_context_actor = self
             .registry
             .find::<BrowsingContextActor>(browsing_context_name);
-        let thread = self
+        let thread_actor = self
             .registry
             .find::<ThreadActor>(&browsing_context_actor.thread_name);
 
-        let source = match thread
+        let source_name = match thread_actor
             .source_manager
             .find_source(&self.registry, &frame.url)
         {
-            Some(source) => source.name(),
+            Some(source_actor) => source_actor.name().into(),
             None => {
                 warn!("No source actor found for URL: {}", frame.url);
                 return;
             },
         };
 
-        let frame_name = FrameActor::register(&self.registry, source, frame);
+        let frame_actor = FrameActor::register(&self.registry, source_name, frame);
 
-        let _ = result_sender.send(frame_name);
+        let _ = result_sender.send(frame_actor.name().into());
+    }
+
+    fn handle_create_object_actor(
+        &mut self,
+        result_sender: GenericSender<String>,
+        value: DebuggerValue,
+    ) {
+        let DebuggerValue::ObjectValue {
+            actor,
+            class,
+            own_property_length,
+            preview,
+        } = value
+        else {
+            return;
+        };
+
+        let object_actor = ObjectActor::register(
+            &self.registry,
+            actor,
+            class,
+            own_property_length,
+            preview.map(|preview| *preview),
+        );
+        let _ = result_sender.send(object_actor);
     }
 
     fn handle_create_environment_actor(
         &mut self,
         result_sender: GenericSender<String>,
-        environment: EnvironmentInfo,
+        environment_info: EnvironmentInfo,
         parent: Option<String>,
+        actor: Option<String>,
     ) {
-        let frame = EnvironmentActor::register(&self.registry, environment, parent);
-        let _ = result_sender.send(frame);
+        let environment_name =
+            EnvironmentActor::register_or_update(&self.registry, environment_info, parent, actor);
+        let _ = result_sender.send(environment_name);
     }
 }
 
@@ -896,16 +941,14 @@ fn allow_devtools_client(stream: &mut TcpStream, embedder: &EmbedderProxy, token
     stream.set_read_timeout(Some(timeout)).unwrap();
     let peek = stream.peek(&mut buf);
     stream.set_read_timeout(None).unwrap();
-    if let Ok(len) = peek {
-        if len == buf.len() {
-            if let Ok(s) = std::str::from_utf8(&buf) {
-                if s == token {
-                    // Consume the message as it was relevant to us.
-                    let _ = stream.read_exact(&mut buf);
-                    return true;
-                }
-            }
-        }
+    if let Ok(len) = peek &&
+        len == buf.len() &&
+        let Ok(s) = std::str::from_utf8(&buf) &&
+        s == token
+    {
+        // Consume the message as it was relevant to us.
+        let _ = stream.read_exact(&mut buf);
+        return true;
     };
 
     // No token found. Prompt user
@@ -963,4 +1006,59 @@ fn handle_client(
     let _ = sender.send(DevtoolsControlMsg::ClientExited);
 
     registry.cleanup(stream_id);
+}
+
+/// <https://searchfox.org/mozilla-central/source/devtools/server/actors/object/utils.js#148>
+pub(crate) fn debugger_value_to_json(registry: &ActorRegistry, value: DebuggerValue) -> Value {
+    let mut v = Map::new();
+    match value {
+        DebuggerValue::VoidValue => {
+            v.insert("type".to_owned(), Value::String("undefined".to_owned()));
+            Value::Object(v)
+        },
+        DebuggerValue::NullValue(uninitialized) => {
+            v.insert("type".to_owned(), Value::String("null".to_owned()));
+            if uninitialized {
+                v.insert("uninitialized".to_owned(), Value::Bool(true));
+            }
+            Value::Object(v)
+        },
+        DebuggerValue::BooleanValue(boolean) => Value::Bool(boolean),
+        DebuggerValue::NumberValue(val) => {
+            if val.is_nan() {
+                v.insert("type".to_owned(), Value::String("NaN".to_owned()));
+                Value::Object(v)
+            } else if val.is_infinite() {
+                if val < 0. {
+                    v.insert("type".to_owned(), Value::String("-Infinity".to_owned()));
+                } else {
+                    v.insert("type".to_owned(), Value::String("Infinity".to_owned()));
+                }
+                Value::Object(v)
+            } else if val == 0. && val.is_sign_negative() {
+                v.insert("type".to_owned(), Value::String("-0".to_owned()));
+                Value::Object(v)
+            } else {
+                Value::Number(Number::from_f64(val).unwrap())
+            }
+        },
+        DebuggerValue::StringValue(str) => Value::String(str),
+        DebuggerValue::ObjectValue {
+            actor,
+            class,
+            own_property_length,
+            preview,
+        } => {
+            let object_name = ObjectActor::register(
+                registry,
+                actor,
+                class,
+                own_property_length,
+                preview.map(|preview| *preview),
+            );
+            let object_msg = registry.encode::<ObjectActor, _>(&object_name);
+            let value = serde_json::to_value(object_msg).unwrap_or_default();
+            Value::Object(value.as_object().cloned().unwrap_or_default())
+        },
+    }
 }

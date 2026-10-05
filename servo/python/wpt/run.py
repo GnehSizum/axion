@@ -118,7 +118,7 @@ def run_tests(default_binary_path: str, multiprocess: bool, **kwargs: Any) -> in
     use_mach_logging = False
     if len(kwargs["test_list"]) == 1:
         file_ext = os.path.splitext(kwargs["test_list"][0])[1].lower()
-        if file_ext in [".htm", ".html", ".js", ".xhtml", ".xht", ".py"]:
+        if file_ext in [".htm", ".html", ".js", ".xhtml", ".xht", ".py", ".svg"]:
             use_mach_logging = True
 
     # Enable headless mode by default, unless `--no-headless` is explicitly passed, in
@@ -132,10 +132,14 @@ def run_tests(default_binary_path: str, multiprocess: bool, **kwargs: Any) -> in
         logger = wptrunner.setup_logging(kwargs, {"servo": sys.stdout})
 
     handler = ServoHandler(detect_flakes=kwargs["retry_unexpected"] >= 1)
+    assert logger is not None
     logger.add_handler(handler)
 
     with tempfile.TemporaryDirectory(prefix="servo-") as config_dir:
         kwargs["binary_args"] += ["--config-dir", config_dir]
+        # Temporary workaround to avoid shared storage across parallel processes.
+        # Can be removed once per-process config dirs are supported.
+        kwargs["binary_args"] += ["--temporary-storage"]
 
         wptrunner.run_tests(**kwargs)
 

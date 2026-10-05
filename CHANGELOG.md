@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.6.0 - Preview
+
+- Replaced the vendored Servo engine with the official `v0.6.0` source at `c78d2c206f80a1c8b67eefa97f773bba513205d3`.
+- Adapted mouse button names, touch pointer types, window resizing, and origin string ownership to the new embedding API.
+- Explicitly retained WebGL, WebCrypto, and Brotli compression streams after upstream feature gating changes.
+- Used Servo's `bundled` feature group for embedded resources and bundled FreeType on platforms that use it.
+- Pinned Rust `1.97.1`, updated the minimum Rust version to `1.88.0`, and synchronized CI and generated application templates.
+- Added root Cargo environment samples and macOS compiler/linker settings for native Servo builds; generated projects include the matching toolchain and platform config.
+- Aligned the Axion public version and Cargo workspace version at `0.6.0`; retained internal feature milestone `33`.
+
 ## v0.1.33.0 - Preview
 
 Axion v0.1.33.0 starts the Native API Expansion phase on the current Servo `0.1` baseline.

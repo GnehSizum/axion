@@ -3,19 +3,19 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use js::gc::CustomAutoRooterGuard;
 use js::typedarray::{ArrayBufferView, ArrayBufferViewU8};
+use script_bindings::cell::DomRefCell;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use script_bindings::trace::RootedTraceableBox;
 
 use crate::dom::bindings::buffer_source::HeapBufferSource;
-use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::ReadableStreamBYOBRequestBinding::ReadableStreamBYOBRequestMethods;
 use crate::dom::bindings::error::{Error, Fallible};
-use crate::dom::bindings::reflector::{Reflector, reflect_dom_object};
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::stream::readablebytestreamcontroller::ReadableByteStreamController;
 use crate::dom::types::GlobalScope;
-use crate::script_runtime::{CanGc, JSContext as SafeJSContext};
 
 /// <https://streams.spec.whatwg.org/#readablestreambyobrequest>
 #[dom_struct]
@@ -35,18 +35,24 @@ impl ReadableStreamBYOBRequest {
         }
     }
 
-    pub(crate) fn new(global: &GlobalScope, can_gc: CanGc) -> DomRoot<ReadableStreamBYOBRequest> {
-        reflect_dom_object(Box::new(Self::new_inherited()), global, can_gc)
+    pub(crate) fn new(
+        cx: &mut JSContext,
+        global: &GlobalScope,
+    ) -> DomRoot<ReadableStreamBYOBRequest> {
+        reflect_dom_object_with_cx(Box::new(Self::new_inherited()), global, cx)
     }
 
     pub(crate) fn set_controller(&self, controller: Option<&ReadableByteStreamController>) {
         self.controller.set(controller);
     }
 
-    pub(crate) fn set_view(&self, view: Option<HeapBufferSource<ArrayBufferViewU8>>) {
+    pub(crate) fn set_view(
+        &self,
+        view: Option<RootedTraceableBox<HeapBufferSource<ArrayBufferViewU8>>>,
+    ) {
         match view {
             Some(view) => {
-                *self.view.borrow_mut() = view;
+                *self.view.borrow_mut() = *view.into_box();
             },
             None => {
                 *self.view.borrow_mut() = HeapBufferSource::<ArrayBufferViewU8>::default();
@@ -54,25 +60,20 @@ impl ReadableStreamBYOBRequest {
         }
     }
 
-    pub(crate) fn get_view(&self) -> HeapBufferSource<ArrayBufferViewU8> {
-        self.view.borrow().clone()
+    pub(crate) fn get_view(&self) -> RootedTraceableBox<HeapBufferSource<ArrayBufferViewU8>> {
+        RootedTraceableBox::new(self.view.borrow().clone())
     }
 }
 
 impl ReadableStreamBYOBRequestMethods<crate::DomTypeHolder> for ReadableStreamBYOBRequest {
     /// <https://streams.spec.whatwg.org/#rs-byob-request-view>
-    fn GetView(
-        &self,
-        _cx: SafeJSContext,
-    ) -> Option<RootedTraceableBox<js::typedarray::HeapArrayBufferView>> {
+    fn GetView(&self) -> Option<RootedTraceableBox<js::typedarray::HeapArrayBufferView>> {
         // Return this.[[view]].
         self.view.borrow().typed_array_to_option()
     }
 
     /// <https://streams.spec.whatwg.org/#rs-byob-request-respond>
-    fn Respond(&self, bytes_written: u64, can_gc: CanGc) -> Fallible<()> {
-        let cx = GlobalScope::get_cx();
-
+    fn Respond(&self, cx: &mut JSContext, bytes_written: u64) -> Fallible<()> {
         // If this.[[controller]] is undefined, throw a TypeError exception.
         let controller = if let Some(controller) = self.controller.get() {
             controller
@@ -95,17 +96,16 @@ impl ReadableStreamBYOBRequestMethods<crate::DomTypeHolder> for ReadableStreamBY
         }
 
         // Perform ? ReadableByteStreamControllerRespond(this.[[controller]], bytesWritten).
-        controller.respond(cx, bytes_written, can_gc)
+        controller.respond(cx, bytes_written)
     }
 
     /// <https://streams.spec.whatwg.org/#rs-byob-request-respond-with-new-view>
     fn RespondWithNewView(
         &self,
+        cx: &mut JSContext,
         view: CustomAutoRooterGuard<ArrayBufferView>,
-        can_gc: CanGc,
     ) -> Fallible<()> {
-        let cx = GlobalScope::get_cx();
-        let view = HeapBufferSource::<ArrayBufferViewU8>::from_view(view);
+        let view = HeapBufferSource::<ArrayBufferViewU8>::from_view(cx, view);
 
         // If this.[[controller]] is undefined, throw a TypeError exception.
         let controller = if let Some(controller) = self.controller.get() {
@@ -120,6 +120,6 @@ impl ReadableStreamBYOBRequestMethods<crate::DomTypeHolder> for ReadableStreamBY
         }
 
         // Return ? ReadableByteStreamControllerRespondWithNewView(this.[[controller]], view).
-        controller.respond_with_new_view(cx, view, can_gc)
+        controller.respond_with_new_view(cx, &view)
     }
 }

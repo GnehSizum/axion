@@ -5,12 +5,16 @@
 //! The Accessibility actor is responsible for the Accessibility tab in the DevTools page. Right
 //! now it is a placeholder for future functionality.
 
+use std::sync::Arc;
+
 use malloc_size_of_derive::MallocSizeOf;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::StreamId;
-use crate::actor::{Actor, ActorError, ActorRegistry};
+use crate::actor::{Actor, ActorError, ActorRegistry, new_actor_name};
+use crate::actors::inspector::accessible_walker::AccessibleWalkerActor;
+use crate::actors::inspector::simulator::SimulatorActor;
 use crate::protocol::ClientRequest;
 
 #[derive(Serialize)]
@@ -59,8 +63,8 @@ pub(crate) struct AccessibilityActor {
 }
 
 impl Actor for AccessibilityActor {
-    fn name(&self) -> String {
-        self.name.clone()
+    fn name(&self) -> &str {
+        &self.name
     }
 
     /// The accesibility actor can handle the following messages:
@@ -84,26 +88,24 @@ impl Actor for AccessibilityActor {
         match msg_type {
             "bootstrap" => {
                 let msg = BootstrapReply {
-                    from: self.name(),
+                    from: self.name().into(),
                     state: BootstrapState { enabled: false },
                 };
                 request.reply_final(&msg)?
             },
             "getSimulator" => {
-                // TODO: Create actual simulator
-                let actor = registry.new_name::<SimulatorActor>();
-                registry.register(SimulatorActor {
-                    name: actor.clone(),
-                });
+                let simulator_actor = SimulatorActor::register(registry);
                 let msg = GetSimulatorReply {
-                    from: self.name(),
-                    simulator: ActorMsg { actor },
+                    from: self.name().into(),
+                    simulator: ActorMsg {
+                        actor: simulator_actor.name().into(),
+                    },
                 };
                 request.reply_final(&msg)?
             },
             "getTraits" => {
                 let msg = GetTraitsReply {
-                    from: self.name(),
+                    from: self.name().into(),
                     traits: AccessibilityTraits {
                         tabbing_order: true,
                     },
@@ -111,14 +113,12 @@ impl Actor for AccessibilityActor {
                 request.reply_final(&msg)?
             },
             "getWalker" => {
-                // TODO: Create actual accessible walker
-                let actor = registry.new_name::<AccessibleWalkerActor>();
-                registry.register(AccessibleWalkerActor {
-                    name: actor.clone(),
-                });
+                let accessible_walker_actor = AccessibleWalkerActor::register(registry);
                 let msg = GetWalkerReply {
-                    from: self.name(),
-                    walker: ActorMsg { actor },
+                    from: self.name().into(),
+                    walker: ActorMsg {
+                        actor: accessible_walker_actor.name().into(),
+                    },
                 };
                 request.reply_final(&msg)?
             },
@@ -129,29 +129,9 @@ impl Actor for AccessibilityActor {
 }
 
 impl AccessibilityActor {
-    pub fn new(name: String) -> Self {
-        Self { name }
-    }
-}
-
-#[derive(MallocSizeOf)]
-pub(crate) struct SimulatorActor {
-    name: String,
-}
-
-impl Actor for SimulatorActor {
-    fn name(&self) -> String {
-        self.name.clone()
-    }
-}
-
-#[derive(MallocSizeOf)]
-pub(crate) struct AccessibleWalkerActor {
-    name: String,
-}
-
-impl Actor for AccessibleWalkerActor {
-    fn name(&self) -> String {
-        self.name.clone()
+    pub fn register(registry: &ActorRegistry) -> Arc<Self> {
+        let name = new_actor_name::<Self>();
+        let actor = Self { name };
+        registry.register::<Self>(actor)
     }
 }

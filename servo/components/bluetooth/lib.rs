@@ -4,7 +4,6 @@
 
 pub mod adapter;
 pub mod bluetooth;
-mod macros;
 pub mod test;
 
 use std::borrow::ToOwned;
@@ -16,7 +15,7 @@ use std::time::Duration;
 use bitflags::bitflags;
 use embedder_traits::{BluetoothDeviceDescription, EmbedderMsg, EmbedderProxy};
 use log::warn;
-use rand::{self, Rng};
+use rand::{self, RngExt};
 #[cfg(not(feature = "native-bluetooth"))]
 use servo_base::generic_channel::GenericReceiver;
 use servo_base::generic_channel::{self, GenericSender};
@@ -57,14 +56,6 @@ bitflags! {
         const WRITABLE_AUXILIARIES        = 0b100000000;
     }
 }
-
-macro_rules! return_if_cached(
-    ($cache:expr, $key:expr) => (
-        if $cache.contains_key($key) {
-            return $cache.get($key);
-        }
-    );
-);
 
 pub trait BluetoothThreadFactory {
     fn new(embedder_proxy: EmbedderProxy) -> Self;
@@ -137,10 +128,10 @@ async fn matches_filter(device: &BluetoothDevice, filter: &BluetoothScanfilter) 
     }
 
     // Step 1.
-    if let Some(name) = filter.get_name() {
-        if device.get_name().await.ok() != Some(name.to_string()) {
-            return false;
-        }
+    if let Some(name) = filter.get_name() &&
+        device.get_name().await.ok() != Some(name.to_string())
+    {
+        return false;
     }
 
     // Step 2.
@@ -155,12 +146,12 @@ async fn matches_filter(device: &BluetoothDevice, filter: &BluetoothScanfilter) 
     }
 
     // Step 3.
-    if !filter.get_services().is_empty() {
-        if let Ok(device_uuids) = device.get_uuids().await {
-            for service in filter.get_services() {
-                if !device_uuids.iter().any(|x| x == service) {
-                    return false;
-                }
+    if !filter.get_services().is_empty() &&
+        let Ok(device_uuids) = device.get_uuids().await
+    {
+        for service in filter.get_services() {
+            if !device_uuids.iter().any(|x| x == service) {
+                return false;
             }
         }
     }
@@ -464,10 +455,11 @@ impl BluetoothManager {
         adapter: &mut BluetoothAdapter,
         device_id: &str,
     ) -> Option<&BluetoothDevice> {
-        return_if_cached!(self.cached_devices, device_id);
+        if self.cached_devices.contains_key(device_id) {
+            return self.cached_devices.get(device_id);
+        }
         self.get_and_cache_devices(adapter).await;
-        return_if_cached!(self.cached_devices, device_id);
-        None
+        self.cached_devices.get(device_id)
     }
 
     async fn select_device(
@@ -535,8 +527,8 @@ impl BluetoothManager {
     }
 
     fn device_is_cached(&self, device_id: &str) -> bool {
-        self.cached_devices.contains_key(device_id)
-            && self.address_to_id.values().any(|v| v == device_id)
+        self.cached_devices.contains_key(device_id) &&
+            self.address_to_id.values().any(|v| v == device_id)
     }
 
     async fn device_matches_filter(
@@ -564,9 +556,8 @@ impl BluetoothManager {
         };
 
         services.retain(|s| {
-            !uuid_is_blocklisted(&s.get_uuid().unwrap_or_default(), Blocklist::All)
-                && self
-                    .allowed_services
+            !uuid_is_blocklisted(&s.get_uuid().unwrap_or_default(), Blocklist::All) &&
+                self.allowed_services
                     .get(device_id)
                     .is_some_and(|uuids| uuids.contains(&s.get_uuid().unwrap_or_default()))
         });
@@ -584,16 +575,17 @@ impl BluetoothManager {
         adapter: &mut BluetoothAdapter,
         service_id: &str,
     ) -> Option<&BluetoothGATTService> {
-        return_if_cached!(self.cached_services, service_id);
+        if self.cached_services.contains_key(service_id) {
+            return self.cached_services.get(service_id);
+        }
         let device_id = self.service_to_device.get(service_id)?.clone();
         self.get_and_cache_gatt_services(adapter, &device_id).await;
-        return_if_cached!(self.cached_services, service_id);
-        None
+        self.cached_services.get(service_id)
     }
 
     fn service_is_cached(&self, service_id: &str) -> bool {
-        self.cached_services.contains_key(service_id)
-            && self.service_to_device.contains_key(service_id)
+        self.cached_services.contains_key(service_id) &&
+            self.service_to_device.contains_key(service_id)
     }
 
     // Characteristic
@@ -624,15 +616,16 @@ impl BluetoothManager {
         adapter: &mut BluetoothAdapter,
         characteristic_id: &str,
     ) -> Option<&BluetoothGATTCharacteristic> {
-        return_if_cached!(self.cached_characteristics, characteristic_id);
+        if self.cached_characteristics.contains_key(characteristic_id) {
+            return self.cached_characteristics.get(characteristic_id);
+        }
         let service_id = self
             .characteristic_to_service
             .get(characteristic_id)?
             .clone();
         self.get_and_cache_gatt_characteristics(adapter, &service_id)
             .await;
-        return_if_cached!(self.cached_characteristics, characteristic_id);
-        None
+        self.cached_characteristics.get(characteristic_id)
     }
 
     fn get_characteristic_properties(&self, characteristic: &BluetoothGATTCharacteristic) -> Flags {
@@ -656,9 +649,8 @@ impl BluetoothManager {
     }
 
     fn characteristic_is_cached(&self, characteristic_id: &str) -> bool {
-        self.cached_characteristics.contains_key(characteristic_id)
-            && self
-                .characteristic_to_service
+        self.cached_characteristics.contains_key(characteristic_id) &&
+            self.characteristic_to_service
                 .contains_key(characteristic_id)
     }
 
@@ -693,15 +685,16 @@ impl BluetoothManager {
         adapter: &mut BluetoothAdapter,
         descriptor_id: &str,
     ) -> Option<&BluetoothGATTDescriptor> {
-        return_if_cached!(self.cached_descriptors, descriptor_id);
+        if self.cached_descriptors.contains_key(descriptor_id) {
+            return self.cached_descriptors.get(descriptor_id);
+        }
         let characteristic_id = self
             .descriptor_to_characteristic
             .get(descriptor_id)?
             .clone();
         self.get_and_cache_gatt_descriptors(adapter, &characteristic_id)
             .await;
-        return_if_cached!(self.cached_descriptors, descriptor_id);
-        None
+        self.cached_descriptors.get(descriptor_id)
     }
 
     // Methods
@@ -832,14 +825,13 @@ impl BluetoothManager {
                     return Err(BluetoothError::InvalidState);
                 }
                 // Step 6.
-                if let Some(ref uuid) = uuid {
-                    if !self
+                if let Some(ref uuid) = uuid &&
+                    !self
                         .allowed_services
                         .get(&id)
                         .is_some_and(|s| s.contains(uuid))
-                    {
-                        return Err(BluetoothError::Security);
-                    }
+                {
+                    return Err(BluetoothError::Security);
                 }
                 let mut services = self.get_and_cache_gatt_services(&mut adapter, &id).await;
                 if let Some(uuid) = uuid {
@@ -847,14 +839,14 @@ impl BluetoothManager {
                 }
                 let mut services_vec = vec![];
                 for service in services {
-                    if service.is_primary().unwrap_or(false) {
-                        if let Ok(uuid) = service.get_uuid() {
-                            services_vec.push(BluetoothServiceMsg {
-                                uuid,
-                                is_primary: true,
-                                instance_id: service.get_id(),
-                            });
-                        }
+                    if service.is_primary().unwrap_or(false) &&
+                        let Ok(uuid) = service.get_uuid()
+                    {
+                        services_vec.push(BluetoothServiceMsg {
+                            uuid,
+                            is_primary: true,
+                            instance_id: service.get_id(),
+                        });
                     }
                 }
 

@@ -5,18 +5,19 @@
 use std::cell::Cell;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
+use script_bindings::reflector::reflect_dom_object_with_cx;
 use script_bindings::weakref::WeakRef;
 use servo_canvas_traits::webgl::WebGLError::*;
 use servo_canvas_traits::webgl::{WebGLCommand, WebGLQueryId, webgl_channel};
 
 use crate::dom::bindings::codegen::Bindings::WebGL2RenderingContextBinding::WebGL2RenderingContextConstants as constants;
 use crate::dom::bindings::refcounted::Trusted;
-use crate::dom::bindings::reflector::{DomGlobal, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::webgl::webglobject::WebGLObject;
 use crate::dom::webgl::webglrenderingcontext::{Operation, WebGLRenderingContext};
 use crate::dom::webglrenderingcontext::capture_webgl_backtrace;
-use crate::script_runtime::CanGc;
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableWebGLQuery {
@@ -77,15 +78,15 @@ impl WebGLQuery {
         }
     }
 
-    pub(crate) fn new(context: &WebGLRenderingContext, can_gc: CanGc) -> DomRoot<Self> {
+    pub(crate) fn new(cx: &mut JSContext, context: &WebGLRenderingContext) -> DomRoot<Self> {
         let (sender, receiver) = webgl_channel().unwrap();
         context.send_command(WebGLCommand::GenerateQuery(sender));
         let id = receiver.recv().unwrap();
 
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(Self::new_inherited(context, id)),
             &*context.global(),
-            can_gc,
+            cx,
         )
     }
 
@@ -97,15 +98,15 @@ impl WebGLQuery {
         if self.droppable.marked_for_deletion.get() {
             return Err(InvalidOperation);
         }
-        if let Some(current_target) = self.gl_target.get() {
-            if current_target != target {
-                return Err(InvalidOperation);
-            }
+        if let Some(current_target) = self.gl_target.get() &&
+            current_target != target
+        {
+            return Err(InvalidOperation);
         }
         match target {
-            constants::ANY_SAMPLES_PASSED
-            | constants::ANY_SAMPLES_PASSED_CONSERVATIVE
-            | constants::TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN => (),
+            constants::ANY_SAMPLES_PASSED |
+            constants::ANY_SAMPLES_PASSED_CONSERVATIVE |
+            constants::TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN => (),
             _ => return Err(InvalidEnum),
         }
         self.gl_target.set(Some(target));
@@ -122,15 +123,15 @@ impl WebGLQuery {
         if self.droppable.marked_for_deletion.get() {
             return Err(InvalidOperation);
         }
-        if let Some(current_target) = self.gl_target.get() {
-            if current_target != target {
-                return Err(InvalidOperation);
-            }
+        if let Some(current_target) = self.gl_target.get() &&
+            current_target != target
+        {
+            return Err(InvalidOperation);
         }
         match target {
-            constants::ANY_SAMPLES_PASSED
-            | constants::ANY_SAMPLES_PASSED_CONSERVATIVE
-            | constants::TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN => (),
+            constants::ANY_SAMPLES_PASSED |
+            constants::ANY_SAMPLES_PASSED_CONSERVATIVE |
+            constants::TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN => (),
             _ => return Err(InvalidEnum),
         }
         context.send_command(WebGLCommand::EndQuery(target));
@@ -173,7 +174,6 @@ impl WebGLQuery {
         self.query_result_available.set(Some(is_available));
     }
 
-    #[rustfmt::skip]
     pub(crate) fn get_parameter(
         &self,
         context: &WebGLRenderingContext,
@@ -183,8 +183,7 @@ impl WebGLQuery {
             return Err(InvalidOperation);
         }
         match pname {
-            constants::QUERY_RESULT |
-            constants::QUERY_RESULT_AVAILABLE => {},
+            constants::QUERY_RESULT | constants::QUERY_RESULT_AVAILABLE => {},
             _ => return Err(InvalidEnum),
         }
 

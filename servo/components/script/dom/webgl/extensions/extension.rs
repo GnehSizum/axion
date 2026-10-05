@@ -2,14 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use js::context::JSContext;
+use script_bindings::reflector::DomObject;
 use servo_canvas_traits::webgl::WebGLVersion;
 
 use super::WebGLExtensions;
-use crate::dom::bindings::reflector::DomObject;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::trace::JSTraceable;
 use crate::dom::webgl::webglrenderingcontext::WebGLRenderingContext;
-use crate::script_runtime::CanGc;
 
 /// Trait implemented by WebGL extensions.
 pub(crate) trait WebGLExtension: Sized
@@ -20,7 +20,7 @@ where
     type Extension;
 
     /// Creates the DOM object of the WebGL extension.
-    fn new(ctx: &WebGLRenderingContext, can_gc: CanGc) -> DomRoot<Self::Extension>;
+    fn new(cx: &mut JSContext, ctx: &WebGLRenderingContext) -> DomRoot<Self::Extension>;
 
     /// Returns which WebGL spec is this extension written against.
     fn spec() -> WebGLExtensionSpec;

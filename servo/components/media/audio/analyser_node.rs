@@ -4,20 +4,24 @@
 
 use std::cmp;
 use std::f32::consts::PI;
+use std::sync::{Arc, OnceLock};
 
 use malloc_size_of_derive::MallocSizeOf;
+use servo_base::generic_channel::GenericCallback;
 
+use crate::audio_node::{
+    AudioNodeEngine, AudioNodeType, BlockInfo, ChannelInfo, ChannelInterpretation,
+};
 use crate::block::{Block, Chunk, FRAMES_PER_BLOCK_USIZE};
-use crate::node::{AudioNodeEngine, AudioNodeType, BlockInfo, ChannelInfo, ChannelInterpretation};
 
 #[derive(AudioNodeCommon)]
 pub(crate) struct AnalyserNode {
     channel_info: ChannelInfo,
-    callback: Box<dyn FnMut(Block) + Send>,
+    callback: Arc<OnceLock<GenericCallback<Block>>>,
 }
 
 impl AnalyserNode {
-    pub fn new(callback: Box<dyn FnMut(Block) + Send>, channel_info: ChannelInfo) -> Self {
+    pub fn new(callback: Arc<OnceLock<GenericCallback<Block>>>, channel_info: ChannelInfo) -> Self {
         Self {
             callback,
             channel_info,
@@ -36,7 +40,9 @@ impl AudioNodeEngine for AnalyserNode {
         let mut push = inputs.blocks[0].clone();
         push.mix(1, ChannelInterpretation::Speakers);
 
-        (self.callback)(push);
+        if let Some(callback) = self.callback.get() {
+            let _ = callback.send(push);
+        }
 
         // analyser node doesn't modify the inputs
         inputs
@@ -197,8 +203,8 @@ impl AnalysisEngine {
         self.blackman_windows.resize(self.fft_size, 0.);
         let coeff = PI * 2. / self.fft_size as f32;
         for n in 0..self.fft_size {
-            self.blackman_windows[n] = ALPHA_0 - ALPHA_1 * (coeff * n as f32).cos()
-                + ALPHA_2 * (2. * coeff * n as f32).cos();
+            self.blackman_windows[n] = ALPHA_0 - ALPHA_1 * (coeff * n as f32).cos() +
+                ALPHA_2 * (2. * coeff * n as f32).cos();
         }
     }
 
@@ -233,8 +239,8 @@ impl AnalysisEngine {
             let sum_real = sum_real / self.fft_size as f32;
             let sum_imaginary = sum_imaginary / self.fft_size as f32;
             let magnitude = (sum_real * sum_real + sum_imaginary * sum_imaginary).sqrt();
-            self.smoothed_fft_data[k] = (self.smoothing_constant * self.smoothed_fft_data[k] as f64
-                + (1. - self.smoothing_constant) * magnitude as f64)
+            self.smoothed_fft_data[k] = (self.smoothing_constant * self.smoothed_fft_data[k] as f64 +
+                (1. - self.smoothing_constant) * magnitude as f64)
                 as f32;
             self.computed_fft_data[k] = 20. * self.smoothed_fft_data[k].log(10.);
         }

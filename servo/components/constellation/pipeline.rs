@@ -5,10 +5,12 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use devtools_traits::WorkerId;
 use embedder_traits::{AnimationState, FocusSequenceNumber};
 use layout_api::ScriptThreadFactory;
 use log::{debug, error, warn};
 use paint_api::{CompositionPipeline, PaintMessage, PaintProxy};
+use rustc_hash::FxHashSet;
 use script_traits::{
     DiscardBrowsingContext, DocumentActivity, NewPipelineInfo, ScriptThreadMessage,
 };
@@ -48,6 +50,15 @@ pub struct Pipeline {
     /// Whether this pipeline is currently running animations. Pipelines that are running
     /// animations cause composites to be continually scheduled.
     pub animation_state: AnimationState,
+
+    /// Whether the document for this pipeline has active animation frame callbacks.
+    pub document_callbacks_active: bool,
+
+    /// Workers in this pipeline with active animation frame callbacks.
+    pub worker_callbacks_active: FxHashSet<WorkerId>,
+
+    /// The last aggregate animation-callback state sent to Paint.
+    pub last_callbacks_active_sent_to_paint: bool,
 
     /// The child browsing contexts of this pipeline (these are iframes in the document).
     pub children: Vec<BrowsingContextId>,
@@ -119,6 +130,9 @@ impl Pipeline {
             url: load_data.url.clone(),
             children: vec![],
             animation_state: AnimationState::NoAnimationsPresent,
+            document_callbacks_active: false,
+            worker_callbacks_active: FxHashSet::default(),
+            last_callbacks_active_sent_to_paint: false,
             load_data,
             history_state_id: None,
             history_states: HashSet::new(),
@@ -133,18 +147,22 @@ impl Pipeline {
     /// Let the `ScriptThread` for this [`Pipeline`] know that it has exited. If the `ScriptThread` hasn't
     /// panicked and is still alive, it will send a `PipelineExited` message back to the `Constellation`
     /// when it finishes cleaning up.
-    pub fn send_exit_message_to_script(&self, discard_bc: DiscardBrowsingContext) {
+    ///
+    /// Returns `true` if the channel is still alive or `false` otherwise.
+    pub fn send_exit_message_to_script(&self, discard_bc: DiscardBrowsingContext) -> bool {
         debug!("{:?} Sending exit message to script", self.id);
 
         // Script thread handles shutting down layout, and layout handles shutting down the painter.
         // For now, if the script thread has failed, we give up on clean shutdown.
-        if let Err(error) = self.event_loop.send(ScriptThreadMessage::ExitPipeline(
-            self.webview_id,
-            self.id,
-            discard_bc,
-        )) {
-            warn!("Sending script exit message failed ({error}).");
-        }
+        let result = self
+            .event_loop
+            .send(ScriptThreadMessage::ExitPipeline(
+                self.webview_id,
+                self.id,
+                discard_bc,
+            ))
+            .inspect_err(|error| warn!("Sending script exit message failed ({error})."));
+        !matches!(result, Err(SendError::Disconnected))
     }
 
     /// Notify this pipeline of its activity.

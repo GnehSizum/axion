@@ -3,20 +3,20 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::borrow::Cow;
+use std::ops::Deref;
 
-use html5ever::LocalName;
-use layout_api::wrapper_traits::{
-    PseudoElementChain, ThreadSafeLayoutElement, ThreadSafeLayoutNode,
+use atomic_refcell::AtomicRef;
+use layout_api::{
+    LayoutElement, LayoutElementType, LayoutNode, LayoutNodeType, PseudoElementChain,
 };
-use layout_api::{LayoutElementType, LayoutNodeType};
-use script::layout_dom::ServoThreadSafeLayoutNode;
-use selectors::Element as SelectorsElement;
+use script::layout_dom::ServoLayoutNode;
 use servo_arc::Arc as ServoArc;
 use style::dom::NodeInfo;
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
 use style::values::generics::counters::{Content, ContentItem};
 use style::values::specified::Quotes;
+use web_atoms::LocalName;
 
 use crate::context::LayoutContext;
 use crate::dom::{BoxSlot, LayoutBox, NodeExt};
@@ -30,15 +30,12 @@ use crate::style_ext::{Display, DisplayGeneratingBox, DisplayInside, DisplayOuts
 /// avoid having to repeat the same arguments in argument lists.
 #[derive(Clone)]
 pub(crate) struct NodeAndStyleInfo<'dom> {
-    pub node: ServoThreadSafeLayoutNode<'dom>,
+    pub node: ServoLayoutNode<'dom>,
     pub style: ServoArc<ComputedValues>,
 }
 
 impl<'dom> NodeAndStyleInfo<'dom> {
-    pub(crate) fn new(
-        node: ServoThreadSafeLayoutNode<'dom>,
-        style: ServoArc<ComputedValues>,
-    ) -> Self {
+    pub(crate) fn new(node: ServoLayoutNode<'dom>, style: ServoArc<ComputedValues>) -> Self {
         Self { node, style }
     }
 
@@ -89,8 +86,46 @@ pub(super) enum PseudoElementContentItem {
     Replaced(ReplacedContents),
 }
 
+/// A reference to a string encountered during box tree construction. This
+/// can either be a reference to a borrowed DOM string, a `&str` or an owned
+/// `String`.
+pub(crate) enum BoxTreeString<'a> {
+    /// Text borrowed in its entirety from a DOM node.
+    Ref(AtomicRef<'a, str>),
+    /// Text that exists independent of a particular DOM node.
+    Cow(Cow<'a, str>),
+}
+
+impl<'a> From<AtomicRef<'a, str>> for BoxTreeString<'a> {
+    fn from(text: AtomicRef<'a, str>) -> BoxTreeString<'a> {
+        BoxTreeString::Ref(text)
+    }
+}
+
+impl<'a> From<Cow<'a, str>> for BoxTreeString<'a> {
+    fn from(text: Cow<'a, str>) -> BoxTreeString<'a> {
+        BoxTreeString::Cow(text)
+    }
+}
+
+impl From<String> for BoxTreeString<'_> {
+    fn from(text: String) -> BoxTreeString<'static> {
+        BoxTreeString::Cow(text.into())
+    }
+}
+
+impl Deref for BoxTreeString<'_> {
+    type Target = str;
+    fn deref(&self) -> &str {
+        match self {
+            Self::Ref(ref_) => ref_,
+            Self::Cow(cow) => cow,
+        }
+    }
+}
+
 pub(super) trait TraversalHandler<'dom> {
-    fn handle_text(&mut self, info: &NodeAndStyleInfo<'dom>, text: Cow<'dom, str>);
+    fn handle_text(&mut self, info: &NodeAndStyleInfo<'dom>, text: BoxTreeString<'dom>);
 
     /// Or pseudo-element
     fn handle_element(
@@ -102,10 +137,10 @@ pub(super) trait TraversalHandler<'dom> {
     );
 
     /// Notify the handler that we are about to recurse into a `display: contents` element.
-    fn enter_display_contents(&mut self, _: SharedInlineStyles) {}
+    fn enter_display_contents(&mut self, _: SharedInlineStyles);
 
     /// Notify the handler that we have finished a `display: contents` element.
-    fn leave_display_contents(&mut self) {}
+    fn leave_display_contents(&mut self);
 }
 
 fn traverse_children_of<'dom>(
@@ -122,10 +157,10 @@ fn traverse_children_of<'dom>(
         traverse_eager_pseudo_element(PseudoElement::Before, parent_element_info, context, handler);
     }
 
-    for child in parent_element_info.node.children() {
+    for child in parent_element_info.node.flat_tree_children() {
         if child.is_text_node() {
             let info = NodeAndStyleInfo::new(child, child.style(&context.style_context));
-            handler.handle_text(&info, child.text_content());
+            handler.handle_text(&info, child.text_content().into());
         } else if child.is_element() {
             traverse_element(child, context, handler);
         }
@@ -137,7 +172,7 @@ fn traverse_children_of<'dom>(
 }
 
 fn traverse_element<'dom>(
-    element: ServoThreadSafeLayoutNode<'dom>,
+    element: ServoLayoutNode<'dom>,
     context: &LayoutContext,
     handler: &mut impl TraversalHandler<'dom>,
 ) {
@@ -165,7 +200,7 @@ fn traverse_element<'dom>(
         },
         Display::GeneratingBox(display) => {
             let contents = Contents::for_element(element, context);
-            let display = display.used_value_for_contents(&contents);
+            let display = display.used_value_for_contents(&contents, &info);
             let box_slot = element.box_slot();
             handler.handle_element(&info, display, contents, box_slot);
         },
@@ -235,8 +270,8 @@ fn traverse_pseudo_element_contents<'dom>(
                 };
                 // `display` is not inherited, so we get the initial value
                 debug_assert!(
-                    Display::from(anonymous_info.style.get_box().display)
-                        == Display::GeneratingBox(display_inline)
+                    Display::from(anonymous_info.style.get_box().display) ==
+                        Display::GeneratingBox(display_inline)
                 );
                 handler.handle_element(
                     anonymous_info,
@@ -255,23 +290,20 @@ impl Contents {
         matches!(self, Contents::Replaced(_))
     }
 
-    pub(crate) fn for_element(
-        node: ServoThreadSafeLayoutNode<'_>,
-        context: &LayoutContext,
-    ) -> Self {
-        if let Some(replaced) = ReplacedContents::for_element(node, context) {
-            return Self::Replaced(replaced);
-        }
+    pub(crate) fn for_element(node: ServoLayoutNode<'_>, context: &LayoutContext) -> Self {
         let is_widget = matches!(
             node.type_id(),
             Some(LayoutNodeType::Element(
-                LayoutElementType::HTMLInputElement
-                    | LayoutElementType::HTMLSelectElement
-                    | LayoutElementType::HTMLTextAreaElement
+                LayoutElementType::HTMLButtonElement |
+                    LayoutElementType::HTMLInputElement |
+                    LayoutElementType::HTMLSelectElement |
+                    LayoutElementType::HTMLTextAreaElement
             ))
         );
         if is_widget {
             Self::Widget(NonReplacedContents::OfElement)
+        } else if let Some(replaced) = ReplacedContents::for_element(node, context) {
+            Self::Replaced(replaced)
         } else {
             Self::NonReplaced(NonReplacedContents::OfElement)
         }
@@ -358,9 +390,9 @@ pub(crate) fn generate_pseudo_element_content(
                             .node
                             .set_uses_content_attribute_with_attr(true);
                         let attr_val =
-                            element.get_attr(&attr.namespace_url, &LocalName::from(attr_name));
+                            element.attribute(&attr.namespace_url, &LocalName::from(attr_name));
                         vec.push(PseudoElementContentItem::Text(
-                            attr_val.map_or("".to_string(), |s| s.to_string()),
+                            attr_val.map_or(String::new(), |s| s.to_string()),
                         ));
                     },
                     ContentItem::Image(image) => {

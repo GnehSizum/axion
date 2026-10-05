@@ -63,7 +63,7 @@ pub struct PlatformFont {
     pub(crate) ctfont: CFRetained<CTFont>,
     variations: Vec<FontVariation>,
     h_kern_subtable: Option<CachedKernTable>,
-    synthetic_bold: bool,
+    pub(crate) synthetic_bold: bool,
 }
 
 // From https://developer.apple.com/documentation/coretext:
@@ -110,20 +110,15 @@ impl PlatformFont {
         font_identifier: FontIdentifier,
         data: Option<&FontData>,
         requested_size: Option<Au>,
-        variations: &[FontVariation],
         synthetic_bold: bool,
     ) -> Result<PlatformFont, &'static str> {
         let size = match requested_size {
             Some(s) => s.to_f64_px(),
             None => 0.0,
         };
-        let Some(mut platform_font) = CoreTextFontCache::core_text_font(
-            font_identifier,
-            data,
-            size,
-            variations,
-            synthetic_bold,
-        ) else {
+        let Some(mut platform_font) =
+            CoreTextFontCache::core_text_font(font_identifier, data, size, synthetic_bold)
+        else {
             return Err("Could not generate CTFont for FontTemplateData");
         };
 
@@ -252,31 +247,38 @@ impl PlatformFontMethods for PlatformFont {
         font_identifier: FontIdentifier,
         data: &FontData,
         requested_size: Option<Au>,
-        variations: &[FontVariation],
         synthetic_bold: bool,
     ) -> Result<PlatformFont, &'static str> {
-        Self::new(
-            font_identifier,
-            Some(data),
-            requested_size,
-            variations,
-            synthetic_bold,
-        )
+        Self::new(font_identifier, Some(data), requested_size, synthetic_bold)
     }
 
     fn new_from_local_font_identifier(
         font_identifier: LocalFontIdentifier,
         requested_size: Option<Au>,
-        variations: &[FontVariation],
         synthetic_bold: bool,
     ) -> Result<PlatformFont, &'static str> {
         Self::new(
             FontIdentifier::Local(font_identifier),
             None,
             requested_size,
-            variations,
             synthetic_bold,
         )
+    }
+
+    /// Create a platform font with the given variations from a existing font.
+    ///
+    /// `self` is consumed to work around platform differences. On some platforms, changing the
+    /// variations requires creating an entirely new font face, whereas on others the returned
+    /// font is `self`.
+    fn copy_with_variations(
+        self,
+        font_identifier: &FontIdentifier,
+        variations: &[FontVariation],
+    ) -> Result<Self, &'static str> {
+        let mut platform_font =
+            CoreTextFontCache::add_variations_to_font(self, font_identifier, variations);
+        platform_font.load_h_kern_subtable();
+        Ok(platform_font)
     }
 
     fn descriptor(&self) -> FontTemplateDescriptor {
@@ -311,11 +313,12 @@ impl PlatformFontMethods for PlatformFont {
     }
 
     fn glyph_h_kerning(&self, first_glyph: GlyphId, second_glyph: GlyphId) -> FractionalPixel {
-        if let Some(ref table) = self.h_kern_subtable {
-            if let Some(font_units) = table.binary_search(first_glyph, second_glyph) {
-                return font_units as f64 * table.px_per_font_unit;
-            }
+        if let Some(ref table) = self.h_kern_subtable &&
+            let Some(font_units) = table.binary_search(first_glyph, second_glyph)
+        {
+            return font_units as f64 * table.px_per_font_unit;
         }
+
         0.0
     }
 
@@ -337,9 +340,9 @@ impl PlatformFontMethods for PlatformFont {
         //      set to just 1.0 with no affine transformations.
         let x_scale = 1.0;
         let y_scale = 1.0;
-        let is_bitmap_font = self.table_for_tag(COLR).is_some()
-            || self.table_for_tag(CBDT).is_some()
-            || self.table_for_tag(SBIX).is_some();
+        let is_bitmap_font = self.table_for_tag(COLR).is_some() ||
+            self.table_for_tag(CBDT).is_some() ||
+            self.table_for_tag(SBIX).is_some();
 
         let (strike_scale, pixel_step) = if is_bitmap_font {
             (y_scale, 1.0)
@@ -425,9 +428,9 @@ impl PlatformFontMethods for PlatformFont {
     fn webrender_font_instance_flags(&self) -> FontInstanceFlags {
         let mut flags = {
             // TODO: Should this also validate these tables?
-            if self.table_for_tag(COLR).is_some()
-                || self.table_for_tag(CBDT).is_some()
-                || self.table_for_tag(SBIX).is_some()
+            if self.table_for_tag(COLR).is_some() ||
+                self.table_for_tag(CBDT).is_some() ||
+                self.table_for_tag(SBIX).is_some()
             {
                 FontInstanceFlags::EMBEDDED_BITMAPS
             } else {
@@ -472,17 +475,17 @@ impl Font {
         // the value stored in the HTML lang attribute is a BCP 47 language tag. These two
         // formats are generally compatible, but we may need to make refinements here in
         // the future.
-        let language = CFString::from_str(&options.lang.0);
+        let language = if !options.language.is_unknown() {
+            Some(&*CFString::from_str(options.language.as_str()))
+        } else {
+            None
+        };
         let string = CFString::from_str(&options.character.to_string());
         let font = unsafe {
             self.handle.ctfont.for_string_with_language(
                 &string,
                 CFRange::new(0, string.length()),
-                if !options.lang.0.is_empty() {
-                    Some(&*language)
-                } else {
-                    None
-                },
+                language,
             )
         };
 

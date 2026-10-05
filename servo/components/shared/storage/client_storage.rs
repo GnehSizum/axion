@@ -3,13 +3,17 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
+use std::str::FromStr;
 
+use malloc_size_of_derive::MallocSizeOf;
 use serde::{Deserialize, Serialize};
-use servo_base::generic_channel::{self, GenericReceiver, GenericSender};
+use servo_base::generic_channel::{
+    self, GenericCallback, GenericReceiver, GenericSender, SendResult,
+};
 use servo_base::id::WebViewId;
 use servo_url::ImmutableOrigin;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct ClientStorageThreadHandle {
     sender: GenericSender<ClientStorageThreadMessage>,
 }
@@ -22,7 +26,7 @@ impl ClientStorageThreadHandle {
     pub fn obtain_a_storage_bottle_map(
         &self,
         storage_type: StorageType,
-        webview: WebViewId,
+        webview: Option<WebViewId>,
         storage_identifier: StorageIdentifier,
         origin: ImmutableOrigin,
     ) -> GenericReceiver<Result<StorageProxyMap, String>> {
@@ -42,7 +46,7 @@ impl ClientStorageThreadHandle {
         &self,
         bottle_id: i64,
         name: String,
-    ) -> GenericReceiver<Result<PathBuf, String>> {
+    ) -> GenericReceiver<Result<(PathBuf, bool), String>> {
         let (sender, receiver) = generic_channel::channel().unwrap();
         let message = ClientStorageThreadMessage::CreateDatabase {
             bottle_id,
@@ -67,11 +71,48 @@ impl ClientStorageThreadHandle {
         self.sender.send(message).unwrap();
         receiver
     }
+
+    pub fn persisted(
+        &self,
+        origin: ImmutableOrigin,
+        sender: GenericCallback<Result<bool, String>>,
+    ) -> SendResult {
+        self.sender
+            .send(ClientStorageThreadMessage::Persisted { origin, sender })
+    }
+
+    pub fn persist(
+        &self,
+        origin: ImmutableOrigin,
+        permission_granted: bool,
+        sender: GenericCallback<Result<bool, String>>,
+    ) -> SendResult {
+        self.sender.send(ClientStorageThreadMessage::Persist {
+            origin,
+            permission_granted,
+            sender,
+        })
+    }
+
+    pub fn estimate(
+        &self,
+        origin: ImmutableOrigin,
+        sender: GenericCallback<Result<(u64, u64), String>>,
+    ) -> SendResult {
+        self.sender
+            .send(ClientStorageThreadMessage::Estimate { origin, sender })
+    }
 }
 
 impl From<ClientStorageThreadHandle> for GenericSender<ClientStorageThreadMessage> {
     fn from(handle: ClientStorageThreadHandle) -> Self {
         handle.sender
+    }
+}
+
+impl From<GenericSender<ClientStorageThreadMessage>> for ClientStorageThreadHandle {
+    fn from(sender: GenericSender<ClientStorageThreadMessage>) -> Self {
+        ClientStorageThreadHandle::new(sender)
     }
 }
 
@@ -106,7 +147,7 @@ impl StorageType {
 }
 
 /// <https://storage.spec.whatwg.org/#bucket-mode>
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Mode {
     /// It is initially "best-effort".
     #[default]
@@ -119,6 +160,19 @@ impl Mode {
         match self {
             Mode::BestEffort => "best-effort",
             Mode::Persistent => "persistent",
+        }
+    }
+}
+
+impl FromStr for Mode {
+    type Err = ();
+
+    /// <https://storage.spec.whatwg.org/#bucket-mode>
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "best-effort" => Ok(Mode::BestEffort),
+            "persistent" => Ok(Mode::Persistent),
+            _ => Err(()),
         }
     }
 }
@@ -165,6 +219,7 @@ pub enum ClientStorageErrorr<T> {
     DatabaseDoesNotExist,
     DirectoryCreationFailed,
     DirectoryDeletionFailed,
+    SessionStorageRequiresWindow,
     Internal(T),
 }
 
@@ -175,7 +230,7 @@ impl<T> From<T> for ClientStorageErrorr<T> {
 }
 
 /// <https://storage.spec.whatwg.org/#storage-proxy-map>
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, MallocSizeOf, Serialize)]
 pub struct StorageProxyMap {
     pub bottle_id: i64,
     pub handle: ClientStorageThreadHandle,
@@ -185,7 +240,7 @@ pub struct StorageProxyMap {
 pub enum ClientStorageThreadMessage {
     ObtainBottleMap {
         storage_type: StorageType,
-        webview: WebViewId,
+        webview: Option<WebViewId>,
         storage_identifier: StorageIdentifier,
         origin: ImmutableOrigin,
         sender: GenericSender<Result<StorageProxyMap, String>>,
@@ -193,13 +248,26 @@ pub enum ClientStorageThreadMessage {
     CreateDatabase {
         bottle_id: i64,
         name: String,
-        sender: GenericSender<Result<PathBuf, String>>,
+        /// Boolean stands for "created".
+        sender: GenericSender<Result<(PathBuf, bool), String>>,
     },
     DeleteDatabase {
         bottle_id: i64,
         name: String,
         sender: GenericSender<Result<(), String>>,
     },
-    /// Send a reply when done cleaning up thread resources and then shut it down
+    Persisted {
+        origin: ImmutableOrigin,
+        sender: GenericCallback<Result<bool, String>>,
+    },
+    Persist {
+        origin: ImmutableOrigin,
+        permission_granted: bool,
+        sender: GenericCallback<Result<bool, String>>,
+    },
+    Estimate {
+        origin: ImmutableOrigin,
+        sender: GenericCallback<Result<(u64, u64), String>>,
+    },
     Exit(GenericSender<()>),
 }

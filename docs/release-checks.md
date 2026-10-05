@@ -36,7 +36,7 @@ Use `release --json` when CI needs the full preview artifact workflow result in 
 Run these from the Axion checkout:
 
 ```sh
-cargo fmt --all --check
+cargo fmt --check
 cargo test --workspace
 cargo clippy --workspace --all-targets
 cargo check -p axion-cli -p hello-axion -p multi-window -p file-access-demo -p bridge-diagnostics-demo --features servo-runtime

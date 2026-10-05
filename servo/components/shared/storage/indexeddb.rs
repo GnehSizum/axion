@@ -15,6 +15,8 @@ use servo_base::generic_channel::GenericSender;
 use servo_url::origin::ImmutableOrigin;
 use uuid::Uuid;
 
+use crate::client_storage::StorageProxyMap;
+
 // TODO Box<dyn Error> is not serializable, fix needs to be found
 pub type DbError = String;
 /// A DbResult wraps any part of a call that has to reach into the backend (in this case sqlite.rs)
@@ -93,31 +95,31 @@ impl PartialOrd for IndexedDBKeyType {
             // Step 3: If ta is array and tb is binary, string, date or number, return 1.
             (
                 IndexedDBKeyType::Array(_),
-                IndexedDBKeyType::Binary(_)
-                | IndexedDBKeyType::Date(_)
-                | IndexedDBKeyType::Number(_)
-                | IndexedDBKeyType::String(_),
+                IndexedDBKeyType::Binary(_) |
+                IndexedDBKeyType::Date(_) |
+                IndexedDBKeyType::Number(_) |
+                IndexedDBKeyType::String(_),
             ) => Some(Ordering::Greater),
             // Step 4: If tb is array and ta is binary, string, date or number, return -1.
             (
-                IndexedDBKeyType::Binary(_)
-                | IndexedDBKeyType::Date(_)
-                | IndexedDBKeyType::Number(_)
-                | IndexedDBKeyType::String(_),
+                IndexedDBKeyType::Binary(_) |
+                IndexedDBKeyType::Date(_) |
+                IndexedDBKeyType::Number(_) |
+                IndexedDBKeyType::String(_),
                 IndexedDBKeyType::Array(_),
             ) => Some(Ordering::Less),
             // Step 5: If ta is binary and tb is string, date or number, return 1.
             (
                 IndexedDBKeyType::Binary(_),
-                IndexedDBKeyType::String(_)
-                | IndexedDBKeyType::Date(_)
-                | IndexedDBKeyType::Number(_),
+                IndexedDBKeyType::String(_) |
+                IndexedDBKeyType::Date(_) |
+                IndexedDBKeyType::Number(_),
             ) => Some(Ordering::Greater),
             // Step 6: If tb is binary and ta is string, date or number, return -1.
             (
-                IndexedDBKeyType::String(_)
-                | IndexedDBKeyType::Date(_)
-                | IndexedDBKeyType::Number(_),
+                IndexedDBKeyType::String(_) |
+                IndexedDBKeyType::Date(_) |
+                IndexedDBKeyType::Number(_),
                 IndexedDBKeyType::Binary(_),
             ) => Some(Ordering::Less),
             // Step 7: If ta is string and tb is date or number, return 1.
@@ -206,7 +208,7 @@ impl IndexedDBKeyRange {
             lower: Some(key),
             upper: None,
             lower_open: open,
-            upper_open: false,
+            upper_open: true,
         }
     }
 
@@ -214,7 +216,7 @@ impl IndexedDBKeyRange {
         IndexedDBKeyRange {
             lower: None,
             upper: Some(key),
-            lower_open: false,
+            lower_open: true,
             upper_open: open,
         }
     }
@@ -270,7 +272,7 @@ pub struct IndexedDBObjectStore {
     pub name: String,
     pub key_path: Option<KeyPath>,
     pub has_key_generator: bool,
-    pub key_generator_current_number: Option<i32>,
+    pub key_generator_current_number: Option<i64>,
     pub indexes: Vec<IndexedDBIndex>,
 }
 
@@ -335,7 +337,7 @@ pub enum AsyncReadWriteOperation {
         value: Vec<u8>,
         should_overwrite: bool,
         /// New object store key generator current number to persist if the put succeeds.
-        key_generator_current_number: Option<i32>,
+        key_generator_current_number: Option<i64>,
     },
 
     /// Removes the key/value pair for the given key in the associated idb data
@@ -357,12 +359,62 @@ impl AsyncReadWriteOperation {
     }
 }
 
+#[derive(Debug, Deserialize, MallocSizeOf, Serialize)]
+pub enum AsyncSchemaOperation {
+    /// Creates a new index for the database
+    CreateIndex {
+        callback: GenericCallback<BackendError>,
+        index_name: String,
+        key_path: KeyPath,
+        unique: bool,
+        multi_entry: bool,
+    },
+    /// Rename an index
+    RenameIndex {
+        callback: GenericCallback<BackendError>,
+        index_name: String,
+        new_name: String,
+    },
+    /// Delete an index
+    DeleteIndex {
+        callback: GenericCallback<BackendError>,
+        index_name: String,
+    },
+    /// Creates a new store for the database
+    CreateObjectStore {
+        callback: GenericCallback<BackendError>,
+        key_path: Option<KeyPath>,
+        auto_increment: bool,
+    },
+    /// Delete an existing object store in the database
+    DeleteObjectStore {
+        callback: GenericCallback<BackendError>,
+    },
+}
+
+impl AsyncSchemaOperation {
+    pub fn notify_error(&self, error: BackendError) {
+        match self {
+            AsyncSchemaOperation::CreateIndex { .. } |
+            AsyncSchemaOperation::RenameIndex { .. } |
+            AsyncSchemaOperation::DeleteIndex { .. } => {},
+            AsyncSchemaOperation::CreateObjectStore { callback, .. } => {
+                let _ = callback.send(error);
+            },
+            AsyncSchemaOperation::DeleteObjectStore { callback, .. } => {
+                let _ = callback.send(error);
+            },
+        };
+    }
+}
+
 /// Operations that are not executed instantly, but rather added to a
 /// queue that is eventually run.
 #[derive(Debug, Deserialize, MallocSizeOf, Serialize)]
 pub enum AsyncOperation {
     ReadOnly(AsyncReadOnlyOperation),
     ReadWrite(AsyncReadWriteOperation),
+    Schema(AsyncSchemaOperation),
 }
 
 impl AsyncOperation {
@@ -370,6 +422,7 @@ impl AsyncOperation {
         match self {
             Self::ReadOnly(operation) => operation.notify_error(error),
             Self::ReadWrite(operation) => operation.notify_error(error),
+            Self::Schema(operation) => operation.notify_error(error),
         }
     }
 }
@@ -525,41 +578,6 @@ pub enum SyncOperation {
         txn: u64,
     },
 
-    /// Creates a new index for the database
-    CreateIndex(
-        ImmutableOrigin,
-        String,  // Database
-        String,  // Store
-        String,  // Index name
-        KeyPath, // key path
-        bool,    // unique flag
-        bool,    // multientry flag
-    ),
-    /// Delete an index
-    DeleteIndex(
-        ImmutableOrigin,
-        String, // Database
-        String, // Store
-        String, // Index name
-    ),
-
-    /// Creates a new store for the database
-    CreateObjectStore(
-        GenericSender<BackendResult<CreateObjectResult>>,
-        ImmutableOrigin,
-        String,          // Database
-        String,          // Store
-        Option<KeyPath>, // Key Path
-        bool,
-    ),
-
-    DeleteObjectStore(
-        GenericSender<BackendResult<()>>,
-        ImmutableOrigin,
-        String, // Database
-        String, // Store
-    ),
-
     CloseDatabase(
         ImmutableOrigin,
         Uuid,
@@ -577,13 +595,18 @@ pub enum SyncOperation {
         Option<u64>,
         // The id of the request.
         Uuid,
+        // The Storage proxy map.
+        StorageProxyMap,
     ),
 
     /// Deletes the database
     DeleteDatabase(
         GenericCallback<BackendResult<u64>>,
         ImmutableOrigin,
-        String, // Database
+        // Database name.
+        String,
+        // The Storage proxy map.
+        StorageProxyMap,
         Uuid,
     ),
 
@@ -598,13 +621,7 @@ pub enum SyncOperation {
     AbortPendingUpgrades {
         pending_upgrades: HashMap<String, HashSet<Uuid>>,
         origin: ImmutableOrigin,
-    },
-
-    /// Abort the current pending upgrade.
-    AbortPendingUpgrade {
-        name: String,
-        id: Uuid,
-        origin: ImmutableOrigin,
+        proxy_map: StorageProxyMap,
     },
 
     NotifyEndOfVersionChange {
@@ -630,6 +647,13 @@ pub enum IndexedDBThreadMsg {
         IndexedDBTxnMode,
         AsyncOperation,
     ),
+    AsyncSchemaOperation {
+        origin: ImmutableOrigin,
+        database_name: String,
+        store_name: String,
+        operation: AsyncSchemaOperation,
+        transaction_serial_number: u64,
+    },
     EngineTxnBatchComplete {
         origin: ImmutableOrigin,
         db_name: String,

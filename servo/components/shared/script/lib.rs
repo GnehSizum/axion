@@ -11,25 +11,29 @@
 
 use std::fmt;
 
+use bitflags::bitflags;
 use crossbeam_channel::RecvTimeoutError;
 use devtools_traits::ScriptToDevtoolsControlMsg;
 use embedder_traits::user_contents::{UserContentManagerId, UserContents};
 use embedder_traits::{
     EmbedderControlId, EmbedderControlResponse, FocusSequenceNumber, InputEventAndId,
-    JavaScriptEvaluationId, MediaSessionActionType, PaintHitTestResult, ScriptToEmbedderChan,
-    Theme, ViewportDetails, WebDriverScriptCommand,
+    JavaScriptEvaluationId, MediaSessionActionType, MouseButton, PaintHitTestResult,
+    ScriptToEmbedderChan, Theme, ViewportDetails, WebDriverScriptCommand,
 };
 use euclid::{Scale, Size2D};
-use fonts_traits::SystemFontServiceProxySender;
+use fonts_traits::{SystemFontServiceProxySender, WebFontLoadEvent};
 use keyboard_types::Modifiers;
+use malloc_size_of::malloc_size_of_is_0;
 use malloc_size_of_derive::MallocSizeOf;
 use media::WindowGLContext;
 use net_traits::ResourceThreads;
+use paint_api::largest_contentful_paint_candidate::LCPCandidateID;
 use paint_api::{CrossProcessPaintApi, PinchZoomInfos};
 use pixels::PixelFormat;
 use profile_traits::mem;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use servo_base::Epoch;
 use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_base::generic_channel::{GenericCallback, GenericReceiver, GenericSender};
 use servo_base::id::{
@@ -38,13 +42,15 @@ use servo_base::id::{
 };
 #[cfg(feature = "bluetooth")]
 use servo_bluetooth_traits::BluetoothRequest;
+#[cfg(feature = "webgl")]
 use servo_canvas_traits::webgl::WebGLPipeline;
 use servo_config::prefs::PrefValue;
 use servo_constellation_traits::{
-    KeyboardScroll, LoadData, NavigationHistoryBehavior, ScriptToConstellationSender,
-    ScrollStateUpdate, StructuredSerializedData, TargetSnapshotParams, WindowSizeType,
+    KeyboardScroll, LoadData, NavigationHistoryBehavior, RemoteFocusOperation,
+    ScriptToConstellationSender, ScrollStateUpdate, StructuredSerializedData, TargetSnapshotParams,
+    WindowSizeType,
 };
-use servo_url::{ImmutableOrigin, ServoUrl};
+use servo_url::{ImmutableOrigin, OriginSnapshot, ServoUrl};
 use storage_traits::StorageThreads;
 use storage_traits::webstorage_thread::WebStorageType;
 use strum::IntoStaticStr;
@@ -76,9 +82,11 @@ pub struct NewPipelineInfo {
     /// The ID of the `UserContentManager` associated with this new pipeline's `WebView`.
     pub user_content_manager_id: Option<UserContentManagerId>,
     /// The [`Theme`] of the new layout.
-    pub theme: Theme,
+    pub embedder_theme: Theme,
     /// A snapshot of the navigation parameters of the target of this navigation.
     pub target_snapshot_params: TargetSnapshotParams,
+    /// Name of this iframe, if any
+    pub frame_name: Option<String>,
 }
 
 /// When a pipeline is closed, should its browsing context be discarded too?
@@ -116,6 +124,8 @@ pub enum ProgressiveWebMetricType {
     FirstContentfulPaint,
     /// Time for the largest contentful paint
     LargestContentfulPaint {
+        /// The identity of the element, if any.
+        id: LCPCandidateID,
         /// The pixel area of the largest contentful element.
         area: usize,
         /// The URL of the largest contentful element, if any.
@@ -180,7 +190,14 @@ pub enum ScriptThreadMessage {
     GetTitle(PipelineId),
     /// Retrieve the origin of a document for a pipeline, in case a child needs to retrieve the
     /// origin of a parent in a different script thread.
-    GetDocumentOrigin(PipelineId, GenericSender<Option<String>>),
+    GetDocumentOrigin(PipelineId, GenericSender<Option<OriginSnapshot>>),
+    /// Retrieve the origin and internal ancestor origin objects list of a
+    /// `Document` for a given `PipelineId`, in case a child needs to retrieve
+    /// the origin of a parent in a different event loop.
+    GetDocumentOriginDetails(
+        PipelineId,
+        GenericSender<Option<(OriginSnapshot, Vec<ImmutableOrigin>)>>,
+    ),
     /// Notifies script thread of a change to one of its document's activity
     SetDocumentActivity(PipelineId, DocumentActivity),
     /// Set whether to use less resources by running timers at a heavily limited rate.
@@ -226,24 +243,31 @@ pub enum ScriptThreadMessage {
     UpdateHistoryState(PipelineId, Option<HistoryStateId>, ServoUrl),
     /// Removes inaccesible history states.
     RemoveHistoryStates(PipelineId, Vec<HistoryStateId>),
-    /// Set an iframe to be focused. Used when an element in an iframe gains focus.
-    /// PipelineId is for the parent, BrowsingContextId is for the nested browsing context
-    FocusIFrame(PipelineId, BrowsingContextId, FocusSequenceNumber),
-    /// Focus the document. Used when the container gains focus.
-    FocusDocument(PipelineId, FocusSequenceNumber),
-    /// Notifies that the document's container (e.g., an iframe) is not included
-    /// in the top-level browsing context's focus chain (not considering system
-    /// focus) anymore.
-    ///
-    /// Obviously, this message is invalid for a top-level document.
-    Unfocus(PipelineId, FocusSequenceNumber),
+    /// Focus a `Document` as part of the focusing steps which focuses all parent `Document`s of a
+    /// newly focused `<iframe>`. Note that this is not used for the `Document` and `Element` that
+    /// is gaining focus as that is handled locally in the originating `ScriptThread`.
+    FocusDocumentAsPartOfFocusingSteps(PipelineId, FocusSequenceNumber, Option<BrowsingContextId>),
+    /// Unfocus a `Document` as part of the focusing steps which unfocuses all parent `Document`s of an
+    /// `<iframe>` losing focus. This does not do anything for a top-level `Document`, which can never
+    /// lose focus (apart from losing system focus, which is a separate concept).
+    UnfocusDocumentAsPartOfFocusingSteps(PipelineId, FocusSequenceNumber),
+    /// Focus a `Document` and run the focusing steps. This is used in two situations:
+    /// - When calling the DOM `focus()` API on a remote `Window` as well as from
+    ///   WebDriver. The difference between this and `FocusDocumentAsPartOfFocusingSteps` is that this
+    ///   version actually does run the focusing steps and may result in blur and focus events firing
+    ///   up the frame tree.
+    /// - When doing sequential focus navigation into and out of frames.
+    FocusDocument(PipelineId, RemoteFocusOperation),
     /// Passes a webdriver command to the script thread for execution
     WebDriverScriptCommand(PipelineId, WebDriverScriptCommand),
     /// Notifies script thread that all animations are done
     TickAllAnimations(Vec<WebViewId>),
-    /// Notifies the script thread that a new Web font has been loaded, and thus the page should be
-    /// reflowed.
-    WebFontLoaded(PipelineId),
+    /// Notifies the script thread that a web font has finished loading.
+    ///
+    /// This is sent if either the web font loaded successfully, or to notify the script thread
+    /// that it should try to resolve `document.fonts.ready` because the font was the last one
+    /// loading.
+    WebFontLoadFinished(PipelineId, WebFontLoadEvent),
     /// Cause a `load` event to be dispatched at the appropriate iframe element.
     DispatchIFrameLoadEvent {
         /// The frame that has been marked as loaded.
@@ -309,8 +333,6 @@ pub enum ScriptThreadMessage {
     /// Release all data for the given `UserContentManagerId` from the `ScriptThread`'s
     /// `user_contents_for_manager_id` map.
     DestroyUserContentManager(UserContentManagerId),
-    /// Send the embedder an accessibility tree update.
-    AccessibilityTreeUpdate(WebViewId, accesskit::TreeUpdate),
     /// Update the pinch zoom details of a pipeline. Each `Window` stores a `VisualViewport` DOM
     /// instance that gets updated according to the changes from the `Compositor``.
     UpdatePinchZoomInfos(PipelineId, PinchZoomInfos),
@@ -322,7 +344,7 @@ pub enum ScriptThreadMessage {
     /// those pipelines run in script threads, which complicates things: the pipelines in a webview
     /// may be split across multiple script threads, and the pipelines in a script thread may belong
     /// to multiple webviews. So the simplest approach is to activate it for one pipeline at a time.
-    SetAccessibilityActive(PipelineId, bool),
+    SetAccessibilityActive(PipelineId, bool, Epoch),
     /// Force a garbage collection in this script thread.
     TriggerGarbageCollection,
 }
@@ -343,6 +365,60 @@ pub enum DocumentState {
     Pending,
 }
 
+bitflags! {
+    #[derive(Clone, Copy, Default, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    /// <https://w3c.github.io/pointerevents/#dom-mouseevent-buttons>
+    pub struct MouseButtons: u16 {
+        /// > 1 MUST indicate the primary button of the device (in general, the left
+        /// > button or the only button on single-button devices, used to activate a user
+        /// > interface control or select text).
+        const Primary = 1;
+        /// > 2 MUST indicate the secondary button (in general, the right button, often
+        /// > used to display a context menu), if present.
+        const Secondary = 2;
+        /// > 4 MUST indicate the auxiliary button (in general, the middle button, often
+        /// > combined with a mouse wheel).
+        const Auxiliary = 4;
+        /// The 'back' button:
+        ///
+        /// > Some pointing devices provide or simulate more buttons. To represent such
+        /// > buttons, the value MUST be doubled for each successive button (in the binary
+        /// > series 8, 16, 32, ... ).
+        const Back = 8;
+        /// The 'forward' button:
+        ///
+        /// > Some pointing devices provide or simulate more buttons. To represent such
+        /// > buttons, the value MUST be doubled for each successive button (in the binary
+        /// > series 8, 16, 32, ... ).
+        const Forward = 16;
+    }
+}
+
+impl MouseButtons {
+    /// Returns whether exactly one button is pressed.
+    pub fn exactly_one_button_pressed(&self) -> bool {
+        // Exactly one button is pressed iff mouse_button_state is a power of 2
+        !self.is_empty() && (self.bits() & (self.bits() - 1)) == 0
+    }
+}
+
+malloc_size_of_is_0!(MouseButtons);
+
+impl TryFrom<MouseButton> for MouseButtons {
+    type Error = ();
+
+    fn try_from(button: MouseButton) -> Result<Self, Self::Error> {
+        match button {
+            MouseButton::Primary => Ok(Self::Primary),
+            MouseButton::Secondary => Ok(Self::Secondary),
+            MouseButton::Auxiliary => Ok(Self::Auxiliary),
+            MouseButton::Back => Ok(Self::Back),
+            MouseButton::Forward => Ok(Self::Forward),
+            MouseButton::None | MouseButton::Other(_) => Err(()),
+        }
+    }
+}
+
 /// Input events from the embedder that are sent via the `Constellation`` to the `ScriptThread`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ConstellationInputEvent {
@@ -350,11 +426,23 @@ pub struct ConstellationInputEvent {
     pub hit_test_result: Option<PaintHitTestResult>,
     /// The pressed mouse button state of the constellation when this input
     /// event was triggered.
-    pub pressed_mouse_buttons: u16,
+    pub pressed_mouse_buttons: MouseButtons,
     /// The currently active keyboard modifiers.
     pub active_keyboard_modifiers: Modifiers,
     /// The [`InputEventAndId`] itself.
     pub event: InputEventAndId,
+}
+
+impl ConstellationInputEvent {
+    /// Returns whether `pressed_mouse_buttons` includes the primary button
+    pub fn primary_button_is_pressed(&self) -> bool {
+        self.pressed_mouse_buttons.contains(MouseButtons::Primary)
+    }
+
+    /// Returns whether `pressed_mouse_buttons` includes the auxiliary (middle) button
+    pub fn auxiliary_button_is_pressed(&self) -> bool {
+        self.pressed_mouse_buttons.contains(MouseButtons::Auxiliary)
+    }
 }
 
 /// All of the information necessary to create a new [`ScriptThread`] for a new [`EventLoop`].
@@ -395,6 +483,7 @@ pub struct InitialScriptState {
     /// The ID of the pipeline namespace for this script thread.
     pub pipeline_namespace_id: PipelineNamespaceId,
     /// A channel to the WebGL thread used in this pipeline.
+    #[cfg(feature = "webgl")]
     pub webgl_chan: Option<WebGLPipeline>,
     /// The XR device registry
     pub webxr_registry: Option<webxr_api::Registry>,

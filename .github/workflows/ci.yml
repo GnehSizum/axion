@@ -23,11 +23,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.86.0
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt
       - name: Check formatting
-        run: cargo fmt --all --check
+        run: cargo fmt --check
       - name: Run workspace tests
         run: cargo test --workspace
       - name: Check doctor version metadata
@@ -71,15 +71,22 @@ jobs:
 
   gui-smoke:
     name: Optional GUI smoke
+    env:
+      RUSTC_BOOTSTRAP: crown,script,script_bindings,script_webgpu,style_tests,mozjs,mozjs_sys
+      CC: clang-19
+      CXX: clang++-19
+      HOST_CC: clang-19
+      HOST_CXX: clang++-19
+      LIBCLANG_PATH: /usr/lib/llvm-19/lib
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && inputs.run_gui_smoke == 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.86.0
-      - name: Install virtual display
-        run: sudo apt-get update && sudo apt-get install -y xvfb
+        uses: dtolnay/rust-toolchain@1.97.1
+      - name: Install GUI build dependencies
+        run: sudo apt-get update && sudo apt-get install -y xvfb clang-19 libclang-19-dev
       - name: Run bridge diagnostics GUI smoke
         run: |
           xvfb-run -a cargo run -p axion-cli -- gui-smoke \
@@ -155,7 +162,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.86.0
+        uses: dtolnay/rust-toolchain@1.97.1
       - name: Run hello release check
         run: |
           cargo run -p axion-cli -- check \

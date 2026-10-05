@@ -1,13 +1,21 @@
+html {
+  color: CanvasText;
+}
+
 input[type="hidden"] {
   display: none !important;
 }
 
 /* Textual inputs */
-input,
+input:not([type="file"]),
 textarea {
-  background: white;
+  background-color: Field;
   border: solid grey 1px;
-  color: black;
+  color: FieldText;
+}
+
+input[type="radio"] {
+  border: none;
 }
 
 textarea {
@@ -42,9 +50,8 @@ textarea:disabled {
   border-color: lightgrey;
 }
 
-input::-servo-text-control-inner-editor {
-  overflow-wrap: normal;
-  pointer-events: auto;
+input[type="radio"]:disabled {
+  border: none;
 }
 
 /* FIXME(#36982): Use `display: block; align-content: center` instead of flex. */
@@ -55,23 +62,45 @@ input::-servo-text-control-inner-container {
   position: relative;
 }
 
-input:not(:placeholder-shown)::placeholder {
-  visibility: hidden !important;
-}
-
-input::-servo-text-control-inner-editor, input::placeholder {
+input::-servo-text-control-inner-editor,
+input::placeholder {
+  /* This limits the block size of the inner div to that of the text size so that
+     it can be centered in the container. This is only necessary for <input>. */
   block-size: fit-content !important;
   inset-block: 0 !important;
   margin-block: auto !important;
-  min-width: stretch;
   white-space: pre;
 }
 
-input::placeholder {
+input::-servo-text-control-inner-editor,
+input::placeholder,
+textarea::-servo-text-control-inner-editor,
+textarea::placeholder {
+  min-width: stretch;
+  overflow-wrap: normal;
+}
+
+input:not(:placeholder-shown)::placeholder,
+textarea:not(:placeholder-shown)::placeholder {
+  display: none !important;
+}
+
+input:placeholder-shown::-servo-text-control-inner-editor,
+textarea:placeholder-shown::-servo-text-control-inner-editor {
+  display: none !important;
+}
+
+input::placeholder,
+textarea::placeholder {
   color: grey;
-  overflow: hidden;
+}
+
+input::-servo-text-control-inner-editor {
+  pointer-events: auto !important;
+}
+
+input::placeholder {
   pointer-events: none !important;
-  position: absolute !important;
 }
 
 input::selection,
@@ -93,7 +122,15 @@ input[type="file"]::file-selector-button {
   border-radius: 2px;
   border: 1px solid ButtonBorder;
   padding: 4px;
-  color: black;
+  color: ButtonText;
+}
+
+input[type="text"],
+input[type="email"],
+input[type="date"],
+input[type="password"],
+input[type="number"] {
+  color: FieldText;
 }
 
 button,
@@ -132,7 +169,8 @@ input[type="color"]:focus,
 input[type="range"]:focus,
 input[type="reset"]:focus,
 input[type="submit"]:focus,
-input[type="file"]:focus::file-selector-button {
+input[type="file"]:focus::file-selector-button,
+input[type="radio"]:focus {
   outline: none;
 }
 
@@ -156,9 +194,6 @@ input[type="file"]::file-selector-button {
 input[type="file"] {
   cursor: default;
   display: inline-block;
-  border: none;
-  background: transparent;
-  color: initial;
   padding-inline-end: 0.5em;
 }
 
@@ -246,7 +281,6 @@ input[type="range"]:disabled::slider-thumb {
 /* Checkbox and radio button inputs */
 input[type="checkbox"],
 input[type="radio"] {
-  border: 1px solid grey;
   margin-inline: 4px 2px;
 
   /* Offset the outline a bit so that it doesn't just make the rounded border thicker. */
@@ -256,8 +290,11 @@ input[type="radio"] {
   position: relative;
 }
 
-input[type="checkbox"]:disabled,
-input[type="radio"]:disabled {
+input[type="checkbox"] {
+  border: 1px solid grey;
+}
+
+input[type="checkbox"]:disabled {
   border-color: lightgrey;
 }
 
@@ -301,25 +338,46 @@ input[type="checkbox"]:indeterminate::before {
 
 input[type="radio"] {
   display: inline-block;
-  border-radius: 50%;
 
-  /* Radio buttons do not grow or shrink with their surrounding font size. */
+  /* TODO: According to https://wpt.fyi/results/css/css-grid/stretch-grid-item-radio-input.html,
+     radio buttons should be able to grow / shrink depending of the width/height of the input
+     element. These values should probably be changed once `aspect-ratio` has been supported
+     for non-replaced elements.
+  */
   min-height: 14px;
   min-width: 14px;
-  max-height: 14px;
-  max-width: 14px;
   height: 14px;
   width: 14px;
-
-  /* Offset the outline a bit so that it doesn't just make the rounded border thicker. */
-  outline-offset: 0.4px;
 }
 
+/* This creates the ring of the radio input. TODO: It might be better to add a UA shadow tree instead of using pseudo elements. */
 input[type="radio"]::before {
   content: "";
   background: transparent;
 
-  /* Bullets have a fixed size regardless of the text surrounding them. */
+  /* TODO: The ring should be able to grow & shrink according to min(width, height).
+    However, this is currently not possible to be implemented as `aspect-ratio` hasn't
+    been supported for non-replaced elements.
+  */
+  width: 10px;
+  height: 10px;
+
+  /* Center the bullet in the containing block. */
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  border: 2px solid grey;
+  border-radius: 50%;
+}
+
+/* This creates the bullet of the radio input. TODO: It might be better to add a UA shadow tree instead of using pseudo elements.*/
+input[type="radio"]::after {
+  content: "";
+  background: transparent;
+
+  /* TODO:  The bullet should be able to grow & shrink according to min(width, height).
+  However, this is currently not possible to be implemented as `aspect-ratio` hasn't been supported for non-replaced elements. */
   width: 8px;
   height: 8px;
 
@@ -331,11 +389,11 @@ input[type="radio"]::before {
   border-radius: 50%;
 }
 
-input[type="radio"]:checked::before {
+input[type="radio"]:checked::after {
   background: black;
 }
 
-input[type="radio"]:checked:disabled::before {
+input[type="radio"]:checked:disabled::after {
   background: grey;
 }
 
@@ -370,16 +428,6 @@ textarea {
 /* https://html.spec.whatwg.org/multipage/rendering.html#the-details-and-summary-elements */
 details {
   display: block;
-}
-
-details::-servo-details-summary {
-  margin-left: 40px;
-  display: list-item;
-  list-style: disclosure-closed;
-}
-
-details[open]::-servo-details-summary {
-  list-style: disclosure-open;
 }
 
 details::details-content {
@@ -511,4 +559,8 @@ progress #-servo-progress-bar {
 
 slot {
   display: contents;
+}
+
+*::selection {
+  background: rgba(176, 214, 255, 1.0);
 }

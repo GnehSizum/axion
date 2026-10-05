@@ -10,7 +10,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use background_hang_monitor_api::{BackgroundHangMonitorControlMsg, HangMonitorAlert};
+use background_hang_monitor_api::{BackgroundHangMonitorControlMsg, HangAlert};
 use embedder_traits::ScriptToEmbedderChan;
 use ipc_channel::IpcError;
 use layout_api::ScriptThreadFactory;
@@ -103,6 +103,7 @@ impl EventLoop {
             constellation_to_script_receiver: script_port,
             pipeline_namespace_id: constellation.next_pipeline_namespace_id(),
             cross_process_paint_api: constellation.paint_proxy.cross_process_paint_api.clone(),
+            #[cfg(feature = "webgl")]
             webgl_chan: constellation
                 .webgl_threads
                 .as_ref()
@@ -202,10 +203,10 @@ impl EventLoop {
         &self,
         message: &BackgroundHangMonitorControlMsg,
     ) {
-        if let Some(background_hang_monitor_sender) = &self.background_hang_monitor_sender {
-            if let Err(error) = background_hang_monitor_sender.send(message.clone()) {
-                error!("Could not send message ({message:?}) to BHM: {error}");
-            }
+        if let Some(background_hang_monitor_sender) = &self.background_hang_monitor_sender &&
+            let Err(error) = background_hang_monitor_sender.send(message.clone())
+        {
+            error!("Could not send message ({message:?}) to BHM: {error}");
         }
     }
 }
@@ -215,7 +216,7 @@ impl EventLoop {
 pub struct NewScriptEventLoopProcessInfo {
     pub initial_script_state: InitialScriptState,
     pub constellation_to_bhm_receiver: GenericReceiver<BackgroundHangMonitorControlMsg>,
-    pub bhm_to_constellation_sender: GenericSender<HangMonitorAlert>,
+    pub bhm_to_constellation_sender: GenericSender<HangAlert>,
     pub lifeline_sender: GenericSender<()>,
     pub opts: Opts,
     pub prefs: Box<Preferences>,

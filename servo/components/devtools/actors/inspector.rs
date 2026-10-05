@@ -4,12 +4,13 @@
 
 //! Liberally derived from the [Firefox JS implementation](http://mxr.mozilla.org/mozilla-central/source/toolkit/devtools/server/actors/inspector.js).
 
-use atomic_refcell::AtomicRefCell;
+use std::sync::Arc;
+
 use malloc_size_of_derive::MallocSizeOf;
 use serde::Serialize;
 use serde_json::{self, Map, Value};
 
-use crate::actor::{Actor, ActorError, ActorRegistry};
+use crate::actor::{Actor, ActorError, ActorRegistry, new_actor_name};
 use crate::actors::inspector::highlighter::HighlighterActor;
 use crate::actors::inspector::page_style::{PageStyleActor, PageStyleMsg};
 use crate::actors::inspector::walker::{WalkerActor, WalkerMsg};
@@ -17,11 +18,13 @@ use crate::protocol::ClientRequest;
 use crate::{ActorMsg, StreamId};
 
 pub mod accessibility;
+pub mod accessible_walker;
 pub mod css_properties;
 pub mod highlighter;
 pub mod layout;
 pub mod node;
 pub mod page_style;
+pub mod simulator;
 pub mod style_rule;
 pub mod walker;
 
@@ -55,12 +58,12 @@ pub(crate) struct InspectorActor {
     name: String,
     highlighter_name: String,
     page_style_name: String,
-    pub(crate) walker: String,
+    pub(crate) walker_name: String,
 }
 
 impl Actor for InspectorActor {
-    fn name(&self) -> String {
-        self.name.clone()
+    fn name(&self) -> &str {
+        &self.name
     }
 
     fn handle_message(
@@ -74,7 +77,7 @@ impl Actor for InspectorActor {
         match msg_type {
             "getPageStyle" => {
                 let msg = GetPageStyleReply {
-                    from: self.name(),
+                    from: self.name().into(),
                     page_style: registry.encode::<PageStyleActor, _>(&self.page_style_name),
                 };
                 request.reply_final(&msg)?
@@ -82,7 +85,7 @@ impl Actor for InspectorActor {
 
             "getHighlighterByType" => {
                 let msg = GetHighlighterReply {
-                    from: self.name(),
+                    from: self.name().into(),
                     highlighter: registry.encode::<HighlighterActor, _>(&self.highlighter_name),
                 };
                 request.reply_final(&msg)?
@@ -90,15 +93,15 @@ impl Actor for InspectorActor {
 
             "getWalker" => {
                 let msg = GetWalkerReply {
-                    from: self.name(),
-                    walker: registry.encode::<WalkerActor, _>(&self.walker),
+                    from: self.name().into(),
+                    walker: registry.encode::<WalkerActor, _>(&self.walker_name),
                 };
                 request.reply_final(&msg)?
             },
 
             "supportsHighlighters" => {
                 let msg = SupportsHighlightersReply {
-                    from: self.name(),
+                    from: self.name().into(),
                     value: true,
                 };
                 request.reply_final(&msg)?
@@ -111,35 +114,18 @@ impl Actor for InspectorActor {
 }
 
 impl InspectorActor {
-    pub fn register(registry: &ActorRegistry, browsing_context_name: String) -> String {
-        let highlighter_actor = HighlighterActor {
-            name: registry.new_name::<HighlighterActor>(),
-            browsing_context_name: browsing_context_name.clone(),
+    pub fn register(registry: &ActorRegistry, browsing_context_name: String) -> Arc<Self> {
+        let highlighter_actor = HighlighterActor::register(registry, browsing_context_name.clone());
+        let page_style_actor = PageStyleActor::register(registry);
+        let walker_actor = WalkerActor::register(registry, browsing_context_name);
+
+        let actor = Self {
+            name: new_actor_name::<InspectorActor>(),
+            highlighter_name: highlighter_actor.name().into(),
+            page_style_name: page_style_actor.name().into(),
+            walker_name: walker_actor.name().into(),
         };
 
-        let page_style_actor = PageStyleActor {
-            name: registry.new_name::<PageStyleActor>(),
-        };
-
-        let walker = WalkerActor {
-            name: registry.new_name::<WalkerActor>(),
-            mutations: AtomicRefCell::new(vec![]),
-            browsing_context_name,
-        };
-
-        let inspector_actor = Self {
-            name: registry.new_name::<InspectorActor>(),
-            highlighter_name: highlighter_actor.name(),
-            page_style_name: page_style_actor.name(),
-            walker: walker.name(),
-        };
-        let inspector_name = inspector_actor.name();
-
-        registry.register(highlighter_actor);
-        registry.register(page_style_actor);
-        registry.register(walker);
-        registry.register(inspector_actor);
-
-        inspector_name
+        registry.register::<Self>(actor)
     }
 }

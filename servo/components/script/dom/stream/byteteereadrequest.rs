@@ -6,23 +6,24 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use js::jsapi::Heap;
 use js::jsval::{JSVal, UndefinedValue};
 use js::typedarray::ArrayBufferViewU8;
 use script_bindings::error::Fallible;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 
 use super::byteteeunderlyingsource::ByteTeePullAlgorithm;
-use crate::dom::bindings::buffer_source::{BufferSource, HeapBufferSource};
+use crate::dom::bindings::buffer_source::HeapBufferSource;
 use crate::dom::bindings::error::{Error, ErrorToJsval};
-use crate::dom::bindings::reflector::{DomGlobal, Reflector, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::trace::RootedTraceableBox;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::promise::Promise;
 use crate::dom::stream::byteteeunderlyingsource::ByteTeeUnderlyingSource;
 use crate::dom::stream::readablestream::ReadableStream;
-use crate::microtask::Microtask;
-use crate::script_runtime::CanGc;
+use crate::runtime::job_queue::MicrotaskRunnable;
 
 #[derive(JSTraceable, MallocSizeOf)]
 #[cfg_attr(crown, expect(crown::unrooted_must_root))]
@@ -32,8 +33,8 @@ pub(crate) struct ByteTeeReadRequestMicrotask {
     tee_read_request: Dom<ByteTeeReadRequest>,
 }
 
-impl ByteTeeReadRequestMicrotask {
-    pub(crate) fn microtask_chunk_steps(&self, cx: &mut js::context::JSContext) {
+impl MicrotaskRunnable for ByteTeeReadRequestMicrotask {
+    fn handler(&self, cx: &mut JSContext) {
         self.tee_read_request
             .chunk_steps(&self.chunk, cx)
             .expect("ByteTeeReadRequestMicrotask::microtask_chunk_steps failed");
@@ -64,6 +65,7 @@ pub(crate) struct ByteTeeReadRequest {
 impl ByteTeeReadRequest {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
+        cx: &mut JSContext,
         branch_1: &ReadableStream,
         branch_2: &ReadableStream,
         stream: &ReadableStream,
@@ -75,9 +77,8 @@ impl ByteTeeReadRequest {
         cancel_promise: Rc<Promise>,
         tee_underlying_source: &ByteTeeUnderlyingSource,
         global: &GlobalScope,
-        can_gc: CanGc,
     ) -> DomRoot<Self> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(ByteTeeReadRequest {
                 reflector_: Reflector::new(),
                 branch_1: Dom::from_ref(branch_1),
@@ -92,7 +93,7 @@ impl ByteTeeReadRequest {
                 tee_underlying_source: Dom::from_ref(tee_underlying_source),
             }),
             global,
-            can_gc,
+            cx,
         )
     }
 
@@ -100,6 +101,7 @@ impl ByteTeeReadRequest {
     /// <https://streams.spec.whatwg.org/#ref-for-read-request-chunk-steps%E2%91%A2>
     pub(crate) fn enqueue_chunk_steps(
         &self,
+        cx: &mut JSContext,
         global: &GlobalScope,
         chunk: RootedTraceableBox<Heap<JSVal>>,
     ) {
@@ -108,18 +110,12 @@ impl ByteTeeReadRequest {
             chunk: Heap::boxed(*chunk.handle()),
             tee_read_request: Dom::from_ref(self),
         };
-        global.enqueue_microtask(Microtask::ReadableStreamByteTeeReadRequest(
-            byte_tee_read_request_chunk,
-        ));
+        global.enqueue_microtask(cx, Box::new(byte_tee_read_request_chunk));
     }
 
     /// <https://streams.spec.whatwg.org/#ref-for-read-request-chunk-steps%E2%91%A3>
     #[allow(clippy::borrowed_box)]
-    pub(crate) fn chunk_steps(
-        &self,
-        chunk: &Box<Heap<JSVal>>,
-        cx: &mut js::context::JSContext,
-    ) -> Fallible<()> {
+    pub(crate) fn chunk_steps(&self, chunk: &Box<Heap<JSVal>>, cx: &mut JSContext) -> Fallible<()> {
         // Set readAgainForBranch1 to false.
         self.read_again_for_branch_1.set(false);
 
@@ -127,38 +123,29 @@ impl ByteTeeReadRequest {
         self.read_again_for_branch_2.set(false);
 
         // Let chunk1 and chunk2 be chunk.
-        let chunk1 = chunk;
-        let chunk2 = chunk;
+        rooted!(&in(cx) let chunk_object = chunk.get().to_object());
 
         // Helper to surface clone failures exactly once
-        let handle_clone_error = |cx: &mut js::context::JSContext, error: Error| {
+        let handle_clone_error = |cx: &mut JSContext, error: Error| {
             rooted!(&in(cx) let mut error_value = UndefinedValue());
-            error.to_jsval(
-                cx.into(),
-                &self.global(),
-                error_value.handle_mut(),
-                CanGc::from_cx(cx),
-            );
+            error.to_jsval(cx, &self.global(), error_value.handle_mut());
 
             let branch_1_controller = self.branch_1.get_byte_controller();
             let branch_2_controller = self.branch_2.get_byte_controller();
 
-            branch_1_controller.error(error_value.handle(), CanGc::from_cx(cx));
-            branch_2_controller.error(error_value.handle(), CanGc::from_cx(cx));
+            branch_1_controller.error(cx, error_value.handle());
+            branch_2_controller.error(cx, error_value.handle());
 
             let cancel_result = self
                 .stream
                 .cancel(cx, &self.stream.global(), error_value.handle());
-            self.cancel_promise
-                .resolve_native(&cancel_result, CanGc::from_cx(cx));
+            self.cancel_promise.resolve_native(cx, &cancel_result);
         };
 
         // Prepare per branch chunks ahead of the spec enqueue steps.
         let chunk1_view = if !self.canceled_1.get() {
-            Some(HeapBufferSource::<ArrayBufferViewU8>::new(
-                BufferSource::ArrayBufferView(RootedTraceableBox::from_box(Heap::boxed(
-                    chunk1.get().to_object(),
-                ))),
+            Some(RootedTraceableBox::new(
+                HeapBufferSource::<ArrayBufferViewU8>::new(chunk_object.handle()),
             ))
         } else {
             None
@@ -169,11 +156,10 @@ impl ByteTeeReadRequest {
         // If canceled1 is false and canceled2 is false,
         if !self.canceled_1.get() && !self.canceled_2.get() {
             // Let cloneResult be CloneAsUint8Array(chunk).
-            let chunk2_source =
-                HeapBufferSource::<ArrayBufferViewU8>::new(BufferSource::ArrayBufferView(
-                    RootedTraceableBox::from_box(Heap::boxed(chunk2.get().to_object())),
-                ));
-            let clone_result = chunk2_source.clone_as_uint8_array(cx.into());
+            let chunk2_source = RootedTraceableBox::new(
+                HeapBufferSource::<ArrayBufferViewU8>::new(chunk_object.handle()),
+            );
+            let clone_result = chunk2_source.clone_as_uint8_array(cx);
 
             // If cloneResult is an abrupt completion,
             if let Err(error) = clone_result {
@@ -185,11 +171,10 @@ impl ByteTeeReadRequest {
             }
         } else if !self.canceled_2.get() {
             // Only branch2 needs data; clone once for it.
-            let chunk2_source =
-                HeapBufferSource::<ArrayBufferViewU8>::new(BufferSource::ArrayBufferView(
-                    RootedTraceableBox::from_box(Heap::boxed(chunk2.get().to_object())),
-                ));
-            match chunk2_source.clone_as_uint8_array(cx.into()) {
+            let chunk2_source = RootedTraceableBox::new(
+                HeapBufferSource::<ArrayBufferViewU8>::new(chunk_object.handle()),
+            );
+            match chunk2_source.clone_as_uint8_array(cx) {
                 Ok(clone) => chunk2_view = Some(clone),
                 Err(error) => {
                     handle_clone_error(cx, error);
@@ -225,8 +210,7 @@ impl ByteTeeReadRequest {
     }
 
     /// <https://streams.spec.whatwg.org/#ref-for-read-request-close-steps%E2%91%A2>
-    pub(crate) fn close_steps(&self, can_gc: CanGc) -> Fallible<()> {
-        let cx = GlobalScope::get_cx();
+    pub(crate) fn close_steps(&self, cx: &mut JSContext) -> Fallible<()> {
         let branch_1_controller = self.branch_1.get_byte_controller();
         let branch_2_controller = self.branch_2.get_byte_controller();
 
@@ -235,29 +219,29 @@ impl ByteTeeReadRequest {
 
         // If canceled1 is false, perform ! ReadableByteStreamControllerClose(branch1.[[controller]]).
         if !self.canceled_1.get() {
-            branch_1_controller.close(cx, can_gc)?;
+            branch_1_controller.close(cx)?;
         }
 
         // If canceled2 is false, perform ! ReadableByteStreamControllerClose(branch2.[[controller]]).
         if !self.canceled_2.get() {
-            branch_2_controller.close(cx, can_gc)?;
+            branch_2_controller.close(cx)?;
         }
 
         // If branch1.[[controller]].[[pendingPullIntos]] is not empty,
         // perform ! ReadableByteStreamControllerRespond(branch1.[[controller]], 0).
         if branch_1_controller.get_pending_pull_intos_size() > 0 {
-            branch_1_controller.respond(cx, 0, can_gc)?;
+            branch_1_controller.respond(cx, 0)?;
         }
 
         // If branch2.[[controller]].[[pendingPullIntos]] is not empty,
         // perform ! ReadableByteStreamControllerRespond(branch2.[[controller]], 0).
         if branch_2_controller.get_pending_pull_intos_size() > 0 {
-            branch_2_controller.respond(cx, 0, can_gc)?;
+            branch_2_controller.respond(cx, 0)?;
         }
 
         // If canceled1 is false or canceled2 is false, resolve cancelPromise with undefined.
         if !self.canceled_1.get() || !self.canceled_2.get() {
-            self.cancel_promise.resolve_native(&(), can_gc);
+            self.cancel_promise.resolve_native(cx, &());
         }
 
         Ok(())
@@ -271,10 +255,10 @@ impl ByteTeeReadRequest {
 
     pub(crate) fn pull_algorithm(
         &self,
-        cx: &mut js::context::JSContext,
+        cx: &mut JSContext,
         byte_tee_pull_algorithm: Option<ByteTeePullAlgorithm>,
     ) {
         self.tee_underlying_source
-            .pull_algorithm(byte_tee_pull_algorithm, CanGc::from_cx(cx));
+            .pull_algorithm(cx, byte_tee_pull_algorithm);
     }
 }

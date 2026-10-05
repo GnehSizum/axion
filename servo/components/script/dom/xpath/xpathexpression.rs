@@ -3,18 +3,19 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use js::rust::HandleObject;
 use script_bindings::codegen::InheritTypes::{CharacterDataTypeId, NodeTypeId};
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use xpath::{Expression, evaluate_parsed_xpath};
 
 use crate::dom::bindings::codegen::Bindings::XPathExpressionBinding::XPathExpressionMethods;
 use crate::dom::bindings::error::{Error, Fallible};
-use crate::dom::bindings::reflector::{DomGlobal, Reflector, reflect_dom_object_with_proto};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::node::Node;
 use crate::dom::window::Window;
 use crate::dom::xpathresult::{XPathResult, XPathResultType};
-use crate::script_runtime::CanGc;
 use crate::xpath::{Value, XPathImplementation};
 
 #[dom_struct]
@@ -35,36 +36,36 @@ impl XPathExpression {
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
         parsed_expression: Expression,
     ) -> DomRoot<XPathExpression> {
         reflect_dom_object_with_proto(
+            cx,
             Box::new(XPathExpression::new_inherited(window, parsed_expression)),
             window,
             proto,
-            can_gc,
         )
     }
 
     pub(crate) fn evaluate_internal(
         &self,
+        cx: &mut JSContext,
         context_node: &Node,
         result_type_num: u16,
         result: Option<&XPathResult>,
-        can_gc: CanGc,
     ) -> Fallible<DomRoot<XPathResult>> {
         let is_allowed_context_node_type = matches!(
             context_node.type_id(),
-            NodeTypeId::Attr
-                | NodeTypeId::CharacterData(
-                    CharacterDataTypeId::Comment
-                        | CharacterDataTypeId::Text(_)
-                        | CharacterDataTypeId::ProcessingInstruction
-                )
-                | NodeTypeId::Document(_)
-                | NodeTypeId::Element(_)
+            NodeTypeId::Attr |
+                NodeTypeId::CharacterData(
+                    CharacterDataTypeId::Comment |
+                        CharacterDataTypeId::Text(_) |
+                        CharacterDataTypeId::ProcessingInstruction
+                ) |
+                NodeTypeId::Document(_) |
+                NodeTypeId::Element(_)
         );
         if !is_allowed_context_node_type {
             return Err(Error::NotSupported(None));
@@ -77,6 +78,7 @@ impl XPathExpression {
         let window = global.as_window();
 
         let result_value = evaluate_parsed_xpath::<XPathImplementation>(
+            cx,
             &self.parsed_expression,
             DomRoot::from_ref(context_node).into(),
         )
@@ -106,15 +108,14 @@ impl XPathExpression {
         if let Some(result) = result {
             // According to https://www.w3.org/TR/DOM-Level-3-XPath/xpath.html#XPathEvaluator-evaluate, reusing
             // the provided result object is optional. We choose to do it here because thats what other browsers do.
-            result.reinitialize_with(inferred_result_type, result_value.into());
+            result.reinitialize_with(cx.no_gc(), inferred_result_type, result_value);
             Ok(DomRoot::from_ref(result))
         } else {
             Ok(XPathResult::new(
+                cx,
                 window,
-                None,
-                can_gc,
                 inferred_result_type,
-                result_value.into(),
+                result_value,
             ))
         }
     }
@@ -124,11 +125,11 @@ impl XPathExpressionMethods<crate::DomTypeHolder> for XPathExpression {
     /// <https://dom.spec.whatwg.org/#dom-xpathexpression-evaluate>
     fn Evaluate(
         &self,
+        cx: &mut JSContext,
         context_node: &Node,
         result_type_num: u16,
         result: Option<&XPathResult>,
-        can_gc: CanGc,
     ) -> Fallible<DomRoot<XPathResult>> {
-        self.evaluate_internal(context_node, result_type_num, result, can_gc)
+        self.evaluate_internal(cx, context_node, result_type_num, result)
     }
 }

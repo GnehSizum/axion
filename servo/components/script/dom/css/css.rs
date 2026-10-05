@@ -4,17 +4,18 @@
 
 use cssparser::{Parser, ParserInput, serialize_identifier};
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use script_bindings::codegen::GenericBindings::CSSBinding::PropertyDefinition;
+use script_bindings::reflector::Reflector;
 use style::stylesheets::supports_rule::{Declaration, parse_condition_or_declaration};
 use style::stylesheets::{CssRuleType, UrlExtraData};
 use style::stylist::RegisterCustomPropertyResult;
 use style_traits::ParsingMode;
 
-use crate::css::parser_context_for_anonymous_content;
+use crate::css::css::parser_context_for_anonymous_content;
 use crate::dom::bindings::codegen::Bindings::CSSBinding::CSSMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
 use crate::dom::bindings::error::{Error, Fallible};
-use crate::dom::bindings::reflector::Reflector;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::window::Window;
@@ -70,8 +71,8 @@ impl CSSMethods<crate::DomTypeHolder> for CSS {
     }
 
     /// <https://drafts.css-houdini.org/css-paint-api-1/#paint-worklet>
-    fn PaintWorklet(win: &Window) -> DomRoot<Worklet> {
-        win.paint_worklet()
+    fn PaintWorklet(cx: &mut JSContext, win: &Window) -> DomRoot<Worklet> {
+        win.paint_worklet(cx)
     }
 
     /// <https://drafts.css-houdini.org/css-properties-values-api/#the-registerproperty-function>
@@ -90,11 +91,11 @@ impl CSSMethods<crate::DomTypeHolder> for CSS {
         );
         Err(match result {
             SuccessfullyRegistered => return Ok(()),
-            InvalidName
-            | InvalidSyntax
-            | InvalidInitialValue
-            | NoInitialValue
-            | InitialValueNotComputationallyIndependent => Error::Syntax(None),
+            InvalidName |
+            InvalidSyntax |
+            InvalidInitialValue |
+            NoInitialValue |
+            InitialValueNotComputationallyIndependent => Error::Syntax(None),
             AlreadyRegistered => Error::InvalidModification(None),
         })
     }

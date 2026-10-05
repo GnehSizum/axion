@@ -5,20 +5,21 @@
 use std::borrow::Cow;
 
 use dom_struct::dom_struct;
+use js::context::{JSContext, NoGC};
+use script_bindings::cell::DomRefCell;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
+use script_webgpu::gpuconvert::WebGPUConvert;
 use webgpu_traits::{WebGPU, WebGPUBindGroupLayout, WebGPUPipelineLayout, WebGPURequest};
 use wgpu_core::binding_model::PipelineLayoutDescriptor;
 
-use crate::conversions::Convert;
-use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::WebGPUBinding::{
     GPUPipelineLayoutDescriptor, GPUPipelineLayoutMethods,
 };
-use crate::dom::bindings::reflector::{DomGlobal, Reflector, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::USVString;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::webgpu::gpudevice::GPUDevice;
-use crate::script_runtime::CanGc;
 
 #[derive(JSTraceable, MallocSizeOf)]
 struct DroppableGPUPipelineLayout {
@@ -71,14 +72,14 @@ impl GPUPipelineLayout {
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         global: &GlobalScope,
         channel: WebGPU,
         pipeline_layout: WebGPUPipelineLayout,
         label: USVString,
         bgls: Vec<WebGPUBindGroupLayout>,
-        can_gc: CanGc,
     ) -> DomRoot<Self> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(GPUPipelineLayout::new_inherited(
                 channel,
                 pipeline_layout,
@@ -86,7 +87,7 @@ impl GPUPipelineLayout {
                 bgls,
             )),
             global,
-            can_gc,
+            cx,
         )
     }
 }
@@ -102,9 +103,9 @@ impl GPUPipelineLayout {
 
     /// <https://gpuweb.github.io/gpuweb/#dom-gpudevice-createpipelinelayout>
     pub(crate) fn create(
+        cx: &mut JSContext,
         device: &GPUDevice,
         descriptor: &GPUPipelineLayoutDescriptor,
-        can_gc: CanGc,
     ) -> DomRoot<GPUPipelineLayout> {
         let bgls = descriptor
             .bindGroupLayouts
@@ -114,8 +115,9 @@ impl GPUPipelineLayout {
 
         let desc = PipelineLayoutDescriptor {
             label: (&descriptor.parent).convert(),
-            bind_group_layouts: Cow::Owned(bgls.iter().map(|l| l.0).collect::<Vec<_>>()),
-            push_constant_ranges: Cow::Owned(vec![]),
+            // TODO(sagudev): this needs webidl sync
+            bind_group_layouts: Cow::Owned(bgls.iter().map(|l| Some(l.0)).collect::<Vec<_>>()),
+            immediate_size: 0,
         };
 
         let pipeline_layout_id = device.global().wgpu_id_hub().create_pipeline_layout_id();
@@ -131,12 +133,12 @@ impl GPUPipelineLayout {
 
         let pipeline_layout = WebGPUPipelineLayout(pipeline_layout_id);
         GPUPipelineLayout::new(
+            cx,
             &device.global(),
             device.channel(),
             pipeline_layout,
             descriptor.parent.label.clone(),
             bgls,
-            can_gc,
         )
     }
 }
@@ -148,7 +150,7 @@ impl GPUPipelineLayoutMethods<crate::DomTypeHolder> for GPUPipelineLayout {
     }
 
     /// <https://gpuweb.github.io/gpuweb/#dom-gpuobjectbase-label>
-    fn SetLabel(&self, value: USVString) {
-        *self.label.borrow_mut() = value;
+    fn SetLabel(&self, no_gc: &NoGC, value: USVString) {
+        *self.label.safe_borrow_mut(no_gc) = value;
     }
 }

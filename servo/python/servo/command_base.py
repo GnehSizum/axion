@@ -26,7 +26,7 @@ from enum import Enum
 from glob import glob
 from os import path
 from subprocess import CompletedProcess
-from typing import Any, Optional, Union, LiteralString, cast, List
+from typing import Any, Optional, Union, cast, List
 from collections.abc import Generator, Callable
 
 import toml
@@ -53,15 +53,19 @@ class BuildType:
     kind: Kind
     profile: str
 
+    @staticmethod
     def dev() -> BuildType:
         return BuildType(BuildType.Kind.DEV, "debug")
 
+    @staticmethod
     def release() -> BuildType:
         return BuildType(BuildType.Kind.RELEASE, "release")
 
+    @staticmethod
     def prod() -> BuildType:
         return BuildType(BuildType.Kind.CUSTOM, "production")
 
+    @staticmethod
     def custom(profile: str) -> BuildType:
         return BuildType(BuildType.Kind.CUSTOM, profile)
 
@@ -88,6 +92,7 @@ class BuildType:
     def as_cargo_arg(self) -> List[str]:
         return ["--profile", self.profile]
 
+    @staticmethod
     def from_string(profile: str) -> BuildType:
         if profile == "dev":
             return BuildType.dev()
@@ -417,10 +422,23 @@ class CommandBase(object):
                 print("Hint: Ninja-build is available on github at: https://github.com/ninja-build/ninja/releases")
                 exit(1)
 
-        if self.config["build"]["mode"] in ["", "dev"]:
-            # Increase stylo thread stack size to 2 MiB for debug builds since the stack usage is higher
-            # and crashes have been reported. The default is 512 KiB.
-            env["SERVO_STYLE_THREAD_STACK_SIZE_KB"] = env.get("SERVO_STYLE_THREAD_STACK_SIZE_KB", str(2 * 1024))
+        # jemalloc requires to be compiled with a page size that is at least equal to the one
+        # used by the kernel of machine on which it will run.
+        # Some linux distros for arm64 configure the page size to 16KB (e.g. Raspberry Pi OS 13)
+        # and few others use a 64KB page size. The upstream 'jemalloc` has switched to 64KB pages
+        # as the default, but this is not available in `tikv-jemalloc` yet, so we configure it here.
+        # FIXME: Remove after `tikv-jemalloc` ships the change to default to 64KB page size.
+        # See https://github.com/servo/servo/issues/47114
+        if "aarch64-unknown-linux-gnu" == self.target.triple():
+            # The value of the environment variable represents the number of bits in the address
+            # space, so 2^16 means we use 64KB as the page size.
+            env["AARCH64_UNKNOWN_LINUX_GNU_JEMALLOC_SYS_WITH_LG_PAGE"] = "16"
+
+        # Increase stylo thread stack size to 8 MiB for all builds
+        # to match the recursion depth of Chromium.
+        # This only reserves virtual memory space and has almost no overhead.
+        # See https://github.com/servo/servo/pull/43888
+        env["SERVO_STYLE_THREAD_STACK_SIZE_KB"] = env.get("SERVO_STYLE_THREAD_STACK_SIZE_KB", str(8 * 1024))
 
         return env
 
@@ -596,10 +614,19 @@ class CommandBase(object):
 
                 if binary_selection:
                     if "servo_binary" not in kwargs:
-                        kwargs["servo_binary"] = kwargs.get("bin") or self.get_binary_path(
-                            cast(BuildType, kwargs.get("build_type")),
-                            sanitizer=cast(SanitizerKind, kwargs.get("sanitizer")),
-                        )
+                        # For packaged targets (Android, OpenHarmony) the binary is not important,
+                        # since we can't run it directly. We could return the shared library object,
+                        # but that doesn't seem very useful.
+                        if self.target.needs_packaging():
+                            if kwargs.get("bin") is not None:
+                                print(f"`--bin` cannot be used with the '{self.target.triple()}' target.")
+                                sys.exit(1)
+                            kwargs["servo_binary"] = None
+                        else:
+                            kwargs["servo_binary"] = kwargs.get("bin") or self.get_binary_path(
+                                cast(BuildType, kwargs.get("build_type")),
+                                sanitizer=cast(SanitizerKind, kwargs.get("sanitizer")),
+                            )
                     kwargs.pop("bin")
                     kwargs.pop("nightly")
                     if not build_type:
@@ -618,6 +645,7 @@ class CommandBase(object):
 
     @staticmethod
     def allow_target_configuration(original_function: Callable) -> Callable:
+        @functools.wraps(original_function)
         def target_configuration_decorator(self: CommandBase, *args: Any, **kwargs: Any) -> Callable:
             self.configure_build_target(kwargs, suppress_log=True)
             kwargs.pop("target", False)
@@ -651,12 +679,17 @@ class CommandBase(object):
                 return BuildType.dev()
 
         if release:
+            self.config["build"]["mode"] = "release"
             return BuildType.release()
         elif dev:
+            self.config["build"]["mode"] = "dev"
             return BuildType.dev()
         elif prod:
+            self.config["build"]["mode"] = "production"
             return BuildType.prod()
         else:
+            # Guaranteed non-None.
+            self.config["build"]["mode"] = profile
             return BuildType.from_string(profile)
 
     def configure_build_target(self, kwargs: dict[str, Any], suppress_log: bool = False) -> None:
@@ -806,14 +839,14 @@ class CommandBase(object):
 
         return call(["cargo", command] + args + cargo_args, env=env, verbose=verbose)
 
-    def android_adb_path(self, env: dict[str, Any]) -> LiteralString:
+    def android_adb_path(self, env: dict[str, Any]) -> str:
         if "ANDROID_SDK_ROOT" in env:
             sdk_adb = path.join(env["ANDROID_SDK_ROOT"], "platform-tools", "adb")
             if path.exists(sdk_adb):
                 return sdk_adb
         return "adb"
 
-    def android_emulator_path(self, env: dict[str, Any]) -> LiteralString:
+    def android_emulator_path(self, env: dict[str, Any]) -> str:
         if "ANDROID_SDK_ROOT" in env:
             sdk_adb = path.join(env["ANDROID_SDK_ROOT"], "emulator", "emulator")
             if path.exists(sdk_adb):
@@ -829,6 +862,11 @@ class CommandBase(object):
 
         # Toolchain installation is handled automatically for non cross compilation builds.
         if not self.target.is_cross_build():
+            return
+
+        if shutil.which("rustup") is None:
+            print("Warning: rustup not found. Skipping automatic target installation for cross-compilation.")
+            print(f"  You may need to manually ensure the '{self.target.triple()}' target is installed.")
             return
 
         installed_targets = check_output(["rustup", "target", "list", "--installed"], cwd=self.context.topdir)

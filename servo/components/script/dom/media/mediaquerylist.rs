@@ -6,6 +6,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
+use script_bindings::reflector::reflect_weak_referenceable_dom_object;
 use style::media_queries::MediaList;
 use style::stylesheets::CustomMediaEvaluator;
 use style_traits::ToCss;
@@ -16,12 +18,10 @@ use crate::dom::bindings::codegen::Bindings::EventTargetBinding::{
 };
 use crate::dom::bindings::codegen::Bindings::MediaQueryListBinding::MediaQueryListMethods;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::reflect_dom_object;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::document::Document;
 use crate::dom::eventtarget::EventTarget;
-use crate::script_runtime::CanGc;
 
 pub(crate) enum MediaQueryListMatchState {
     Same,
@@ -48,14 +48,14 @@ impl MediaQueryList {
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         document: &Document,
         media_query_list: MediaList,
-        can_gc: CanGc,
     ) -> DomRoot<MediaQueryList> {
-        reflect_dom_object(
-            Box::new(MediaQueryList::new_inherited(document, media_query_list)),
+        reflect_weak_referenceable_dom_object(
+            cx,
+            Rc::new(MediaQueryList::new_inherited(document, media_query_list)),
             document.window(),
-            can_gc,
         )
     }
 }

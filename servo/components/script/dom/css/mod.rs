@@ -5,7 +5,10 @@
 #[allow(clippy::module_inception, reason = "The interface name is CSS")]
 pub(crate) mod css;
 pub(crate) mod cssconditionrule;
+pub(crate) mod cssfontfacedescriptors;
 pub(crate) mod cssfontfacerule;
+pub(crate) mod cssfontfeaturevaluesmap;
+pub(crate) mod cssfontfeaturevaluesrule;
 pub(crate) mod cssgroupingrule;
 pub(crate) mod cssimportrule;
 pub(crate) mod csskeyframerule;

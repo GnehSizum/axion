@@ -8,13 +8,15 @@ use std::ptr;
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
+use js::conversions::ToJSValConvertible;
 use js::jsapi::{Heap, JSObject};
 use js::jsval::{JSVal, UndefinedValue};
 use js::realm::CurrentRealm;
 use js::rust::wrappers2::JS_GetPendingException;
 use js::rust::{HandleObject, HandleValue as SafeHandleValue, HandleValue, MutableHandleValue};
 use js::typedarray::Uint8;
-use script_bindings::conversions::SafeToJSValConvertible;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 
 use crate::dom::bindings::buffer_source::create_buffer_source;
 use crate::dom::bindings::callback::ExceptionHandling;
@@ -22,7 +24,7 @@ use crate::dom::bindings::codegen::Bindings::QueuingStrategyBinding::QueuingStra
 use crate::dom::bindings::codegen::Bindings::ReadableStreamDefaultControllerBinding::ReadableStreamDefaultControllerMethods;
 use crate::dom::bindings::codegen::UnionTypes::ReadableStreamDefaultControllerOrReadableByteStreamController as Controller;
 use crate::dom::bindings::error::{Error, ErrorToJsval, Fallible, throw_dom_exception};
-use crate::dom::bindings::reflector::{DomGlobal, Reflector, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::trace::RootedTraceableBox;
 use crate::dom::globalscope::GlobalScope;
@@ -33,8 +35,7 @@ use crate::dom::stream::readablestreamdefaultreader::ReadRequest;
 use crate::dom::stream::underlyingsourcecontainer::{
     UnderlyingSourceContainer, UnderlyingSourceType,
 };
-use crate::realms::{InRealm, enter_realm};
-use crate::script_runtime::{CanGc, JSContext as SafeJSContext};
+use crate::realms::enter_auto_realm;
 
 /// The fulfillment handler for
 /// <https://streams.spec.whatwg.org/#readable-stream-default-controller-call-pull-if-needed>
@@ -48,7 +49,6 @@ impl Callback for PullAlgorithmFulfillmentHandler {
     /// Continuation of <https://streams.spec.whatwg.org/#readable-stream-default-controller-call-pull-if-needed>
     /// Upon fulfillment of pullPromise
     fn callback(&self, cx: &mut CurrentRealm, _v: HandleValue) {
-        let can_gc = CanGc::from_cx(cx);
         // Set controller.[[pulling]] to false.
         self.controller.pulling.set(false);
 
@@ -58,7 +58,7 @@ impl Callback for PullAlgorithmFulfillmentHandler {
             self.controller.pull_again.set(false);
 
             // Perform ! ReadableStreamDefaultControllerCallPullIfNeeded(controller).
-            self.controller.call_pull_if_needed(can_gc);
+            self.controller.call_pull_if_needed(cx);
         }
     }
 }
@@ -75,9 +75,8 @@ impl Callback for PullAlgorithmRejectionHandler {
     /// Continuation of <https://streams.spec.whatwg.org/#readable-stream-default-controller-call-pull-if-needed>
     /// Upon rejection of pullPromise with reason e.
     fn callback(&self, cx: &mut CurrentRealm, v: HandleValue) {
-        let can_gc = CanGc::from_cx(cx);
         // Perform ! ReadableStreamDefaultControllerError(controller, e).
-        self.controller.error(v, can_gc);
+        self.controller.error(cx, v);
     }
 }
 
@@ -93,12 +92,11 @@ impl Callback for StartAlgorithmFulfillmentHandler {
     /// Continuation of <https://streams.spec.whatwg.org/#set-up-readable-stream-default-controller>
     /// Upon fulfillment of startPromise,
     fn callback(&self, cx: &mut CurrentRealm, _v: HandleValue) {
-        let can_gc = CanGc::from_cx(cx);
         // Set controller.[[started]] to true.
         self.controller.started.set(true);
 
         // Perform ! ReadableStreamDefaultControllerCallPullIfNeeded(controller).
-        self.controller.call_pull_if_needed(can_gc);
+        self.controller.call_pull_if_needed(cx);
     }
 }
 
@@ -114,9 +112,8 @@ impl Callback for StartAlgorithmRejectionHandler {
     /// Continuation of <https://streams.spec.whatwg.org/#set-up-readable-stream-default-controller>
     /// Upon rejection of startPromise with reason r,
     fn callback(&self, cx: &mut CurrentRealm, v: HandleValue) {
-        let can_gc = CanGc::from_cx(cx);
         // Perform ! ReadableStreamDefaultControllerError(controller, r).
-        self.controller.error(v, can_gc);
+        self.controller.error(cx, v);
     }
 }
 
@@ -154,17 +151,15 @@ impl EnqueuedValue {
         }
     }
 
-    fn to_jsval(&self, cx: SafeJSContext, rval: MutableHandleValue, can_gc: CanGc) {
+    fn to_jsval(&self, cx: &mut JSContext, rval: MutableHandleValue) {
         match self {
             EnqueuedValue::Native(chunk) => {
-                rooted!(in(*cx) let mut array_buffer_ptr = ptr::null_mut::<JSObject>());
-                create_buffer_source::<Uint8>(cx, chunk, array_buffer_ptr.handle_mut(), can_gc)
+                rooted!(&in(cx) let mut array_buffer_ptr = ptr::null_mut::<JSObject>());
+                create_buffer_source::<Uint8>(cx, chunk, array_buffer_ptr.handle_mut())
                     .expect("failed to create buffer source for native chunk.");
-                array_buffer_ptr.safe_to_jsval(cx, rval, can_gc);
+                array_buffer_ptr.to_jsval(cx, rval);
             },
-            EnqueuedValue::Js(value_with_size) => {
-                value_with_size.value.safe_to_jsval(cx, rval, can_gc)
-            },
+            EnqueuedValue::Js(value_with_size) => value_with_size.value.to_jsval(cx, rval),
             EnqueuedValue::CloseSentinel => {
                 unreachable!("The close sentinel is never made available as a js val.")
             },
@@ -209,12 +204,7 @@ impl QueueWithSizes {
     /// <https://streams.spec.whatwg.org/#dequeue-value>
     /// A none `rval` means we're dequeing the close sentinel,
     /// which should never be made available to script.
-    pub(crate) fn dequeue_value(
-        &self,
-        cx: SafeJSContext,
-        rval: Option<MutableHandleValue>,
-        can_gc: CanGc,
-    ) {
+    pub(crate) fn dequeue_value(&self, cx: &mut JSContext, rval: Option<MutableHandleValue>) {
         {
             let queue = self.queue.borrow();
             let Some(value) = queue.front() else {
@@ -222,7 +212,7 @@ impl QueueWithSizes {
             };
             self.total_size.set(self.total_size.get() - value.size());
             if let Some(rval) = rval {
-                value.to_jsval(cx, rval, can_gc);
+                value.to_jsval(cx, rval);
             } else {
                 assert_eq!(value, &EnqueuedValue::CloseSentinel);
             }
@@ -259,12 +249,7 @@ impl QueueWithSizes {
 
     /// <https://streams.spec.whatwg.org/#peek-queue-value>
     /// Returns whether value is the close sentinel.
-    pub(crate) fn peek_queue_value(
-        &self,
-        cx: SafeJSContext,
-        rval: MutableHandleValue,
-        can_gc: CanGc,
-    ) -> bool {
+    pub(crate) fn peek_queue_value(&self, cx: &mut JSContext, rval: MutableHandleValue) -> bool {
         // Assert: container has [[queue]] and [[queueTotalSize]] internal slots.
         // Done with the QueueWithSizes type.
 
@@ -279,7 +264,7 @@ impl QueueWithSizes {
         }
 
         // Return valueWithSize’s value.
-        value_with_size.to_jsval(cx, rval, can_gc);
+        value_with_size.to_jsval(cx, rval);
         false
     }
 
@@ -345,23 +330,16 @@ pub(crate) struct ReadableStreamDefaultController {
 }
 
 impl ReadableStreamDefaultController {
-    #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     fn new_inherited(
-        global: &GlobalScope,
-        underlying_source_type: UnderlyingSourceType,
         strategy_hwm: f64,
         strategy_size: Rc<QueuingStrategySize>,
-        can_gc: CanGc,
+        underlying_source: &UnderlyingSourceContainer,
     ) -> ReadableStreamDefaultController {
         ReadableStreamDefaultController {
             reflector_: Reflector::new(),
             queue: Default::default(),
             stream: MutNullableDom::new(None),
-            underlying_source: MutNullableDom::new(Some(&*UnderlyingSourceContainer::new(
-                global,
-                underlying_source_type,
-                can_gc,
-            ))),
+            underlying_source: MutNullableDom::new(Some(underlying_source)),
             strategy_hwm,
             strategy_size: RefCell::new(Some(strategy_size)),
             close_requested: Default::default(),
@@ -371,38 +349,32 @@ impl ReadableStreamDefaultController {
         }
     }
 
-    #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn new(
+        cx: &mut JSContext,
         global: &GlobalScope,
         underlying_source: UnderlyingSourceType,
         strategy_hwm: f64,
         strategy_size: Rc<QueuingStrategySize>,
-        can_gc: CanGc,
     ) -> DomRoot<ReadableStreamDefaultController> {
-        reflect_dom_object(
+        let underlying_source = UnderlyingSourceContainer::new(cx, global, underlying_source);
+        reflect_dom_object_with_cx(
             Box::new(ReadableStreamDefaultController::new_inherited(
-                global,
-                underlying_source,
                 strategy_hwm,
                 strategy_size,
-                can_gc,
+                &underlying_source,
             )),
             global,
-            can_gc,
+            cx,
         )
     }
 
     /// <https://streams.spec.whatwg.org/#set-up-readable-stream-default-controller>
-    pub(crate) fn setup(
-        &self,
-        stream: DomRoot<ReadableStream>,
-        can_gc: CanGc,
-    ) -> Result<(), Error> {
+    pub(crate) fn setup(&self, cx: &mut JSContext, stream: &ReadableStream) -> Result<(), Error> {
         // Assert: stream.[[controller]] is undefined
         stream.assert_no_controller();
 
         // Set controller.[[stream]] to stream.
-        self.stream.set(Some(&stream));
+        self.stream.set(Some(stream));
 
         let global = &*self.global();
         let rooted_default_controller = DomRoot::from_ref(self);
@@ -425,12 +397,11 @@ impl ReadableStreamDefaultController {
             // Let startResult be the result of performing startAlgorithm. (This might throw an exception.)
             let start_result = underlying_source
                 .call_start_algorithm(
+                    cx,
                     Controller::ReadableStreamDefaultController(rooted_default_controller.clone()),
-                    can_gc,
                 )
                 .unwrap_or_else(|| {
-                    let promise = Promise::new(global, can_gc);
-                    promise.resolve_native(&(), can_gc);
+                    let promise = Promise::new_resolved(cx, global, ());
                     Ok(promise)
                 });
 
@@ -439,6 +410,7 @@ impl ReadableStreamDefaultController {
 
             // Upon fulfillment of startPromise, Upon rejection of startPromise with reason r,
             let handler = PromiseNativeHandler::new(
+                cx,
                 global,
                 Some(Box::new(StartAlgorithmFulfillmentHandler {
                     controller: Dom::from_ref(&rooted_default_controller),
@@ -446,11 +418,10 @@ impl ReadableStreamDefaultController {
                 Some(Box::new(StartAlgorithmRejectionHandler {
                     controller: Dom::from_ref(&rooted_default_controller),
                 })),
-                can_gc,
             );
-            let realm = enter_realm(global);
-            let comp = InRealm::Entered(&realm);
-            start_promise.append_native_handler(&handler, comp, can_gc);
+            let mut realm = enter_auto_realm(cx, global);
+            let cx = &mut realm.current_realm();
+            start_promise.append_native_handler(cx, &handler);
         };
 
         Ok(())
@@ -464,8 +435,8 @@ impl ReadableStreamDefaultController {
     }
 
     /// <https://streams.spec.whatwg.org/#dequeue-value>
-    fn dequeue_value(&self, cx: SafeJSContext, rval: MutableHandleValue, can_gc: CanGc) {
-        self.queue.dequeue_value(cx, Some(rval), can_gc);
+    fn dequeue_value(&self, cx: &mut JSContext, rval: MutableHandleValue) {
+        self.queue.dequeue_value(cx, Some(rval));
     }
 
     /// <https://streams.spec.whatwg.org/#readable-stream-default-controller-should-call-pull>
@@ -506,7 +477,7 @@ impl ReadableStreamDefaultController {
     }
 
     /// <https://streams.spec.whatwg.org/#readable-stream-default-controller-call-pull-if-needed>
-    fn call_pull_if_needed(&self, can_gc: CanGc) {
+    fn call_pull_if_needed(&self, cx: &mut JSContext) {
         // Let shouldPull be ! ReadableStreamDefaultControllerShouldCallPull(controller).
         // If shouldPull is false, return.
         if !self.should_call_pull() {
@@ -535,6 +506,7 @@ impl ReadableStreamDefaultController {
             return;
         };
         let handler = PromiseNativeHandler::new(
+            cx,
             &global,
             Some(Box::new(PullAlgorithmFulfillmentHandler {
                 controller: Dom::from_ref(&rooted_default_controller),
@@ -542,34 +514,30 @@ impl ReadableStreamDefaultController {
             Some(Box::new(PullAlgorithmRejectionHandler {
                 controller: Dom::from_ref(&rooted_default_controller),
             })),
-            can_gc,
         );
 
-        let realm = enter_realm(&*global);
-        let comp = InRealm::Entered(&realm);
+        let mut realm = enter_auto_realm(cx, &*global);
+        let cx = &mut realm.current_realm();
+
         let result = underlying_source
-            .call_pull_algorithm(controller, can_gc)
+            .call_pull_algorithm(cx, controller)
             .unwrap_or_else(|| {
-                let promise = Promise::new(&global, can_gc);
-                promise.resolve_native(&(), can_gc);
+                let promise = Promise::new_resolved(cx, &global, ());
                 Ok(promise)
             });
         let promise = result.unwrap_or_else(|error| {
-            let cx = GlobalScope::get_cx();
-            rooted!(in(*cx) let mut rval = UndefinedValue());
+            rooted!(&in(cx) let mut rval = UndefinedValue());
             // TODO: check if `self.global()` is the right globalscope.
-            error.to_jsval(cx, &self.global(), rval.handle_mut(), can_gc);
-            let promise = Promise::new(&global, can_gc);
-            promise.reject_native(&rval.handle(), can_gc);
-            promise
+            error.to_jsval(cx, &global, rval.handle_mut());
+            Promise::new_rejected(cx, &global, rval.handle())
         });
-        promise.append_native_handler(&handler, comp, can_gc);
+        promise.append_native_handler(cx, &handler);
     }
 
     /// <https://streams.spec.whatwg.org/#rs-default-controller-private-cancel>
     pub(crate) fn perform_cancel_steps(
         &self,
-        cx: &mut js::context::JSContext,
+        cx: &mut JSContext,
         global: &GlobalScope,
         reason: SafeHandleValue,
     ) -> Rc<Promise> {
@@ -584,16 +552,16 @@ impl ReadableStreamDefaultController {
         let result = underlying_source
             .call_cancel_algorithm(cx, global, reason)
             .unwrap_or_else(|| {
-                let promise = Promise::new2(cx, global);
-                promise.resolve_native(&(), CanGc::from_cx(cx));
+                let promise = Promise::new(cx, global);
+                promise.resolve_native(cx, &());
                 Ok(promise)
             });
         let promise = result.unwrap_or_else(|error| {
             rooted!(&in(cx) let mut rval = UndefinedValue());
 
-            error.to_jsval(cx.into(), global, rval.handle_mut(), CanGc::from_cx(cx));
-            let promise = Promise::new2(cx, global);
-            promise.reject_native(&rval.handle(), CanGc::from_cx(cx));
+            error.to_jsval(cx, global, rval.handle_mut());
+            let promise = Promise::new(cx, global);
+            promise.reject_native(cx, &rval.handle());
             promise
         });
 
@@ -605,7 +573,7 @@ impl ReadableStreamDefaultController {
     }
 
     /// <https://streams.spec.whatwg.org/#rs-default-controller-private-pull>
-    pub(crate) fn perform_pull_steps(&self, read_request: &ReadRequest, can_gc: CanGc) {
+    pub(crate) fn perform_pull_steps(&self, cx: &mut JSContext, read_request: &ReadRequest) {
         // Let stream be this.[[stream]].
         // Note: the spec does not assert that there is a stream.
         let Some(stream) = self.stream.get() else {
@@ -614,10 +582,9 @@ impl ReadableStreamDefaultController {
 
         // if queue contains bytes, perform chunk steps.
         if !self.queue.is_empty() {
-            let cx = GlobalScope::get_cx();
-            rooted!(in(*cx) let mut rval = UndefinedValue());
+            rooted!(&in(cx) let mut rval = UndefinedValue());
             let result = RootedTraceableBox::new(Heap::default());
-            self.dequeue_value(cx, rval.handle_mut(), can_gc);
+            self.dequeue_value(cx, rval.handle_mut());
             result.set(*rval);
 
             // If this.[[closeRequested]] is true and this.[[queue]] is empty
@@ -626,19 +593,19 @@ impl ReadableStreamDefaultController {
                 self.clear_algorithms();
 
                 // Perform ! ReadableStreamClose(stream).
-                stream.close(can_gc);
+                stream.close(cx);
             } else {
                 // Otherwise, perform ! ReadableStreamDefaultControllerCallPullIfNeeded(this).
-                self.call_pull_if_needed(can_gc);
+                self.call_pull_if_needed(cx);
             }
             // Perform readRequest’s chunk steps, given chunk.
-            read_request.chunk_steps(result, &self.global(), can_gc);
+            read_request.chunk_steps(cx, result, &self.global());
         } else {
             // Perform ! ReadableStreamAddReadRequest(stream, readRequest).
             stream.add_read_request(read_request);
 
             // Perform ! ReadableStreamDefaultControllerCallPullIfNeeded(this).
-            self.call_pull_if_needed(can_gc);
+            self.call_pull_if_needed(cx);
         }
     }
 
@@ -650,11 +617,7 @@ impl ReadableStreamDefaultController {
 
     /// <https://streams.spec.whatwg.org/#readable-stream-default-controller-enqueue>
     #[expect(unsafe_code)]
-    pub(crate) fn enqueue(
-        &self,
-        cx: &mut js::context::JSContext,
-        chunk: SafeHandleValue,
-    ) -> Result<(), Error> {
+    pub(crate) fn enqueue(&self, cx: &mut JSContext, chunk: SafeHandleValue) -> Result<(), Error> {
         // If ! ReadableStreamDefaultControllerCanCloseOrEnqueue(controller) is false, return.
         if !self.can_close_or_enqueue() {
             return Ok(());
@@ -669,7 +632,7 @@ impl ReadableStreamDefaultController {
         // and ! ReadableStreamGetNumReadRequests(stream) > 0,
         // perform ! ReadableStreamFulfillReadRequest(stream, chunk, false).
         if stream.is_locked() && stream.get_num_read_requests() > 0 {
-            stream.fulfill_read_request(chunk, false, CanGc::from_cx(cx));
+            stream.fulfill_read_request(cx, chunk, false);
         } else {
             // Otherwise,
             // Let result be the result of performing controller.[[strategySizeAlgorithm]],
@@ -682,8 +645,7 @@ impl ReadableStreamDefaultController {
             let size = if let Some(strategy_size) = strategy_size {
                 // Note: the Rethrow exception handling is necessary,
                 // otherwise returning JSFailed will panic because no exception is pending.
-                let result =
-                    strategy_size.Call__(chunk, ExceptionHandling::Rethrow, CanGc::from_cx(cx));
+                let result = strategy_size.Call__(cx, chunk, ExceptionHandling::Rethrow);
                 match result {
                     // Let chunkSize be result.[[Value]].
                     Ok(size) => size,
@@ -693,7 +655,7 @@ impl ReadableStreamDefaultController {
                         unsafe { assert!(JS_GetPendingException(cx, rval.handle_mut())) };
 
                         // Perform ! ReadableStreamDefaultControllerError(controller, result.[[Value]]).
-                        self.error(rval.handle(), CanGc::from_cx(cx));
+                        self.error(cx, rval.handle());
 
                         // Return result.
                         // Note: we need to return a type error, because no exception is pending.
@@ -718,7 +680,7 @@ impl ReadableStreamDefaultController {
                     // First, throw the exception.
                     // Note: this must be done manually here,
                     // because `enqueue_value_with_size` does not call into JS.
-                    throw_dom_exception(cx.into(), &self.global(), error, CanGc::from_cx(cx));
+                    throw_dom_exception(cx, &self.global(), error);
 
                     // Then, get a handle to the JS val for the exception,
                     // and use that to error the stream.
@@ -726,7 +688,7 @@ impl ReadableStreamDefaultController {
                     unsafe { assert!(JS_GetPendingException(cx, rval.handle_mut())) };
 
                     // Perform ! ReadableStreamDefaultControllerError(controller, enqueueResult.[[Value]]).
-                    self.error(rval.handle(), CanGc::from_cx(cx));
+                    self.error(cx, rval.handle());
 
                     // Return enqueueResult.
                     // Note: because we threw the exception above,
@@ -737,23 +699,22 @@ impl ReadableStreamDefaultController {
         }
 
         // Perform ! ReadableStreamDefaultControllerCallPullIfNeeded(controller).
-        self.call_pull_if_needed(CanGc::from_cx(cx));
+        self.call_pull_if_needed(cx);
 
         Ok(())
     }
 
     /// Native call to
     /// <https://streams.spec.whatwg.org/#readable-stream-default-controller-enqueue>
-    pub(crate) fn enqueue_native(&self, chunk: Vec<u8>, can_gc: CanGc) {
+    pub(crate) fn enqueue_native(&self, cx: &mut JSContext, chunk: Vec<u8>) {
         let stream = self
             .stream
             .get()
             .expect("Controller must have a stream when a chunk is enqueued.");
         if stream.is_locked() && stream.get_num_read_requests() > 0 {
-            let cx = GlobalScope::get_cx();
-            rooted!(in(*cx) let mut rval = UndefinedValue());
-            EnqueuedValue::Native(chunk.into_boxed_slice()).to_jsval(cx, rval.handle_mut(), can_gc);
-            stream.fulfill_read_request(rval.handle(), false, can_gc);
+            rooted!(&in(cx) let mut rval = UndefinedValue());
+            EnqueuedValue::Native(chunk.into_boxed_slice()).to_jsval(cx, rval.handle_mut());
+            stream.fulfill_read_request(cx, rval.handle(), false);
         } else {
             self.queue
                 .enqueue_value_with_size(EnqueuedValue::Native(chunk.into_boxed_slice()))
@@ -789,7 +750,7 @@ impl ReadableStreamDefaultController {
     }
 
     /// <https://streams.spec.whatwg.org/#readable-stream-default-controller-close>
-    pub(crate) fn close(&self, can_gc: CanGc) {
+    pub(crate) fn close(&self, cx: &mut JSContext) {
         // If ! ReadableStreamDefaultControllerCanCloseOrEnqueue(controller) is false, return.
         if !self.can_close_or_enqueue() {
             return;
@@ -807,7 +768,7 @@ impl ReadableStreamDefaultController {
             self.clear_algorithms();
 
             // Perform ! ReadableStreamClose(stream).
-            stream.close(can_gc);
+            stream.close(cx);
         }
     }
 
@@ -846,7 +807,7 @@ impl ReadableStreamDefaultController {
     }
 
     /// <https://streams.spec.whatwg.org/#readable-stream-default-controller-error>
-    pub(crate) fn error(&self, e: SafeHandleValue, can_gc: CanGc) {
+    pub(crate) fn error(&self, cx: &mut JSContext, e: SafeHandleValue) {
         let Some(stream) = self.stream.get() else {
             return;
         };
@@ -862,7 +823,7 @@ impl ReadableStreamDefaultController {
         // Perform ! ReadableStreamDefaultControllerClearAlgorithms(controller).
         self.clear_algorithms();
 
-        stream.error(e, can_gc);
+        stream.error(cx, e);
     }
 
     /// <https://streams.spec.whatwg.org/#rs-default-controller-has-backpressure>
@@ -882,7 +843,7 @@ impl ReadableStreamDefaultControllerMethods<crate::DomTypeHolder>
     }
 
     /// <https://streams.spec.whatwg.org/#rs-default-controller-close>
-    fn Close(&self, can_gc: CanGc) -> Fallible<()> {
+    fn Close(&self, cx: &mut JSContext) -> Fallible<()> {
         if !self.can_close_or_enqueue() {
             // If ! ReadableStreamDefaultControllerCanCloseOrEnqueue(this) is false,
             // throw a TypeError exception.
@@ -890,13 +851,13 @@ impl ReadableStreamDefaultControllerMethods<crate::DomTypeHolder>
         }
 
         // Perform ! ReadableStreamDefaultControllerClose(this).
-        self.close(can_gc);
+        self.close(cx);
 
         Ok(())
     }
 
     /// <https://streams.spec.whatwg.org/#rs-default-controller-enqueue>
-    fn Enqueue(&self, cx: &mut js::context::JSContext, chunk: SafeHandleValue) -> Fallible<()> {
+    fn Enqueue(&self, cx: &mut JSContext, chunk: SafeHandleValue) -> Fallible<()> {
         // If ! ReadableStreamDefaultControllerCanCloseOrEnqueue(this) is false, throw a TypeError exception.
         if !self.can_close_or_enqueue() {
             return Err(Error::Type(c"Stream cannot be enqueued to.".to_owned()));
@@ -907,8 +868,8 @@ impl ReadableStreamDefaultControllerMethods<crate::DomTypeHolder>
     }
 
     /// <https://streams.spec.whatwg.org/#rs-default-controller-error>
-    fn Error(&self, cx: &mut js::context::JSContext, e: SafeHandleValue) -> Fallible<()> {
-        self.error(e, CanGc::from_cx(cx));
+    fn Error(&self, cx: &mut JSContext, e: SafeHandleValue) -> Fallible<()> {
+        self.error(cx, e);
         Ok(())
     }
 }

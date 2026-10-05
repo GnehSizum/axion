@@ -6,23 +6,23 @@ use std::cell::Cell;
 use std::str::FromStr;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use js::rust::HandleObject;
 use keyboard_types::{Code, Key, Modifiers, NamedKey};
+use script_bindings::cell::DomRefCell;
+use script_bindings::reflector::reflect_dom_object_with_proto;
 use style::Atom;
 
-use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::KeyboardEventBinding;
 use crate::dom::bindings::codegen::Bindings::KeyboardEventBinding::KeyboardEventMethods;
 use crate::dom::bindings::codegen::Bindings::UIEventBinding::UIEventMethods;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::reflect_dom_object_with_proto;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::Event;
 use crate::dom::uievent::UIEvent;
 use crate::dom::window::Window;
-use crate::script_runtime::CanGc;
 
 #[dom_struct]
 pub(crate) struct KeyboardEvent {
@@ -59,30 +59,27 @@ impl KeyboardEvent {
         }
     }
 
-    pub(crate) fn new_uninitialized(window: &Window, can_gc: CanGc) -> DomRoot<KeyboardEvent> {
-        Self::new_uninitialized_with_proto(window, None, can_gc)
+    pub(crate) fn new_uninitialized(cx: &mut JSContext, window: &Window) -> DomRoot<KeyboardEvent> {
+        Self::new_uninitialized_with_proto(cx, window, None)
     }
 
     fn new_uninitialized_with_proto(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
     ) -> DomRoot<KeyboardEvent> {
-        reflect_dom_object_with_proto(
-            Box::new(KeyboardEvent::new_inherited()),
-            window,
-            proto,
-            can_gc,
-        )
+        reflect_dom_object_with_proto(cx, Box::new(KeyboardEvent::new_inherited()), window, proto)
     }
 
     pub(crate) fn new_with_platform_keyboard_event(
+        cx: &mut JSContext,
         window: &Window,
         event_type: Atom,
         keyboard_event: &keyboard_types::KeyboardEvent,
-        can_gc: CanGc,
     ) -> DomRoot<KeyboardEvent> {
+        let keycode = legacy_keycode_for_keyboard_event(keyboard_event);
         Self::new_with_proto(
+            cx,
             window,
             None,
             event_type,
@@ -98,13 +95,13 @@ impl KeyboardEvent {
             keyboard_event.is_composing,
             keyboard_event.modifiers,
             0, /* char_code */
-            keyboard_event.key.legacy_keycode(),
-            can_gc,
+            keycode,
         )
     }
 
     #[expect(clippy::too_many_arguments)]
     fn new_with_proto(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
         event_type: Atom,
@@ -121,9 +118,8 @@ impl KeyboardEvent {
         modifiers: Modifiers,
         char_code: u32,
         key_code: u32,
-        can_gc: CanGc,
     ) -> DomRoot<KeyboardEvent> {
-        let event = KeyboardEvent::new_uninitialized_with_proto(window, proto, can_gc);
+        let event = KeyboardEvent::new_uninitialized_with_proto(cx, window, proto);
         event.init_event(
             event_type,
             can_bubble,
@@ -133,9 +129,9 @@ impl KeyboardEvent {
             location,
             repeat,
         );
-        *event.typed_key.borrow_mut() = key;
-        *event.code.borrow_mut() = code;
-        *event.original_code.borrow_mut() = original_code;
+        *event.typed_key.safe_borrow_mut(cx.no_gc()) = key;
+        *event.code.safe_borrow_mut(cx.no_gc()) = code;
+        *event.original_code.safe_borrow_mut(cx.no_gc()) = original_code;
         event.modifiers.set(modifiers);
         event.is_composing.set(is_composing);
         event.char_code.set(char_code);
@@ -188,9 +184,9 @@ impl KeyboardEvent {
 impl KeyboardEventMethods<crate::DomTypeHolder> for KeyboardEvent {
     /// <https://w3c.github.io/uievents/#dom-keyboardevent-keyboardevent>
     fn Constructor(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
         event_type: DOMString,
         init: &KeyboardEventBinding::KeyboardEventInit,
     ) -> Fallible<DomRoot<KeyboardEvent>> {
@@ -200,6 +196,7 @@ impl KeyboardEventMethods<crate::DomTypeHolder> for KeyboardEvent {
         modifiers.set(Modifiers::SHIFT, init.parent.shiftKey);
         modifiers.set(Modifiers::META, init.parent.metaKey);
         let event = KeyboardEvent::new_with_proto(
+            cx,
             window,
             proto,
             event_type.into(),
@@ -216,9 +213,8 @@ impl KeyboardEventMethods<crate::DomTypeHolder> for KeyboardEvent {
             modifiers,
             init.charCode,
             init.keyCode,
-            can_gc,
         );
-        *event.key.borrow_mut() = init.key.clone();
+        *event.key.safe_borrow_mut(cx.no_gc()) = init.key.clone();
         Ok(event)
     }
 
@@ -323,5 +319,43 @@ impl KeyboardEventMethods<crate::DomTypeHolder> for KeyboardEvent {
     /// <https://dom.spec.whatwg.org/#dom-event-istrusted>
     fn IsTrusted(&self) -> bool {
         self.uievent.IsTrusted()
+    }
+}
+
+fn legacy_keycode_for_keyboard_event(keyboard_event: &keyboard_types::KeyboardEvent) -> u32 {
+    match keyboard_event.code {
+        Code::Backquote => 192,
+        Code::MetaLeft | Code::MetaRight => 224,
+        Code::ContextMenu => 93,
+        Code::Insert => 45,
+        Code::NumLock => 144,
+        Code::PrintScreen => 4,
+        Code::ScrollLock => 145,
+        Code::Pause => 19,
+        Code::F1 => 112,
+        Code::F2 => 113,
+        Code::F3 => 114,
+        Code::F4 => 115,
+        Code::F5 => 116,
+        Code::F6 => 117,
+        Code::F7 => 118,
+        Code::F8 => 119,
+        Code::F9 => 120,
+        Code::F10 => 121,
+        Code::F11 => 122,
+        Code::F12 => 123,
+        Code::F13 => 124,
+        Code::F14 => 125,
+        Code::F15 => 126,
+        Code::F16 => 127,
+        Code::F17 => 128,
+        Code::F18 => 129,
+        Code::F19 => 130,
+        Code::F20 => 131,
+        Code::F21 => 132,
+        Code::F22 => 133,
+        Code::F23 => 134,
+        Code::F24 => 135,
+        _ => keyboard_event.key.legacy_keycode(),
     }
 }

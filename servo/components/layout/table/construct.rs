@@ -2,11 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::borrow::Cow;
 use std::iter::repeat_n;
 
 use atomic_refcell::AtomicRef;
-use layout_api::wrapper_traits::ThreadSafeLayoutNode;
+use layout_api::LayoutNode;
 use log::warn;
 use servo_arc::Arc;
 use style::properties::ComputedValues;
@@ -21,7 +20,10 @@ use super::{
 use crate::cell::ArcRefCell;
 use crate::context::LayoutContext;
 use crate::dom::{BoxSlot, LayoutBox, NodeExt};
-use crate::dom_traversal::{Contents, NodeAndStyleInfo, NonReplacedContents, TraversalHandler};
+use crate::dom_traversal::{
+    BoxTreeString, Contents, NodeAndStyleInfo, NonReplacedContents, TraversalHandler,
+};
+use crate::flow::inline::SharedInlineStyles;
 use crate::flow::{BlockContainerBuilder, BlockFormattingContext};
 use crate::formatting_contexts::{
     IndependentFormattingContext, IndependentFormattingContextContents,
@@ -42,14 +44,16 @@ impl ResolvedSlotAndLocation<'_> {
     fn covers_cell_at(&self, coords: TableSlotCoordinates) -> bool {
         let covered_in_x =
             coords.x >= self.coords.x && coords.x < self.coords.x + self.cell.colspan;
-        let covered_in_y = coords.y >= self.coords.y
-            && (self.cell.rowspan == 0 || coords.y < self.coords.y + self.cell.rowspan);
+        let covered_in_y = coords.y >= self.coords.y &&
+            (self.cell.rowspan == 0 || coords.y < self.coords.y + self.cell.rowspan);
         covered_in_x && covered_in_y
     }
 }
 
 pub(crate) enum AnonymousTableContent<'dom> {
-    Text(NodeAndStyleInfo<'dom>, Cow<'dom, str>),
+    Text(NodeAndStyleInfo<'dom>, BoxTreeString<'dom>),
+    EnterDisplayContents(SharedInlineStyles),
+    LeaveDisplayContents,
     Element {
         info: NodeAndStyleInfo<'dom>,
         display: DisplayGeneratingBox,
@@ -63,11 +67,30 @@ impl AnonymousTableContent<'_> {
         match self {
             Self::Element { .. } => false,
             Self::Text(_, text) => text.chars().all(char_is_whitespace),
+            Self::EnterDisplayContents(_) | Self::LeaveDisplayContents => true,
         }
     }
 
-    fn contents_are_whitespace_only(contents: &[Self]) -> bool {
-        contents.iter().all(|content| content.is_whitespace_only())
+    // If all contents are whitespace only, it removes them except for unclosed
+    // EnterDisplayContents, and returns true. Otherwise, it returns false.
+    fn remove_whitespace_only(contents: &mut Vec<Self>) -> bool {
+        if !contents.iter().all(Self::is_whitespace_only) {
+            return false;
+        }
+        let mut enter_display_contents = vec![];
+        for content in contents.drain(..) {
+            match content {
+                AnonymousTableContent::EnterDisplayContents(_) => {
+                    enter_display_contents.push(content);
+                },
+                AnonymousTableContent::LeaveDisplayContents => {
+                    enter_display_contents.pop();
+                },
+                _ => {},
+            }
+        }
+        std::mem::swap(contents, &mut enter_display_contents);
+        true
     }
 }
 
@@ -86,6 +109,7 @@ impl Table {
 
     pub(crate) fn construct_anonymous<'dom>(
         context: &LayoutContext,
+        parent: &mut impl TraversalHandler<'dom>,
         parent_info: &NodeAndStyleInfo<'dom>,
         contents: Vec<AnonymousTableContent<'dom>>,
         propagated_data: PropagatedBoxTreeData,
@@ -112,6 +136,13 @@ impl Table {
                     // We only collect that whitespace in case we need to re-emit trailing whitespace
                     // after we've added our anonymous table.
                 },
+                // Since the table builder skips text, we don't have to handle `display: contents` there.
+                // But we need to handle it for the parent builder, because it may contain trailing
+                // whitespace which won't be placed inside the table.
+                AnonymousTableContent::EnterDisplayContents(styles) => {
+                    parent.enter_display_contents(styles)
+                },
+                AnonymousTableContent::LeaveDisplayContents => parent.leave_display_contents(),
             }
         }
 
@@ -265,8 +296,8 @@ impl TableBuilder {
     /// This matches WebKit, and some tests require it, but Gecko and Blink don't do it.
     fn adjust_table_geometry_for_columns_and_colgroups(&mut self) {
         if self.table.rows.is_empty() && self.table.row_groups.is_empty() {
-            self.table.columns.truncate(0);
-            self.table.column_groups.truncate(0);
+            self.table.columns.clear();
+            self.table.column_groups.clear();
         } else {
             self.table.size.width = self.table.size.width.max(self.table.columns.len());
         }
@@ -680,12 +711,9 @@ impl<'style, 'dom> TableBuilderTraversal<'style, 'dom> {
     }
 
     fn finish_anonymous_row_if_needed(&mut self) {
-        if AnonymousTableContent::contents_are_whitespace_only(&self.current_anonymous_row_content)
-        {
-            self.current_anonymous_row_content.clear();
+        if AnonymousTableContent::remove_whitespace_only(&mut self.current_anonymous_row_content) {
             return;
         }
-
         let row_content = std::mem::take(&mut self.current_anonymous_row_content);
         let anonymous_info = self
             .info
@@ -694,6 +722,7 @@ impl<'style, 'dom> TableBuilderTraversal<'style, 'dom> {
         let mut row_builder =
             TableRowBuilder::new(self, &anonymous_info, self.current_propagated_data);
 
+        let mut enter_display_contents = vec![];
         for cell_content in row_content {
             match cell_content {
                 AnonymousTableContent::Element {
@@ -707,10 +736,18 @@ impl<'style, 'dom> TableBuilderTraversal<'style, 'dom> {
                 AnonymousTableContent::Text(info, text) => {
                     row_builder.handle_text(&info, text);
                 },
+                AnonymousTableContent::EnterDisplayContents(ref styles) => {
+                    row_builder.enter_display_contents(styles.clone());
+                    enter_display_contents.push(cell_content);
+                },
+                AnonymousTableContent::LeaveDisplayContents => {
+                    row_builder.leave_display_contents();
+                    enter_display_contents.pop();
+                },
             }
         }
-
         row_builder.finish();
+        self.current_anonymous_row_content = enter_display_contents;
 
         let style = anonymous_info.style.clone();
         let table_row = ArcRefCell::new(TableTrack {
@@ -739,9 +776,19 @@ impl<'style, 'dom> TableBuilderTraversal<'style, 'dom> {
 }
 
 impl<'dom> TraversalHandler<'dom> for TableBuilderTraversal<'_, 'dom> {
-    fn handle_text(&mut self, info: &NodeAndStyleInfo<'dom>, text: Cow<'dom, str>) {
+    fn handle_text(&mut self, info: &NodeAndStyleInfo<'dom>, text: BoxTreeString<'dom>) {
         self.current_anonymous_row_content
             .push(AnonymousTableContent::Text(info.clone(), text));
+    }
+
+    fn enter_display_contents(&mut self, styles: SharedInlineStyles) {
+        self.current_anonymous_row_content
+            .push(AnonymousTableContent::EnterDisplayContents(styles));
+    }
+
+    fn leave_display_contents(&mut self) {
+        self.current_anonymous_row_content
+            .push(AnonymousTableContent::LeaveDisplayContents);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#forming-a-table>
@@ -754,9 +801,9 @@ impl<'dom> TraversalHandler<'dom> for TableBuilderTraversal<'_, 'dom> {
     ) {
         match display {
             DisplayGeneratingBox::LayoutInternal(internal) => match internal {
-                DisplayLayoutInternal::TableRowGroup
-                | DisplayLayoutInternal::TableFooterGroup
-                | DisplayLayoutInternal::TableHeaderGroup => {
+                DisplayLayoutInternal::TableRowGroup |
+                DisplayLayoutInternal::TableFooterGroup |
+                DisplayLayoutInternal::TableHeaderGroup => {
                     self.finish_anonymous_row_if_needed();
                     self.builder.incoming_rowspans.clear();
 
@@ -770,16 +817,20 @@ impl<'dom> TraversalHandler<'dom> for TableBuilderTraversal<'_, 'dom> {
                     self.builder.table.row_groups.push(row_group.clone());
 
                     let new_row_group_index = self.builder.table.row_groups.len() - 1;
-                    self.current_row_group_index = Some(new_row_group_index);
+                    let context = self.context;
+                    let mut row_group_builder = TableRowGroupBuilder::new(
+                        self,
+                        info,
+                        self.current_propagated_data,
+                        new_row_group_index,
+                    );
 
                     contents
                         .non_replaced_contents()
                         .expect("Replaced should not have a LayoutInternal display type.")
-                        .traverse(self.context, info, self);
-                    self.finish_anonymous_row_if_needed();
+                        .traverse(context, info, &mut row_group_builder);
 
-                    self.current_row_group_index = None;
-                    self.builder.incoming_rowspans.clear();
+                    row_group_builder.finish();
 
                     box_slot.set(LayoutBox::TableLevelBox(TableLevelBox::TrackGroup(
                         row_group,
@@ -917,6 +968,159 @@ impl<'dom> TraversalHandler<'dom> for TableBuilderTraversal<'_, 'dom> {
     }
 }
 
+struct TableRowGroupBuilder<'style, 'builder, 'dom, 'a> {
+    table_traversal: &'builder mut TableBuilderTraversal<'style, 'dom>,
+    info: &'a NodeAndStyleInfo<'dom>,
+    propagated_data: PropagatedBoxTreeData,
+    current_anonymous_row_content: Vec<AnonymousTableContent<'dom>>,
+}
+
+impl<'style, 'builder, 'dom, 'a> TableRowGroupBuilder<'style, 'builder, 'dom, 'a> {
+    fn new(
+        table_traversal: &'builder mut TableBuilderTraversal<'style, 'dom>,
+        info: &'a NodeAndStyleInfo<'dom>,
+        propagated_data: PropagatedBoxTreeData,
+        row_group_index: usize,
+    ) -> Self {
+        // Row groups are only opened from TableBuilderTraversal, never nested, so current_row_group_index is always None here.
+        debug_assert!(table_traversal.current_row_group_index.is_none());
+        table_traversal.current_row_group_index = Some(row_group_index);
+
+        Self {
+            table_traversal,
+            info,
+            propagated_data,
+            current_anonymous_row_content: Vec::new(),
+        }
+    }
+
+    fn finish(mut self) {
+        self.finish_anonymous_row_if_needed();
+        self.table_traversal.current_row_group_index = None;
+        self.table_traversal.builder.incoming_rowspans.clear();
+    }
+
+    fn finish_anonymous_row_if_needed(&mut self) {
+        if AnonymousTableContent::remove_whitespace_only(&mut self.current_anonymous_row_content) {
+            return;
+        }
+
+        let row_content = std::mem::take(&mut self.current_anonymous_row_content);
+        let anonymous_info = self
+            .info
+            .with_pseudo_element(
+                self.table_traversal.context,
+                PseudoElement::ServoAnonymousTableRow,
+            )
+            .expect("Should never fail to create anonymous row info.");
+
+        let mut row_builder =
+            TableRowBuilder::new(self.table_traversal, &anonymous_info, self.propagated_data);
+
+        let mut enter_display_contents = vec![];
+        for cell_content in row_content {
+            match cell_content {
+                AnonymousTableContent::Element {
+                    info,
+                    display,
+                    contents,
+                    box_slot,
+                } => {
+                    row_builder.handle_element(&info, display, contents, box_slot);
+                },
+                AnonymousTableContent::Text(info, text) => {
+                    row_builder.handle_text(&info, text);
+                },
+                AnonymousTableContent::EnterDisplayContents(ref styles) => {
+                    row_builder.enter_display_contents(styles.clone());
+                    enter_display_contents.push(cell_content);
+                },
+                AnonymousTableContent::LeaveDisplayContents => {
+                    row_builder.leave_display_contents();
+                    enter_display_contents.pop();
+                },
+            }
+        }
+        self.current_anonymous_row_content = enter_display_contents;
+
+        row_builder.finish();
+
+        let style = anonymous_info.style.clone();
+        let table_row = ArcRefCell::new(TableTrack {
+            base: LayoutBoxBase::new((&anonymous_info).into(), style.clone()),
+            group_index: self.table_traversal.current_row_group_index,
+            is_anonymous: true,
+            shared_background_style: SharedStyle::new(style),
+        });
+        self.table_traversal.push_table_row(table_row.clone());
+
+        anonymous_info
+            .node
+            .box_slot()
+            .set(LayoutBox::TableLevelBox(TableLevelBox::Track(table_row)));
+    }
+}
+
+impl<'dom> TraversalHandler<'dom> for TableRowGroupBuilder<'_, '_, 'dom, '_> {
+    fn handle_text(&mut self, info: &NodeAndStyleInfo<'dom>, text: BoxTreeString<'dom>) {
+        self.current_anonymous_row_content
+            .push(AnonymousTableContent::Text(info.clone(), text));
+    }
+
+    fn enter_display_contents(&mut self, styles: SharedInlineStyles) {
+        self.current_anonymous_row_content
+            .push(AnonymousTableContent::EnterDisplayContents(styles));
+    }
+
+    fn leave_display_contents(&mut self) {
+        self.current_anonymous_row_content
+            .push(AnonymousTableContent::LeaveDisplayContents);
+    }
+
+    fn handle_element(
+        &mut self,
+        info: &NodeAndStyleInfo<'dom>,
+        display: DisplayGeneratingBox,
+        contents: Contents,
+        box_slot: BoxSlot<'dom>,
+    ) {
+        match display {
+            DisplayGeneratingBox::LayoutInternal(DisplayLayoutInternal::TableRow) => {
+                self.finish_anonymous_row_if_needed();
+
+                let context = self.table_traversal.context;
+                let mut row_builder =
+                    TableRowBuilder::new(self.table_traversal, info, self.propagated_data);
+
+                contents
+                    .non_replaced_contents()
+                    .expect("Replaced should not have a LayoutInternal display type.")
+                    .traverse(context, info, &mut row_builder);
+                row_builder.finish();
+
+                let row = ArcRefCell::new(TableTrack {
+                    base: LayoutBoxBase::new(info.into(), info.style.clone()),
+                    group_index: self.table_traversal.current_row_group_index,
+                    is_anonymous: false,
+                    shared_background_style: SharedStyle::new(info.style.clone()),
+                });
+                self.table_traversal.push_table_row(row.clone());
+                box_slot.set(LayoutBox::TableLevelBox(TableLevelBox::Track(row)));
+            },
+
+            _ => {
+                self.current_anonymous_row_content
+                    .push(AnonymousTableContent::Element {
+                        info: info.clone(),
+                        display,
+                        contents,
+                        box_slot,
+                    });
+            },
+        }
+    }
+}
+
 struct TableRowBuilder<'style, 'builder, 'dom, 'a> {
     table_traversal: &'builder mut TableBuilderTraversal<'style, 'dom>,
 
@@ -952,9 +1156,7 @@ impl<'style, 'builder, 'dom, 'a> TableRowBuilder<'style, 'builder, 'dom, 'a> {
     }
 
     fn finish_current_anonymous_cell_if_needed(&mut self) {
-        if AnonymousTableContent::contents_are_whitespace_only(&self.current_anonymous_cell_content)
-        {
-            self.current_anonymous_cell_content.clear();
+        if AnonymousTableContent::remove_whitespace_only(&mut self.current_anonymous_cell_content) {
             return;
         }
 
@@ -966,6 +1168,7 @@ impl<'style, 'builder, 'dom, 'a> TableRowBuilder<'style, 'builder, 'dom, 'a> {
         let propagated_data = self.propagated_data.disallowing_percentage_table_columns();
         let mut builder = BlockContainerBuilder::new(context, &anonymous_info, propagated_data);
 
+        let mut enter_display_contents = vec![];
         for cell_content in self.current_anonymous_cell_content.drain(..) {
             match cell_content {
                 AnonymousTableContent::Element {
@@ -979,8 +1182,17 @@ impl<'style, 'builder, 'dom, 'a> TableRowBuilder<'style, 'builder, 'dom, 'a> {
                 AnonymousTableContent::Text(info, text) => {
                     builder.handle_text(&info, text);
                 },
+                AnonymousTableContent::EnterDisplayContents(ref styles) => {
+                    builder.enter_display_contents(styles.clone());
+                    enter_display_contents.push(cell_content);
+                },
+                AnonymousTableContent::LeaveDisplayContents => {
+                    builder.leave_display_contents();
+                    enter_display_contents.pop();
+                },
             }
         }
+        self.current_anonymous_cell_content = enter_display_contents;
 
         let block_container = builder.finish();
         let new_table_cell = ArcRefCell::new(TableSlotCell {
@@ -1008,9 +1220,19 @@ impl<'style, 'builder, 'dom, 'a> TableRowBuilder<'style, 'builder, 'dom, 'a> {
 }
 
 impl<'dom> TraversalHandler<'dom> for TableRowBuilder<'_, '_, 'dom, '_> {
-    fn handle_text(&mut self, info: &NodeAndStyleInfo<'dom>, text: Cow<'dom, str>) {
+    fn handle_text(&mut self, info: &NodeAndStyleInfo<'dom>, text: BoxTreeString<'dom>) {
         self.current_anonymous_cell_content
             .push(AnonymousTableContent::Text(info.clone(), text));
+    }
+
+    fn enter_display_contents(&mut self, styles: SharedInlineStyles) {
+        self.current_anonymous_cell_content
+            .push(AnonymousTableContent::EnterDisplayContents(styles));
+    }
+
+    fn leave_display_contents(&mut self) {
+        self.current_anonymous_cell_content
+            .push(AnonymousTableContent::LeaveDisplayContents);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#algorithm-for-processing-rows>
@@ -1037,8 +1259,8 @@ impl<'dom> TraversalHandler<'dom> for TableRowBuilder<'_, '_, 'dom, '_> {
                         // This value will already have filtered out rowspan=0
                         // in quirks mode, so we don't have to worry about that.
                         let (rowspan, colspan) = if info.pseudo_element_chain().is_empty() {
-                            let rowspan = info.node.get_rowspan().unwrap_or(1) as usize;
-                            let colspan = info.node.get_colspan().unwrap_or(1) as usize;
+                            let rowspan = info.node.table_rowspan().unwrap_or(1) as usize;
+                            let colspan = info.node.table_colspan().unwrap_or(1) as usize;
 
                             // The HTML specification clamps value of `rowspan` to [0, 65534] and
                             // `colspan` to [1, 1000].
@@ -1108,7 +1330,9 @@ struct TableColumnGroupBuilder {
 }
 
 impl<'dom> TraversalHandler<'dom> for TableColumnGroupBuilder {
-    fn handle_text(&mut self, _info: &NodeAndStyleInfo<'dom>, _text: Cow<'dom, str>) {}
+    fn handle_text(&mut self, _info: &NodeAndStyleInfo<'dom>, _text: BoxTreeString<'dom>) {}
+    fn enter_display_contents(&mut self, _: SharedInlineStyles) {}
+    fn leave_display_contents(&mut self) {}
     fn handle_element(
         &mut self,
         info: &NodeAndStyleInfo<'dom>,
@@ -1161,7 +1385,7 @@ fn add_column(
     old_column: Option<ArcRefCell<TableTrack>>,
 ) -> ArcRefCell<TableTrack> {
     let span = if column_info.pseudo_element_chain().is_empty() {
-        column_info.node.get_span().unwrap_or(1)
+        column_info.node.table_span().unwrap_or(1)
     } else {
         1
     };
@@ -1169,14 +1393,18 @@ fn add_column(
     // The HTML specification clamps value of `span` for `<col>` to [1, 1000].
     assert!((1..=1000).contains(&span));
 
-    let column = old_column.unwrap_or_else(|| {
-        ArcRefCell::new(TableTrack {
+    let column = match old_column {
+        Some(column) => {
+            column.borrow_mut().group_index = group_index;
+            column
+        },
+        None => ArcRefCell::new(TableTrack {
             base: LayoutBoxBase::new(column_info.into(), column_info.style.clone()),
             group_index,
             is_anonymous,
             shared_background_style: SharedStyle::new(column_info.style.clone()),
-        })
-    });
+        }),
+    };
     collection.extend(repeat_n(column.clone(), span as usize));
     column
 }

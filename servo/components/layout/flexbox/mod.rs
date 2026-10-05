@@ -4,7 +4,7 @@
 
 use geom::{FlexAxis, MainStartCrossStart};
 use malloc_size_of_derive::MallocSizeOf;
-use script::layout_dom::ServoThreadSafeLayoutNode;
+use script::layout_dom::ServoLayoutNode;
 use servo_arc::Arc as ServoArc;
 use style::context::SharedStyleContext;
 use style::logical_geometry::WritingMode;
@@ -148,6 +148,13 @@ impl FlexContainer {
         self.config = FlexContainerConfig::new(new_style);
         self.style = new_style.clone();
     }
+
+    pub(crate) fn subtree_size(&self) -> usize {
+        self.children
+            .iter()
+            .map(|child| child.borrow().with_base(|base| base.subtree_size()))
+            .sum()
+    }
 }
 
 #[expect(clippy::large_enum_variant)]
@@ -161,7 +168,7 @@ impl FlexLevelBox {
     pub(crate) fn repair_style(
         &mut self,
         context: &SharedStyleContext,
-        node: &ServoThreadSafeLayoutNode,
+        node: &ServoLayoutNode,
         new_style: &ServoArc<ComputedValues>,
     ) {
         match self {

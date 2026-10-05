@@ -5,20 +5,20 @@
 use std::rc::Rc;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use js::rust::HandleObject;
 use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 
 use crate::dom::bindings::codegen::Bindings::XPathEvaluatorBinding::XPathEvaluatorMethods;
 use crate::dom::bindings::codegen::Bindings::XPathNSResolverBinding::XPathNSResolver;
 use crate::dom::bindings::error::Fallible;
-use crate::dom::bindings::reflector::{Reflector, reflect_dom_object_with_proto};
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::node::Node;
 use crate::dom::window::Window;
 use crate::dom::xpathexpression::XPathExpression;
 use crate::dom::xpathresult::XPathResult;
-use crate::script_runtime::CanGc;
 use crate::xpath::parse_expression;
 
 #[dom_struct]
@@ -36,15 +36,15 @@ impl XPathEvaluator {
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
     ) -> DomRoot<XPathEvaluator> {
         reflect_dom_object_with_proto(
+            cx,
             Box::new(XPathEvaluator::new_inherited(window)),
             window,
             proto,
-            can_gc,
         )
     }
 }
@@ -52,29 +52,30 @@ impl XPathEvaluator {
 impl XPathEvaluatorMethods<crate::DomTypeHolder> for XPathEvaluator {
     /// <https://dom.spec.whatwg.org/#dom-xpathevaluator-xpathevaluator>
     fn Constructor(
+        cx: &mut JSContext,
         window: &Window,
         proto: Option<HandleObject>,
-        can_gc: CanGc,
     ) -> DomRoot<XPathEvaluator> {
-        XPathEvaluator::new(window, proto, can_gc)
+        XPathEvaluator::new(cx, window, proto)
     }
 
     /// <https://dom.spec.whatwg.org/#dom-xpathevaluatorbase-createexpression>
     fn CreateExpression(
         &self,
+        cx: &mut JSContext,
         expression: DOMString,
         resolver: Option<Rc<XPathNSResolver>>,
-        can_gc: CanGc,
     ) -> Fallible<DomRoot<XPathExpression>> {
         let parsed_expression = parse_expression(
+            cx,
             &expression.str(),
             resolver,
             self.window.Document().is_html_document(),
         )?;
         Ok(XPathExpression::new(
+            cx,
             &self.window,
             None,
-            can_gc,
             parsed_expression,
         ))
     }
@@ -88,19 +89,20 @@ impl XPathEvaluatorMethods<crate::DomTypeHolder> for XPathEvaluator {
     /// <https://dom.spec.whatwg.org/#dom-xpathevaluatorbase-evaluate>
     fn Evaluate(
         &self,
+        cx: &mut JSContext,
         expression: DOMString,
         context_node: &Node,
         resolver: Option<Rc<XPathNSResolver>>,
         result_type: u16,
         result: Option<&XPathResult>,
-        can_gc: CanGc,
     ) -> Fallible<DomRoot<XPathResult>> {
         let parsed_expression = parse_expression(
+            cx,
             &expression.str(),
             resolver,
             self.window.Document().is_html_document(),
         )?;
-        let expression = XPathExpression::new(&self.window, None, can_gc, parsed_expression);
-        expression.evaluate_internal(context_node, result_type, result, can_gc)
+        let expression = XPathExpression::new(cx, &self.window, None, parsed_expression);
+        expression.evaluate_internal(cx, context_node, result_type, result)
     }
 }

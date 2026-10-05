@@ -71,8 +71,8 @@ impl WebGLValidator for CommonTexImage3DValidator<'_> {
         // format.
         let internal_format = match TexFormat::from_gl_constant(self.internal_format) {
             Some(format)
-                if format.required_webgl_version() <= self.context.webgl_version()
-                    && format.usable_as_internal() =>
+                if format.required_webgl_version() <= self.context.webgl_version() &&
+                    format.usable_as_internal() =>
             {
                 format
             },
@@ -92,7 +92,11 @@ impl WebGLValidator for CommonTexImage3DValidator<'_> {
         let height = self.height as u32;
         let depth = self.depth as u32;
         let level = self.level as u32;
-        if width > max_size || height > max_size || level > max_size {
+        // The maximum width/height/depth values at level 0 are GL_MAX_3D_TEXTURE_SIZE,
+        // and per https://wikis.khronos.org/opengl/Texture#Texture_completeness,
+        // the ones at level N must be half of those at level N-1.
+        let max_size_for_level = max_size / 2u32.pow(level);
+        if width > max_size_for_level || height > max_size_for_level || depth > max_size_for_level {
             self.context.webgl_error(InvalidValue);
             return Err(TexImageValidationError::TextureTooBig);
         }
@@ -260,8 +264,8 @@ impl WebGLValidator for TexImage3DValidator<'_> {
 
         // GL_INVALID_OPERATION is generated if target is GL_TEXTURE_3D and
         // format is GL_DEPTH_COMPONENT, or GL_DEPTH_STENCIL.
-        if target == TexImageTarget::Texture3D
-            && (format == TexFormat::DepthComponent || format == TexFormat::DepthStencil)
+        if target == TexImageTarget::Texture3D &&
+            (format == TexFormat::DepthComponent || format == TexFormat::DepthStencil)
         {
             context.webgl_error(InvalidOperation);
             return Err(TexImageValidationError::InvalidTypeForFormat);

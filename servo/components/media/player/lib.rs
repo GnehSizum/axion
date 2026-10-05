@@ -5,9 +5,6 @@
 use std::ops::Range;
 use std::time::Duration;
 
-pub extern crate ipc_channel;
-#[macro_use]
-extern crate serde_derive;
 extern crate servo_media_streams as streams;
 extern crate servo_media_traits;
 
@@ -16,7 +13,8 @@ pub mod context;
 pub mod metadata;
 pub mod video;
 
-use ipc_channel::ipc::{self, IpcSender};
+use serde::{Deserialize, Serialize};
+use servo_base::generic_channel::{self, GenericSender};
 use servo_media_traits::MediaInstance;
 use streams::registry::MediaStreamId;
 
@@ -49,16 +47,17 @@ pub enum PlayerError {
     SetTrackFailed,
 }
 
-pub type SeekLockMsg = (bool, IpcSender<()>);
+pub type SeekLockMsg = (bool, GenericSender<()>);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SeekLock {
-    pub lock_channel: IpcSender<SeekLockMsg>,
+    pub lock_channel: GenericSender<SeekLockMsg>,
 }
 
 impl SeekLock {
     pub fn unlock(&self, result: bool) {
-        let (ack_sender, ack_recv) = ipc::channel::<()>().expect("Could not create IPC channel");
+        let (ack_sender, ack_recv) =
+            generic_channel::channel::<()>().expect("Could not create IPC channel");
         self.lock_channel.send((result, ack_sender)).unwrap();
         ack_recv.recv().unwrap()
     }
@@ -110,6 +109,7 @@ pub trait Player: Send + MediaInstance {
     fn set_volume(&self, volume: f64) -> Result<(), PlayerError>;
     fn volume(&self) -> f64;
     fn set_input_size(&self, size: u64) -> Result<(), PlayerError>;
+    fn set_seekable(&self, seekable: bool) -> Result<(), PlayerError>;
     fn set_playback_rate(&self, playback_rate: f64) -> Result<(), PlayerError>;
     fn playback_rate(&self) -> f64;
     fn push_data(&self, data: Vec<u8>) -> Result<(), PlayerError>;

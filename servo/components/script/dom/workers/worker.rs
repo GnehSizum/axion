@@ -14,19 +14,20 @@ use js::jsapi::{Heap, JSObject};
 use js::jsval::UndefinedValue;
 use js::rust::{CustomAutoRooter, CustomAutoRooterGuard, HandleObject, HandleValue};
 use net_traits::request::Referrer;
+use script_bindings::cell::DomRefCell;
+use script_bindings::reflector::reflect_dom_object_with_proto;
 use servo_base::generic_channel;
 use servo_constellation_traits::{StructuredSerializedData, WorkerScriptLoadOrigin};
 use uuid::Uuid;
 
 use crate::dom::abstractworker::{MessageData, SimpleWorkerErrorHandler, WorkerScriptMsg};
-use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::MessagePortBinding::StructuredSerializeOptions;
 use crate::dom::bindings::codegen::Bindings::WorkerBinding::{WorkerMethods, WorkerOptions};
 use crate::dom::bindings::codegen::UnionTypes::TrustedScriptURLOrUSVString;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
-use crate::dom::bindings::reflector::{DomGlobal, reflect_dom_object_with_proto};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::structuredclone;
 use crate::dom::bindings::trace::{CustomTraceable, RootedTraceableBox};
@@ -36,12 +37,14 @@ use crate::dom::dedicatedworkerglobalscope::{
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::messageevent::MessageEvent;
+use crate::dom::sharedworkerglobalscope::SharedWorkerGlobalScope;
 use crate::dom::trustedtypes::trustedscripturl::TrustedScriptURL;
 use crate::dom::window::Window;
 use crate::dom::workerglobalscope::prepare_workerscope_init;
 use crate::realms::enter_auto_realm;
-use crate::script_runtime::{CanGc, ThreadSafeJSContext};
-use crate::task::TaskOnce;
+use crate::runtime::script_runtime::ThreadSafeJSContext;
+use crate::tasks::task::TaskOnce;
+use crate::url::ensure_blob_referenced_by_url_is_kept_alive;
 
 pub(crate) type TrustedWorkerAddress = Trusted<Worker>;
 
@@ -72,17 +75,17 @@ impl Worker {
     }
 
     fn new(
+        cx: &mut JSContext,
         global: &GlobalScope,
         proto: Option<HandleObject>,
         sender: Sender<DedicatedWorkerScriptMsg>,
         closing: Arc<AtomicBool>,
-        can_gc: CanGc,
     ) -> DomRoot<Worker> {
         reflect_dom_object_with_proto(
+            cx,
             Box::new(Worker::new_inherited(sender, closing)),
             global,
             proto,
-            can_gc,
         )
     }
 
@@ -114,27 +117,20 @@ impl Worker {
         let mut realm = enter_auto_realm(cx, target);
         let cx = &mut realm.current_realm();
         rooted!(&in(cx) let mut message = UndefinedValue());
-        if let Ok(ports) =
-            structuredclone::read(&global, data, message.handle_mut(), CanGc::from_cx(cx))
-        {
-            MessageEvent::dispatch_jsval(
-                target,
-                &global,
-                message.handle(),
-                None,
-                None,
-                ports,
-                CanGc::from_cx(cx),
-            );
+        if let Ok(ports) = structuredclone::read(cx, &global, data, message.handle_mut()) {
+            MessageEvent::dispatch_jsval(cx, target, &global, message.handle(), None, None, ports);
         } else {
             // Step 4 of the "port post message steps" of the implicit messageport, fire messageerror.
-            MessageEvent::dispatch_error(target, &global, CanGc::from_cx(cx));
+            MessageEvent::dispatch_error(cx, target, &global);
         }
     }
 
-    pub(crate) fn dispatch_simple_error(address: TrustedWorkerAddress, can_gc: CanGc) {
+    pub(crate) fn dispatch_simple_error(
+        cx: &mut js::context::JSContext,
+        address: TrustedWorkerAddress,
+    ) {
         let worker = address.root();
-        worker.upcast().fire_event(atom!("error"), can_gc);
+        worker.upcast().fire_event(cx, atom!("error"));
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-dedicatedworkerglobalscope-postmessage>
@@ -144,7 +140,7 @@ impl Worker {
         message: HandleValue,
         transfer: CustomAutoRooterGuard<Vec<*mut JSObject>>,
     ) -> ErrorResult {
-        let data = structuredclone::write(cx.into(), message, Some(transfer))?;
+        let data = structuredclone::write(cx, message, Some(transfer))?;
         let address = Trusted::new(self);
 
         // NOTE: step 9 of https://html.spec.whatwg.org/multipage/#dom-messageport-postmessage
@@ -153,6 +149,7 @@ impl Worker {
             address,
             WorkerScriptMsg::DOMMessage(MessageData {
                 origin: self.global().origin().immutable().clone(),
+                pipeline_id: self.global().pipeline_id(),
                 data: Box::new(data),
             }),
         ));
@@ -161,9 +158,9 @@ impl Worker {
 }
 
 impl WorkerMethods<crate::DomTypeHolder> for Worker {
-    // https://html.spec.whatwg.org/multipage/#dom-worker
+    /// <https://html.spec.whatwg.org/multipage/#dom-worker>
     fn Constructor(
-        cx: &mut js::context::JSContext,
+        cx: &mut JSContext,
         global: &GlobalScope,
         proto: Option<HandleObject>,
         script_url: TrustedScriptURLOrUSVString,
@@ -178,21 +175,22 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
             script_url,
             "Worker constructor",
         )?;
-        // Step 2-4.
-        let worker_url = match global.encoding_parse_a_url(&compliant_script_url.str()) {
-            Ok(url) => url,
-            Err(_) => return Err(Error::Syntax(None)),
+        // Step 2. Let outsideSettings be this's relevant settings object.
+        // Step 3. Let workerURL be the result of encoding-parsing a URL given compliantScriptURL,
+        // relative to outsideSettings.
+        // TODO: Locking the URL should eventually happen inside encoding_parse_a_url, since most callers
+        // will expect their blobs to be kept alive...
+        let Ok(worker_url) = global
+            .encoding_parse_a_url(&compliant_script_url.str())
+            .map(|url| ensure_blob_referenced_by_url_is_kept_alive(global, url))
+        else {
+            // Step 4. If workerURL is failure, then throw a "SyntaxError" DOMException.
+            return Err(Error::Syntax(None));
         };
 
         let (sender, receiver) = unbounded();
         let closing = Arc::new(AtomicBool::new(false));
-        let worker = Worker::new(
-            global,
-            proto,
-            sender.clone(),
-            closing.clone(),
-            CanGc::from_cx(cx),
-        );
+        let worker = Worker::new(cx, global, proto, sender.clone(), closing.clone());
         let worker_ref = Trusted::new(&*worker);
 
         let worker_load_origin = WorkerScriptLoadOrigin {
@@ -215,17 +213,22 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
                 global
                     .downcast::<DedicatedWorkerGlobalScope>()
                     .and_then(|w| w.browsing_context())
+                    .or_else(|| {
+                        global
+                            .downcast::<SharedWorkerGlobalScope>()
+                            .and_then(|w| w.browsing_context())
+                    })
             });
 
         let (devtools_sender, devtools_receiver) = generic_channel::channel().unwrap();
         let worker_id = WorkerId(Uuid::new_v4());
         if let Some(chan) = global.devtools_chan() {
             let pipeline_id = global.pipeline_id();
-            let title = format!("Worker for {}", worker_url);
+            let title = format!("Worker for {}", worker_url.url());
             if let Some(browsing_context) = browsing_context {
                 let page_info = DevtoolsPageInfo {
                     title,
-                    url: worker_url.clone(),
+                    url: worker_url.url(),
                     is_top_level_global: false,
                     is_service_worker: false,
                 };
@@ -237,7 +240,21 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
             }
         }
 
-        let init = prepare_workerscope_init(global, Some(devtools_sender), Some(worker_id));
+        #[cfg(feature = "webgl")]
+        let webgl_chan = global
+            .downcast::<Window>()
+            .and_then(|window| window.webgl_chan_value());
+        let init = prepare_workerscope_init(
+            global,
+            Some(devtools_sender),
+            Some(worker_id),
+            #[cfg(feature = "webgl")]
+            webgl_chan,
+        );
+        let animation_frame_provider_supported = global
+            .downcast::<DedicatedWorkerGlobalScope>()
+            .map(|worker| worker.animation_frame_provider_supported_flag())
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(init.animation_frame_provider_supported)));
 
         let (control_sender, control_receiver) = unbounded();
         let (context_sender, context_receiver) = unbounded();
@@ -257,6 +274,7 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
             worker_load_origin,
             worker_options,
             closing.clone(),
+            animation_frame_provider_supported.clone(),
             global.image_cache(),
             browsing_context,
             #[cfg(feature = "webgpu")]
@@ -265,7 +283,7 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
             context_sender,
             global.insecure_requests_policy(),
             global.policy_container(),
-            global.font_context().cloned(),
+            global.font_context(),
         );
 
         let context = context_receiver
@@ -273,7 +291,13 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
             .expect("Couldn't receive a context for worker.");
 
         worker.set_context_for_interrupt(context.clone());
-        global.track_worker(closing, join_handle, control_sender, context);
+        global.track_worker(
+            closing,
+            animation_frame_provider_supported,
+            join_handle,
+            control_sender,
+            context,
+        );
 
         Ok(worker)
     }
@@ -336,6 +360,6 @@ impl WorkerMethods<crate::DomTypeHolder> for Worker {
 impl TaskOnce for SimpleWorkerErrorHandler<Worker> {
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     fn run_once(self, cx: &mut JSContext) {
-        Worker::dispatch_simple_error(self.addr, CanGc::from_cx(cx));
+        Worker::dispatch_simple_error(cx, self.addr);
     }
 }

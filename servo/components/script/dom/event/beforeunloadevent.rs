@@ -3,18 +3,18 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
+use script_bindings::cell::DomRefCell;
+use script_bindings::reflector::reflect_dom_object_with_cx;
 use stylo_atoms::Atom;
 
-use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::BeforeUnloadEventBinding::BeforeUnloadEventMethods;
 use crate::dom::bindings::codegen::Bindings::EventBinding::EventMethods;
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::reflect_dom_object;
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::bindings::str::DOMString;
 use crate::dom::event::{Event, EventBubbles, EventCancelable};
 use crate::dom::window::Window;
-use crate::script_runtime::CanGc;
 
 // https://html.spec.whatwg.org/multipage/#beforeunloadevent
 #[dom_struct]
@@ -31,18 +31,21 @@ impl BeforeUnloadEvent {
         }
     }
 
-    pub(crate) fn new_uninitialized(window: &Window, can_gc: CanGc) -> DomRoot<BeforeUnloadEvent> {
-        reflect_dom_object(Box::new(BeforeUnloadEvent::new_inherited()), window, can_gc)
+    pub(crate) fn new_uninitialized(
+        cx: &mut JSContext,
+        window: &Window,
+    ) -> DomRoot<BeforeUnloadEvent> {
+        reflect_dom_object_with_cx(Box::new(BeforeUnloadEvent::new_inherited()), window, cx)
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         window: &Window,
         type_: Atom,
         bubbles: EventBubbles,
         cancelable: EventCancelable,
-        can_gc: CanGc,
     ) -> DomRoot<BeforeUnloadEvent> {
-        let ev = BeforeUnloadEvent::new_uninitialized(window, can_gc);
+        let ev = BeforeUnloadEvent::new_uninitialized(cx, window);
         {
             let event = ev.upcast::<Event>();
             event.init_event(type_, bool::from(bubbles), bool::from(cancelable));

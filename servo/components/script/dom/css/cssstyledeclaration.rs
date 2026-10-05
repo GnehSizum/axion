@@ -8,6 +8,8 @@ use std::sync::LazyLock;
 
 use dom_struct::dom_struct;
 use html5ever::local_name;
+use js::context::JSContext;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use servo_arc::Arc;
 use servo_url::ServoUrl;
 use style::attr::AttrValue;
@@ -25,13 +27,13 @@ use crate::dom::bindings::codegen::Bindings::CSSStyleDeclarationBinding::CSSStyl
 use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::inheritance::Castable;
-use crate::dom::bindings::reflector::{DomGlobal, Reflector, reflect_dom_object};
+use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::element::Element;
 use crate::dom::node::{Node, NodeTraits};
+use crate::dom::types::CSSFontFaceDescriptors;
 use crate::dom::window::Window;
-use crate::script_runtime::CanGc;
 
 // http://dev.w3.org/csswg/cssom/#the-cssstyledeclaration-interface
 #[dom_struct]
@@ -61,7 +63,7 @@ pub(crate) enum CSSStyleOwner {
 impl CSSStyleOwner {
     // Mutate the declaration block associated to this style owner, and
     // optionally indicate if it has changed (assumed to be true).
-    fn mutate_associated_block<F, R>(&self, f: F, can_gc: CanGc) -> R
+    fn mutate_associated_block<F, R>(&self, cx: &mut JSContext, f: F) -> R
     where
         F: FnOnce(&mut PropertyDeclarationBlock, &mut bool) -> R,
     {
@@ -73,50 +75,54 @@ impl CSSStyleOwner {
             CSSStyleOwner::Null => unreachable!(
                 "CSSStyleDeclaration should always be read-only when CSSStyleOwner is Null"
             ),
-            CSSStyleOwner::Element(ref el) => {
-                let document = el.owner_document();
-                let shared_lock = document.style_shared_lock();
-                let mut attr = el.style_attribute().borrow_mut().take();
-                let result = if let Some(lock) = attr.as_ref() {
-                    let mut guard = shared_lock.write();
-                    let pdb = lock.write_with(&mut guard);
-                    f(pdb, &mut changed)
-                } else {
-                    let mut pdb = PropertyDeclarationBlock::new();
-                    let result = f(&mut pdb, &mut changed);
+            CSSStyleOwner::Element(ref element) => {
+                let document = element.owner_document();
+                let shared_lock = document.style_shared_author_lock();
+                let mut attribute_pdb =
+                    element.style_attribute().safe_borrow_mut(cx.no_gc()).take();
 
-                    // Here `changed` is somewhat silly, because we know the
-                    // exact conditions under it changes.
-                    changed = !pdb.declarations().is_empty();
-                    if changed {
-                        attr = Some(Arc::new(shared_lock.wrap(pdb)));
-                    }
-
-                    result
-                };
-
-                if changed {
-                    // Note that there's no need to remove the attribute here if
-                    // the declaration block is empty[1], and if `attr` is
-                    // `None` it means that it necessarily didn't change, so no
-                    // need to go through all the set_attribute machinery.
-                    //
-                    // [1]: https://github.com/whatwg/html/issues/2306
-                    if let Some(pdb) = attr {
-                        let guard = shared_lock.read();
-                        let mut serialization = String::new();
-                        pdb.read_with(&guard).to_css(&mut serialization).unwrap();
-                        el.set_attribute(
-                            &local_name!("style"),
-                            AttrValue::Declaration(serialization, pdb),
-                            can_gc,
-                        );
-                    }
-                } else {
-                    // Remember to put it back.
-                    *el.style_attribute().borrow_mut() = attr;
+                // When there are mutation observers, the old PDB and the new PDB need to
+                // co-exist so that both attribute values can be serialized and sent to
+                // the observer. In that case, first clone the block and mutate that instead
+                // of mutating the existing one.
+                if element.needs_preserved_style_attribute_after_change() {
+                    attribute_pdb = attribute_pdb.map(|attribute_pdb| {
+                        let new_pdb = attribute_pdb.read_with(&shared_lock.read()).clone();
+                        Arc::new(shared_lock.wrap(new_pdb))
+                    });
                 }
 
+                let (attribute_pdb, result) = if let Some(attribute_pdb) = attribute_pdb {
+                    let mut guard = shared_lock.write();
+                    let writable_pdb = attribute_pdb.write_with(&mut guard);
+                    let result = f(writable_pdb, &mut changed);
+                    (attribute_pdb, result)
+                } else {
+                    let mut new_pdb = PropertyDeclarationBlock::new();
+                    let result = f(&mut new_pdb, &mut changed);
+
+                    changed = !new_pdb.declarations().is_empty();
+                    if !changed {
+                        return result;
+                    }
+
+                    (Arc::new(shared_lock.wrap(new_pdb)), result)
+                };
+
+                // If nothing changed, replace the unchanged PDB in the attribute and just
+                // return. Note that there's no need to remove the attribute here if the
+                // declaration block is empty (see
+                // https://github.com/whatwg/html/issues/2306).
+                if !changed {
+                    *element.style_attribute().safe_borrow_mut(cx.no_gc()) = Some(attribute_pdb);
+                    return result;
+                }
+
+                element.set_attribute(
+                    cx,
+                    &local_name!("style"),
+                    AttrValue::from_declaration(attribute_pdb, shared_lock.clone()),
+                );
                 result
             },
             CSSStyleOwner::CSSRule(ref rule, ref pdb) => {
@@ -126,7 +132,7 @@ impl CSSStyleOwner {
                     f(&mut *pdb.borrow().write_with(&mut guard), &mut changed)
                 };
                 if changed {
-                    rule.parent_stylesheet().notify_invalidations();
+                    rule.parent_stylesheet().notify_invalidations(cx.no_gc());
                 }
                 result
             },
@@ -144,7 +150,7 @@ impl CSSStyleOwner {
             CSSStyleOwner::Element(ref el) => match *el.style_attribute().borrow() {
                 Some(ref pdb) => {
                     let document = el.owner_document();
-                    let guard = document.style_shared_lock().read();
+                    let guard = document.style_shared_author_lock().read();
                     f(pdb.read_with(&guard))
                 },
                 None => {
@@ -204,12 +210,12 @@ macro_rules! css_properties(
                 );
                 self.get_property_value($id)
             }
-            fn $setter(&self, value: DOMString) -> ErrorResult {
+            fn $setter(&self, cx: &mut JSContext, value: DOMString) -> ErrorResult {
                 debug_assert!(
                     $id.enabled_for_all_content(),
                     "Someone forgot a #[Pref] annotation"
                 );
-                self.set_property($id, value, DOMString::new(), CanGc::note())
+                self.set_property(cx, $id, value, DOMString::new())
             }
         )*
     );
@@ -235,8 +241,8 @@ impl CSSStyleDeclaration {
         // If creating a CSSStyleDeclaration with CSSSStyleOwner::Null, this should always
         // be in read-only mode.
         assert!(
-            !matches!(owner, CSSStyleOwner::Null)
-                || modification_access == CSSModificationAccess::Readonly
+            !matches!(owner, CSSStyleOwner::Null) ||
+                modification_access == CSSModificationAccess::Readonly
         );
 
         CSSStyleDeclaration {
@@ -249,20 +255,20 @@ impl CSSStyleDeclaration {
 
     #[cfg_attr(crown, expect(crown::unrooted_must_root))]
     pub(crate) fn new(
+        cx: &mut JSContext,
         global: &Window,
         owner: CSSStyleOwner,
         pseudo: Option<PseudoElement>,
         modification_access: CSSModificationAccess,
-        can_gc: CanGc,
     ) -> DomRoot<CSSStyleDeclaration> {
-        reflect_dom_object(
+        reflect_dom_object_with_cx(
             Box::new(CSSStyleDeclaration::new_inherited(
                 owner,
                 pseudo,
                 modification_access,
             )),
             global,
-            can_gc,
+            cx,
         )
     }
 
@@ -317,17 +323,12 @@ impl CSSStyleDeclaration {
     /// <https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-setproperty>
     fn set_property(
         &self,
+        cx: &mut JSContext,
         id: PropertyId,
         value: DOMString,
         priority: DOMString,
-        can_gc: CanGc,
     ) -> ErrorResult {
-        self.set_property_inner(
-            PotentiallyParsedPropertyId::Parsed(id),
-            value,
-            priority,
-            can_gc,
-        )
+        self.set_property_inner(cx, PotentiallyParsedPropertyId::Parsed(id), value, priority)
     }
 
     /// <https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-setproperty>
@@ -336,10 +337,10 @@ impl CSSStyleDeclaration {
     /// the caller already has a parsed property ID.
     fn set_property_inner(
         &self,
+        cx: &mut JSContext,
         id: PotentiallyParsedPropertyId,
         value: DOMString,
         priority: DOMString,
-        can_gc: CanGc,
     ) -> ErrorResult {
         // Step 1. If the readonly flag is set, then throw a NoModificationAllowedError exception.
         if self.readonly {
@@ -362,66 +363,63 @@ impl CSSStyleDeclaration {
             },
         };
         let base_url = UrlExtraData(self.owner.base_url().get_arc());
-        self.owner.mutate_associated_block(
-            |pdb, changed| {
-                // Step 3. If value is the empty string, invoke removeProperty()
-                // with property as argument and return.
-                if value.is_empty() {
-                    *changed = remove_property(pdb, &id);
+        self.owner.mutate_associated_block(cx, |pdb, changed| {
+            // Step 3. If value is the empty string, invoke removeProperty()
+            // with property as argument and return.
+            if value.is_empty() {
+                *changed = remove_property(pdb, &id);
+                return Ok(());
+            }
+
+            // Step 4. If priority is not the empty string and is not an ASCII case-insensitive
+            // match for the string "important", then return.
+            let importance = match &*priority.str() {
+                "" => Importance::Normal,
+                p if p.eq_ignore_ascii_case("important") => Importance::Important,
+                _ => {
+                    *changed = false;
                     return Ok(());
-                }
+                },
+            };
 
-                // Step 4. If priority is not the empty string and is not an ASCII case-insensitive
-                // match for the string "important", then return.
-                let importance = match &*priority.str() {
-                    "" => Importance::Normal,
-                    p if p.eq_ignore_ascii_case("important") => Importance::Important,
-                    _ => {
-                        *changed = false;
-                        return Ok(());
-                    },
-                };
+            // Step 5
+            let window = self.owner.window();
+            let quirks_mode = window.Document().quirks_mode();
+            let mut declarations = SourcePropertyDeclaration::default();
+            let result = parse_one_declaration_into(
+                &mut declarations,
+                id,
+                &value.str(),
+                Origin::Author,
+                &base_url,
+                Some(window.css_error_reporter()),
+                ParsingMode::DEFAULT,
+                quirks_mode,
+                CssRuleType::Style,
+            );
 
-                // Step 5
-                let window = self.owner.window();
-                let quirks_mode = window.Document().quirks_mode();
-                let mut declarations = SourcePropertyDeclaration::default();
-                let result = parse_one_declaration_into(
-                    &mut declarations,
-                    id,
-                    &value.str(),
-                    Origin::Author,
-                    &base_url,
-                    Some(window.css_error_reporter()),
-                    ParsingMode::DEFAULT,
-                    quirks_mode,
-                    CssRuleType::Style,
-                );
-
-                // Step 6
-                match result {
-                    Ok(()) => {},
-                    Err(_) => {
-                        *changed = false;
-                        return Ok(());
-                    },
-                }
-
-                let mut updates = Default::default();
-                *changed = pdb.prepare_for_update(&declarations, importance, &mut updates);
-
-                if !*changed {
+            // Step 6
+            match result {
+                Ok(()) => {},
+                Err(_) => {
+                    *changed = false;
                     return Ok(());
-                }
+                },
+            }
 
-                // Step 7
-                // Step 8
-                pdb.update(declarations.drain(), importance, &mut updates);
+            let mut updates = Default::default();
+            *changed = pdb.prepare_for_update(&declarations, importance, &mut updates);
 
-                Ok(())
-            },
-            can_gc,
-        )
+            if !*changed {
+                return Ok(());
+            }
+
+            // Step 7
+            // Step 8
+            pdb.update(declarations.drain(), importance, &mut updates);
+
+            Ok(())
+        })
     }
 }
 
@@ -480,15 +478,24 @@ impl CSSStyleDeclarationMethods<crate::DomTypeHolder> for CSSStyleDeclaration {
 
     /// <https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-getpropertyvalue>
     fn GetPropertyValue(&self, property: DOMString) -> DOMString {
-        let id = match PropertyId::parse_enabled_for_all_content(&property.str()) {
-            Ok(id) => id,
-            Err(..) => return DOMString::new(),
-        };
-        self.get_property_value(id)
+        if let Some(css_font_face_descriptors) = self.downcast::<CSSFontFaceDescriptors>() {
+            css_font_face_descriptors.get_property_value(&property.str())
+        } else {
+            let Ok(id) = PropertyId::parse_enabled_for_all_content(&property.str()) else {
+                return DOMString::new();
+            };
+            self.get_property_value(id)
+        }
     }
 
     /// <https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-getpropertypriority>
     fn GetPropertyPriority(&self, property: DOMString) -> DOMString {
+        if self.is::<CSSFontFaceDescriptors>() {
+            // Font face descriptors do not have priorities.
+            // https://searchfox.org/firefox-main/rev/91c8ca3faa6ccbb72d65d89401fd31fd3313afc4/layout/style/CSSFontFaceRule.cpp#84-89
+            return DOMString::new();
+        }
+
         if self.readonly {
             // Readonly style declarations are used for getComputedStyle.
             return DOMString::new();
@@ -500,7 +507,7 @@ impl CSSStyleDeclarationMethods<crate::DomTypeHolder> for CSSStyleDeclaration {
 
         self.owner.with_block(|pdb| {
             if pdb.property_priority(&id).important() {
-                DOMString::from("important")
+                DOMString::from_static("important")
             } else {
                 // Step 4
                 DOMString::new()
@@ -511,21 +518,21 @@ impl CSSStyleDeclarationMethods<crate::DomTypeHolder> for CSSStyleDeclaration {
     /// <https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-setproperty>
     fn SetProperty(
         &self,
+        cx: &mut JSContext,
         property: DOMString,
         value: DOMString,
         priority: DOMString,
-        can_gc: CanGc,
     ) -> ErrorResult {
         self.set_property_inner(
+            cx,
             PotentiallyParsedPropertyId::NotParsed(property),
             value,
             priority,
-            can_gc,
         )
     }
 
     /// <https://dev.w3.org/csswg/cssom/#dom-cssstyledeclaration-removeproperty>
-    fn RemoveProperty(&self, property: DOMString, can_gc: CanGc) -> Fallible<DOMString> {
+    fn RemoveProperty(&self, cx: &mut JSContext, property: DOMString) -> Fallible<DOMString> {
         // Step 1
         if self.readonly {
             return Err(Error::NoModificationAllowed(None));
@@ -537,13 +544,10 @@ impl CSSStyleDeclarationMethods<crate::DomTypeHolder> for CSSStyleDeclaration {
         };
 
         let mut string = String::new();
-        self.owner.mutate_associated_block(
-            |pdb, changed| {
-                pdb.property_value_to_css(&id, &mut string).unwrap();
-                *changed = remove_property(pdb, &id);
-            },
-            can_gc,
-        );
+        self.owner.mutate_associated_block(cx, |pdb, changed| {
+            pdb.property_value_to_css(&id, &mut string).unwrap();
+            *changed = remove_property(pdb, &id);
+        });
 
         // Step 6
         Ok(DOMString::from(string))
@@ -555,12 +559,12 @@ impl CSSStyleDeclarationMethods<crate::DomTypeHolder> for CSSStyleDeclaration {
     }
 
     /// <https://drafts.csswg.org/cssom/#dom-cssstyleproperties-cssfloat>
-    fn SetCssFloat(&self, value: DOMString, can_gc: CanGc) -> ErrorResult {
+    fn SetCssFloat(&self, cx: &mut JSContext, value: DOMString) -> ErrorResult {
         self.set_property(
+            cx,
             PropertyId::NonCustom(LonghandId::Float.into()),
             value,
             DOMString::new(),
-            can_gc,
         )
     }
 
@@ -595,29 +599,25 @@ impl CSSStyleDeclarationMethods<crate::DomTypeHolder> for CSSStyleDeclaration {
     }
 
     /// <https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-csstext>
-    fn SetCssText(&self, value: DOMString, can_gc: CanGc) -> ErrorResult {
-        let window = self.owner.window();
-
-        // Step 1
+    fn SetCssText(&self, cx: &mut JSContext, value: DOMString) -> ErrorResult {
+        // Step 1. If the readonly flag is set, then throw a NoModificationAllowedError exception.
         if self.readonly {
             return Err(Error::NoModificationAllowed(None));
         }
 
+        let window = self.owner.window();
         let quirks_mode = window.Document().quirks_mode();
         let base_url = UrlExtraData(self.owner.base_url().get_arc());
-        self.owner.mutate_associated_block(
-            |pdb, _changed| {
-                // Step 3
-                *pdb = parse_style_attribute(
-                    &value.str(),
-                    &base_url,
-                    Some(window.css_error_reporter()),
-                    quirks_mode,
-                    CssRuleType::Style,
-                );
-            },
-            can_gc,
-        );
+        self.owner.mutate_associated_block(cx, |pdb, _changed| {
+            // Step 3
+            *pdb = parse_style_attribute(
+                &value.str(),
+                &base_url,
+                Some(window.css_error_reporter()),
+                quirks_mode,
+                CssRuleType::Style,
+            );
+        });
 
         Ok(())
     }

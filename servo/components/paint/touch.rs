@@ -8,6 +8,7 @@ use std::rc::Rc;
 use embedder_traits::{InputEventId, PaintHitTestResult, Scroll, TouchEventType, TouchId};
 use euclid::{Point2D, Scale, Vector2D};
 use log::{debug, error, warn};
+use paint_api::display_list::{ScrollType, TouchAction};
 use rustc_hash::{FxHashMap, FxHashSet};
 use servo_base::id::WebViewId;
 use style_traits::CSSPixel;
@@ -78,6 +79,78 @@ pub(crate) enum TouchIdMoveTracking {
     Remove,
 }
 
+/// The axis of a pan gesture. Once panning begins, the gesture is locked to the
+/// dominant axis for the rest of the sequence, so that e.g. a vertical pan that
+/// passes over a horizontally scrollable element keeps scrolling the page instead
+/// of switching to horizontal scrolling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PanAxis {
+    Horizontal,
+    Vertical,
+}
+
+/// The axis-lock policy for a pan gesture, decided at pan-start from the hit
+/// node's `touch-action` and scrollable axes plus the gesture's dominant axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum PanPolicy {
+    /// Not yet decided (the hit-test/scroll-tree lookup hasn't run). The first
+    /// panning move emits the full 2D delta; the policy is set retroactively
+    /// once the hit node is resolved.
+    Undetermined,
+    /// `touch-action: none` (or `pinch-zoom` alone): no single-finger direct
+    /// manipulation. Suppress scrolling and fling.
+    NoScroll,
+    /// Lock the gesture to a single axis (zero the other axis in the emitted
+    /// delta and the velocity). Used for `pan-x`/`pan-y`, and for `auto` when
+    /// the hit node cannot scroll the dominant axis (scroll-chaining lock).
+    Lock(PanAxis),
+    /// No lock: emit the full 2D delta so both axes scroll freely. Used for
+    /// `auto`/`manipulation`/`pan-x pan-y` when the hit node can scroll the
+    /// dominant axis.
+    Free,
+}
+
+impl PanPolicy {
+    /// `NoScroll` is handled by the caller which suppresses the action entirely.
+    /// Only here to keep the match exhaustive.
+    fn pan_delta(self, delta: Vector2D<f32, DevicePixel>) -> Vector2D<f32, DevicePixel> {
+        match self {
+            PanPolicy::Lock(axis) => match axis {
+                PanAxis::Horizontal => Vector2D::new(delta.x, 0.0),
+                PanAxis::Vertical => Vector2D::new(0.0, delta.y),
+            },
+            PanPolicy::Free | PanPolicy::Undetermined | PanPolicy::NoScroll => delta,
+        }
+    }
+}
+
+/// Input captured at touch-down for deciding [`PanPolicy`] at pan-start.
+/// `touch_action` and the structurally scrollable axes of the hit node.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PanPolicyInput {
+    pub touch_action: TouchAction,
+    pub scrollable_x: bool,
+    pub scrollable_y: bool,
+}
+
+impl PanPolicyInput {
+    /// Decide the [`PanPolicy`] for a gesture with the given dominant axis.
+    /// See the policy table documented on [`PanPolicy`].
+    fn to_pan_policy(self, dominant: PanAxis) -> PanPolicy {
+        match self.touch_action {
+            TouchAction::None => PanPolicy::NoScroll,
+            TouchAction::PanX | TouchAction::PanY => PanPolicy::Lock(dominant),
+            TouchAction::Auto => {
+                if self.scrollable_x && self.scrollable_y {
+                    PanPolicy::Free
+                } else {
+                    PanPolicy::Lock(dominant)
+                }
+            },
+        }
+    }
+}
+
 /// A cached [`PaintHitTestResult`] to use during a touch sequence. This
 /// is kept so that the renderer doesn't have to constantly keep making hit tests
 /// while during panning and flinging actions.
@@ -117,6 +190,10 @@ pub struct TouchSequenceInfo {
     pending_touch_move_actions: Vec<ScrollZoomEvent>,
     /// Cache for the last touch hit test result.
     hit_test_result_cache: Option<HitTestResultCache>,
+    /// Input for deciding [`PanPolicy`] at pan-start, captured at touch-down
+    /// from the hit node's `touch-action` and scrollable axes. `None` until the
+    /// down hit-test resolves the node under the finger.
+    pub(crate) pan_policy_input: Option<PanPolicyInput>,
 }
 
 impl TouchSequenceInfo {
@@ -179,6 +256,9 @@ pub(crate) enum TouchSequenceState {
     Touching,
     /// A single touch point is active and has started panning.
     Panning {
+        /// The axis-lock policy, decided at pan-start from the hit node's
+        /// `touch-action` and scrollable axes plus the gesture's dominant axis.
+        policy: PanPolicy,
         velocity: Vector2D<f32, DevicePixel>,
     },
     /// A two-finger pinch zoom gesture is active.
@@ -219,6 +299,7 @@ impl TouchHandler {
             prevent_move: TouchMoveAllowed::Pending,
             pending_touch_move_actions: vec![],
             hit_test_result_cache: None,
+            pan_policy_input: None,
         };
         // We insert a simulated initial touch sequence, which is already finished,
         // so that we always have one element in the map, which simplifies creating
@@ -304,10 +385,11 @@ impl TouchHandler {
 
     // try to remove touch sequence, if touch sequence end and not has pending action.
     pub(crate) fn try_remove_touch_sequence(&mut self, sequence_id: TouchSequenceId) {
-        if let Some(sequence) = self.touch_sequence_map.get(&sequence_id) {
-            if sequence.pending_touch_move_actions.is_empty() && sequence.state == Finished {
-                self.touch_sequence_map.remove(&sequence_id);
-            }
+        if let Some(sequence) = self.touch_sequence_map.get(&sequence_id) &&
+            sequence.pending_touch_move_actions.is_empty() &&
+            sequence.state == Finished
+        {
+            self.touch_sequence_map.remove(&sequence_id);
         }
     }
 
@@ -347,9 +429,8 @@ impl TouchHandler {
         // if the current sequence ID does not exist in the map, then it was already handled
         if !self
             .touch_sequence_map
-            .contains_key(&self.current_sequence_id)
-            || self
-                .get_touch_sequence(self.current_sequence_id)
+            .contains_key(&self.current_sequence_id) ||
+            self.get_touch_sequence(self.current_sequence_id)
                 .is_finished()
         {
             self.current_sequence_id.next();
@@ -365,6 +446,7 @@ impl TouchHandler {
                     prevent_move: TouchMoveAllowed::Pending,
                     pending_touch_move_actions: vec![],
                     hit_test_result_cache: None,
+                    pan_policy_input: None,
                 },
             );
         } else {
@@ -465,39 +547,69 @@ impl TouchHandler {
 
         let action = match touch_sequence.touch_count() {
             1 => {
-                if let Panning { ref mut velocity } = touch_sequence.state {
-                    // TODO: Probably we should track 1-3 more points and use a smarter algorithm
-                    *velocity += delta;
-                    *velocity /= 2.0;
-                    // update the touch point every time when panning.
-                    touch_sequence.active_touch_points[idx].point = point;
-
-                    // Scroll offsets are opposite to the direction of finger motion.
-                    Some(ScrollZoomEvent::Scroll(ScrollEvent {
-                        scroll: Scroll::Delta((-delta).into()),
-                        point,
-                    }))
-                } else if delta.x.abs() > TOUCH_PAN_MIN_SCREEN_PX * scale
-                    || delta.y.abs() > TOUCH_PAN_MIN_SCREEN_PX * scale
+                if let Panning {
+                    policy,
+                    ref mut velocity,
+                } = touch_sequence.state
+                {
+                    match policy {
+                        PanPolicy::NoScroll => None,
+                        PanPolicy::Free | PanPolicy::Undetermined | PanPolicy::Lock(_) => {
+                            let pan_delta = policy.pan_delta(delta);
+                            // TODO: Probably we should track 1-3 more points and use a smarter algorithm
+                            *velocity += pan_delta;
+                            *velocity /= 2.0;
+                            touch_sequence.active_touch_points[idx].point = point;
+                            Some(ScrollZoomEvent::Scroll(ScrollEvent {
+                                scroll: Scroll::Delta((-pan_delta).into()),
+                                point,
+                                scroll_type: ScrollType::Touch,
+                            }))
+                        },
+                    }
+                } else if delta.x.abs() > TOUCH_PAN_MIN_SCREEN_PX * scale ||
+                    delta.y.abs() > TOUCH_PAN_MIN_SCREEN_PX * scale
                 {
                     let _span = profile_traits::info_span!(
                         "TouchHandler::ScrollBegin",
                         delta = ?delta,
                     )
                     .entered();
+                    // Decide the axis-lock policy from the hit node's `touch-action`
+                    // and scrollable axes (captured at touch-down) plus the
+                    // gesture's dominant axis. If the input isn't available
+                    // (missed down hit-test), start `Undetermined` as a fallback
+                    // (behaves like `Free` — no axis lock).
+                    let dominant = if delta.y.abs() > delta.x.abs() {
+                        PanAxis::Vertical
+                    } else {
+                        PanAxis::Horizontal
+                    };
+                    let policy = touch_sequence
+                        .pan_policy_input
+                        .map(|input| input.to_pan_policy(dominant))
+                        .unwrap_or(PanPolicy::Undetermined);
+                    // `NoScroll` is suppressed below.
+                    let pan_delta = policy.pan_delta(delta);
                     touch_sequence.state = Panning {
-                        velocity: Vector2D::new(delta.x, delta.y),
+                        policy,
+                        velocity: pan_delta,
                     };
                     // No clicks should be issued after we transitioned to move.
                     touch_sequence.prevent_click = true;
                     // update the touch point
                     touch_sequence.active_touch_points[idx].point = point;
 
-                    // Scroll offsets are opposite to the direction of finger motion.
-                    Some(ScrollZoomEvent::Scroll(ScrollEvent {
-                        scroll: Scroll::Delta((-delta).into()),
-                        point,
-                    }))
+                    if policy == PanPolicy::NoScroll {
+                        None
+                    } else {
+                        // Scroll offsets are opposite to the direction of finger motion.
+                        Some(ScrollZoomEvent::Scroll(ScrollEvent {
+                            scroll: Scroll::Delta((-pan_delta).into()),
+                            point,
+                            scroll_type: ScrollType::Touch,
+                        }))
+                    }
                 } else {
                     // We don't update the touchpoint, so multiple small moves can
                     // accumulate and merge into a larger move.
@@ -505,9 +617,9 @@ impl TouchHandler {
                 }
             },
             2 => {
-                if touch_sequence.state == Pinching
-                    || delta.x.abs() > TOUCH_PAN_MIN_SCREEN_PX * scale
-                    || delta.y.abs() > TOUCH_PAN_MIN_SCREEN_PX * scale
+                if touch_sequence.state == Pinching ||
+                    delta.x.abs() > TOUCH_PAN_MIN_SCREEN_PX * scale ||
+                    delta.y.abs() > TOUCH_PAN_MIN_SCREEN_PX * scale
                 {
                     touch_sequence.state = Pinching;
                     let (d0, _) = touch_sequence.pinch_distance_and_center();
@@ -529,12 +641,11 @@ impl TouchHandler {
                 None
             },
         };
-        // If the touch action is not `NoAction` and the first move has not been processed,
-        //  set pending_touch_move_action.
-        if let Some(action) = action {
-            if touch_sequence.prevent_move == TouchMoveAllowed::Pending {
-                touch_sequence.add_pending_touch_move_action(action);
-            }
+        // If the first move has not been processed yet, buffer the action.
+        if let Some(action) = action &&
+            touch_sequence.prevent_move == TouchMoveAllowed::Pending
+        {
+            touch_sequence.add_pending_touch_move_action(action);
         }
 
         action
@@ -564,8 +675,11 @@ impl TouchHandler {
                     touch_sequence.state = PendingClick(point);
                 }
             },
-            Panning { velocity } => {
-                if velocity.length().abs() >= FLING_MIN_SCREEN_PX {
+            Panning { policy, velocity } => {
+                // `touch-action: none` suppresses both scrolling and fling.
+                if policy == PanPolicy::NoScroll {
+                    touch_sequence.state = Finished;
+                } else if velocity.length().abs() >= FLING_MIN_SCREEN_PX {
                     let _span = profile_traits::info_span!(
                         "TouchHandler::FlingStart",
                         velocity = ?velocity,
@@ -663,13 +777,23 @@ impl TouchHandler {
         value: PaintHitTestResult,
         device_pixels_per_page: Scale<f32, CSSPixel, DevicePixel>,
     ) {
+        if let Some(sequence) = self.touch_sequence_map.get_mut(&self.current_sequence_id) &&
+            sequence.hit_test_result_cache.is_none()
+        {
+            sequence.hit_test_result_cache = Some(HitTestResultCache {
+                value,
+                device_pixels_per_page,
+            });
+        }
+    }
+
+    /// Capture the [`PanPolicyInput`] for the current touch sequence, from the
+    /// hit node resolved at touch-down. Used by the renderer to feed the
+    /// `touch-action` + scrollable axes of the hit node into [`PanPolicy`]
+    /// decision at pan-start.
+    pub(crate) fn set_pan_policy_input(&mut self, input: PanPolicyInput) {
         if let Some(sequence) = self.touch_sequence_map.get_mut(&self.current_sequence_id) {
-            if sequence.hit_test_result_cache.is_none() {
-                sequence.hit_test_result_cache = Some(HitTestResultCache {
-                    value,
-                    device_pixels_per_page,
-                });
-            }
+            sequence.pan_policy_input = Some(input);
         }
     }
 

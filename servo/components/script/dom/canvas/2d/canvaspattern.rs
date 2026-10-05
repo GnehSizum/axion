@@ -6,13 +6,13 @@ use dom_struct::dom_struct;
 use euclid::default::{Size2D, Transform2D};
 use js::context::JSContext;
 use pixels::{SharedSnapshot, Snapshot};
+use script_bindings::cell::DomRefCell;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use servo_canvas_traits::canvas::{FillOrStrokeStyle, RepetitionStyle, SurfaceStyle};
 
-use crate::dom::bindings::cell::DomRefCell;
 use crate::dom::bindings::codegen::Bindings::CanvasRenderingContext2DBinding::CanvasPatternMethods;
 use crate::dom::bindings::codegen::Bindings::DOMMatrixBinding::DOMMatrix2DInit;
 use crate::dom::bindings::error::ErrorResult;
-use crate::dom::bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::canvasgradient::ToFillOrStrokeStyle;
 use crate::dom::dommatrixreadonly::dommatrix2dinit_to_matrix;
@@ -91,12 +91,12 @@ impl CanvasPatternMethods<crate::DomTypeHolder> for CanvasPattern {
         // Step 2. If one or more of matrix's m11 element, m12 element, m21
         // element, m22 element, m41 element, or m42 element are infinite or
         // NaN, then return.
-        if !matrix.m11.is_finite()
-            || !matrix.m12.is_finite()
-            || !matrix.m21.is_finite()
-            || !matrix.m22.is_finite()
-            || !matrix.m31.is_finite()
-            || !matrix.m32.is_finite()
+        if !matrix.m11.is_finite() ||
+            !matrix.m12.is_finite() ||
+            !matrix.m21.is_finite() ||
+            !matrix.m22.is_finite() ||
+            !matrix.m31.is_finite() ||
+            !matrix.m32.is_finite()
         {
             return Ok(());
         }

@@ -150,9 +150,9 @@ impl StagingBuffer {
     fn ensure_available(&mut self, config: &ContextConfiguration) -> Result<(), CreateBufferError> {
         let recreate = match &self.state {
             StagingBufferState::Unassigned => true,
-            StagingBufferState::Available(buffer)
-            | StagingBufferState::Mapping(buffer)
-            | StagingBufferState::Mapped(MappedBuffer { buffer, .. }) => {
+            StagingBufferState::Available(buffer) |
+            StagingBufferState::Mapping(buffer) |
+            StagingBufferState::Mapped(MappedBuffer { buffer, .. }) => {
                 if buffer.has_compatible_config(config) {
                     let _ = self.global.buffer_unmap(self.buffer_id);
                     false
@@ -194,6 +194,7 @@ impl StagingBuffer {
         &mut self,
         texture_id: TextureId,
         encoder_id: CommandEncoderId,
+        command_buffer_id: CommandBufferId,
         config: &ContextConfiguration,
     ) -> Result<CommandBufferId, Box<dyn std::error::Error>> {
         self.ensure_available(config)?;
@@ -235,10 +236,12 @@ impl StagingBuffer {
             &buffer_info,
             &copy_size,
         )?;
-        let (command_buffer_id, error) = self
-            .global
-            .command_encoder_finish(encoder_id, &CommandBufferDescriptor::default());
-        if let Some(error) = error {
+        let (command_buffer_id, error) = self.global.command_encoder_finish(
+            encoder_id,
+            &CommandBufferDescriptor::default(),
+            Some(command_buffer_id),
+        );
+        if let Some((_, error)) = error {
             return Err(error.into());
         };
         Ok(command_buffer_id)
@@ -248,8 +251,8 @@ impl StagingBuffer {
     fn unmap(&mut self) {
         match self.state {
             StagingBufferState::Unassigned | StagingBufferState::Available(_) => {},
-            StagingBufferState::Mapping(buffer)
-            | StagingBufferState::Mapped(MappedBuffer { buffer, .. }) => {
+            StagingBufferState::Mapping(buffer) |
+            StagingBufferState::Mapped(MappedBuffer { buffer, .. }) => {
                 let _ = self.global.buffer_unmap(self.buffer_id);
                 self.state = StagingBufferState::Available(buffer)
             },
@@ -298,9 +301,9 @@ impl Drop for StagingBuffer {
     fn drop(&mut self) {
         match self.state {
             StagingBufferState::Unassigned => {},
-            StagingBufferState::Available(_)
-            | StagingBufferState::Mapping(_)
-            | StagingBufferState::Mapped(_) => {
+            StagingBufferState::Available(_) |
+            StagingBufferState::Mapping(_) |
+            StagingBufferState::Mapped(_) => {
                 self.global.buffer_drop(self.buffer_id);
             },
         }
@@ -495,9 +498,8 @@ impl ContextData {
     /// If the given [`PresentationStagingBuffer`] is for a newer presentation, replace the existing
     /// one. Deallocate the older one by calling [`Self::return_staging_buffer`] on it.
     fn replace_presentation(&mut self, presentation: PresentationStagingBuffer) {
-        let stale_presentation = if presentation.epoch
-            >= self
-                .presentation
+        let stale_presentation = if presentation.epoch >=
+            self.presentation
                 .as_ref()
                 .map(|p| p.epoch)
                 .unwrap_or_default()
@@ -573,6 +575,7 @@ impl crate::WGPU {
         if let Some(PendingTexture {
             texture_id,
             encoder_id,
+            command_buffer_id,
             configuration,
         }) = pending_texture
         {
@@ -592,6 +595,7 @@ impl crate::WGPU {
             self.texture_download(
                 texture_id,
                 encoder_id,
+                command_buffer_id,
                 staging_buffer,
                 configuration,
                 move |staging_buffer| {
@@ -652,6 +656,7 @@ impl crate::WGPU {
         let Some(PendingTexture {
             texture_id,
             encoder_id,
+            command_buffer_id,
             configuration,
         }) = pending_texture
         else {
@@ -688,6 +693,7 @@ impl crate::WGPU {
         self.texture_download(
             texture_id,
             encoder_id,
+            command_buffer_id,
             staging_buffer,
             configuration,
             move |staging_buffer| {
@@ -723,13 +729,17 @@ impl crate::WGPU {
         &self,
         texture_id: TextureId,
         encoder_id: CommandEncoderId,
+        command_buffer_id: CommandBufferId,
         mut staging_buffer: StagingBuffer,
         config: ContextConfiguration,
         callback: impl FnOnce(StagingBuffer) + Send + 'static,
     ) {
-        let Ok(command_buffer_id) =
-            staging_buffer.prepare_load_texture_command_buffer(texture_id, encoder_id, &config)
-        else {
+        let Ok(command_buffer_id) = staging_buffer.prepare_load_texture_command_buffer(
+            texture_id,
+            encoder_id,
+            command_buffer_id,
+            &config,
+        ) else {
             return callback(staging_buffer);
         };
         let StagingBufferState::Available(buffer) = &staging_buffer.state else {

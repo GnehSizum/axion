@@ -5,14 +5,14 @@
 use std::fmt;
 
 use dom_struct::dom_struct;
+use js::context::JSContext;
+use script_bindings::reflector::{Reflector, reflect_dom_object_with_cx};
 
 use crate::dom::bindings::codegen::Bindings::TimeRangesBinding::TimeRangesMethods;
 use crate::dom::bindings::error::{Error, Fallible};
 use crate::dom::bindings::num::Finite;
-use crate::dom::bindings::reflector::{Reflector, reflect_dom_object};
 use crate::dom::bindings::root::DomRoot;
 use crate::dom::window::Window;
-use crate::script_runtime::CanGc;
 
 #[derive(Clone, JSTraceable, MallocSizeOf)]
 struct TimeRange {
@@ -99,15 +99,15 @@ impl TimeRangesContainer {
         //   in between two ranges.
         let mut idx = 0;
         while idx < self.ranges.len() {
-            if new_range.is_overlapping(&self.ranges[idx])
-                || new_range.is_contiguous(&self.ranges[idx])
+            if new_range.is_overlapping(&self.ranges[idx]) ||
+                new_range.is_contiguous(&self.ranges[idx])
             {
                 // The ranges are either overlapping or contiguous,
                 // we need to merge the new range with the existing one.
                 new_range.union(&self.ranges[idx]);
                 self.ranges.remove(idx);
-            } else if new_range.is_before(&self.ranges[idx])
-                && (idx == 0 || self.ranges[idx - 1].is_before(&new_range))
+            } else if new_range.is_before(&self.ranges[idx]) &&
+                (idx == 0 || self.ranges[idx - 1].is_before(&new_range))
             {
                 // We are exactly after the current previous range and before the current
                 // range, while not overlapping with none of them.
@@ -141,11 +141,11 @@ impl TimeRanges {
     }
 
     pub(crate) fn new(
+        cx: &mut JSContext,
         window: &Window,
         ranges: TimeRangesContainer,
-        can_gc: CanGc,
     ) -> DomRoot<TimeRanges> {
-        reflect_dom_object(Box::new(TimeRanges::new_inherited(ranges)), window, can_gc)
+        reflect_dom_object_with_cx(Box::new(TimeRanges::new_inherited(ranges)), window, cx)
     }
 }
 
