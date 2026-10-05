@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.6.2 - Preview
+
+- Added explicit local source SDK selection, validation and discovery for generated applications, including Unicode and space-containing paths.
+- Fixed native IME composition boundaries and focus preservation, and enabled Servo's clipboard feature for operating system text Copy/Cut/Paste.
+- Applied total window-control deadlines across queueing and native execution, skipping expired queued work without promising rollback of started operations.
+- Added opt-in lifecycle probes, a native input validation page, regression tests and evidence-scoped platform support documentation.
+- Aligned Linux Clang compilation, header discovery and libclang selection, preserved compiler error diagnostics, and retained available GUI/release reports after CI failures.
+- Synchronized Axion release metadata at 0.6.2, retained feature milestone 33, advanced the bugfix milestone to 2, and recorded the clipboard build feature without changing Servo v0.6.0 source.
+
 ## v0.6.1 - Preview
 
 - Hardened filesystem and packaging path checks, resource URL encoding, per-WebView bridge identity and CSP binding.

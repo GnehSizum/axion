@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [features]
 default = []
+lifecycle-probe = ["servo-runtime", "axion-window-winit/lifecycle-probe"]
 servo-runtime = ["axion-window-winit/servo-runtime"]
 
 [dependencies]

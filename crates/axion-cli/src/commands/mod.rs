@@ -8,6 +8,7 @@ pub mod gui_smoke;
 pub mod release;
 pub mod report;
 pub mod report_util;
+mod sdk;
 pub mod self_test;
 
 use std::path::{Path, PathBuf};
@@ -16,10 +17,11 @@ use crate::cli::{CheckArgs, DoctorRisk, NewArgs, NewTemplate};
 use crate::error::AxionCliError;
 
 const TEMPLATE_APP_ICON: &[u8] = include_bytes!("../../assets/app.icns");
+#[cfg(test)]
 const TEMPLATE_RUST_TOOLCHAIN: &str = include_str!("../../../../rust-toolchain.toml");
-#[cfg(target_os = "macos")]
+#[cfg(all(test, target_os = "macos"))]
 const TEMPLATE_CARGO_CONFIG: &str = include_str!("../../../../.cargo/config.macos.example.toml");
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(test, not(target_os = "macos")))]
 const TEMPLATE_CARGO_CONFIG: &str = include_str!("../../../../.cargo/config.example.toml");
 
 pub fn run_new(args: NewArgs) -> Result<(), AxionCliError> {
@@ -32,6 +34,7 @@ pub fn run_new(args: NewArgs) -> Result<(), AxionCliError> {
     println!("template: {}", project.template.name());
     println!("template_focus: {}", project.template_summary());
     println!("path: {}", project.root.display());
+    println!("sdk_path: {}", project.axion_root.display());
     println!("next:");
     for step in project.next_steps() {
         println!("  {step}");
@@ -48,7 +51,7 @@ pub fn run_new(args: NewArgs) -> Result<(), AxionCliError> {
             keep_artifacts: false,
         })?;
         println!(
-            "note: run gui-smoke from the Axion checkout with --manifest-path {} and --cargo-target-dir target",
+            "note: run axion-cli gui-smoke from the application directory with --manifest-path {}",
             project.root.join("axion.toml").display()
         );
     }
@@ -66,7 +69,14 @@ struct NewProject {
 impl NewProject {
     fn new(args: NewArgs) -> Result<Self, AxionCliError> {
         let name = normalize_project_name(&args.name);
-        let axion_root = axion_root_for_templates()?;
+        let axion_root = match args.sdk_path {
+            Some(path) => {
+                sdk::validate_sdk_root(&path)
+                    .map_err(std::io::Error::other)?
+                    .root
+            }
+            None => axion_root_for_templates()?,
+        };
         let current_dir = std::env::current_dir()?;
         let root = args.path.unwrap_or_else(|| current_dir.join(&name));
 
@@ -87,19 +97,23 @@ impl NewProject {
             .into());
         }
 
+        // Read SDK inputs before creating any application output.
+        let toolchain = std::fs::read_to_string(self.axion_root.join("rust-toolchain.toml"))?;
+        let config_name = if cfg!(target_os = "macos") {
+            "config.macos.example.toml"
+        } else {
+            "config.example.toml"
+        };
+        let cargo_config =
+            std::fs::read_to_string(self.axion_root.join(".cargo").join(config_name))?;
+
         std::fs::create_dir_all(self.root.join("src"))?;
         std::fs::create_dir_all(self.root.join("frontend"))?;
         std::fs::create_dir_all(self.root.join("icons"))?;
         std::fs::create_dir_all(self.root.join(".cargo"))?;
         std::fs::write(self.root.join("Cargo.toml"), self.cargo_toml())?;
-        std::fs::write(
-            self.root.join("rust-toolchain.toml"),
-            TEMPLATE_RUST_TOOLCHAIN,
-        )?;
-        std::fs::write(
-            self.root.join(".cargo").join("config.toml"),
-            TEMPLATE_CARGO_CONFIG,
-        )?;
+        std::fs::write(self.root.join("rust-toolchain.toml"), toolchain)?;
+        std::fs::write(self.root.join(".cargo").join("config.toml"), cargo_config)?;
         std::fs::write(self.root.join(".gitignore"), self.gitignore())?;
         std::fs::write(self.root.join("README.md"), self.readme())?;
         std::fs::write(self.root.join("axion.toml"), self.manifest())?;
@@ -118,25 +132,25 @@ impl NewProject {
     }
 
     fn next_steps(&self) -> Vec<String> {
-        let manifest = self.root.join("axion.toml").display().to_string();
+        let manifest = "axion.toml";
         vec![
-            format!("cd {}", self.root.display()),
+            format!("cd {}", shell_quote(&self.root.display().to_string())),
             "cargo run -- --plan".to_owned(),
             "cargo run --features servo-runtime".to_owned(),
             format!(
-                "from Axion checkout: cargo run -p axion-cli -- check --manifest-path {manifest} --dev --bundle --json --report-path target/axion/reports/check.json"
+                "axion-cli check --manifest-path {manifest} --dev --bundle --json --report-path target/axion/reports/check.json"
             ),
             format!(
-                "from Axion checkout: cargo run -p axion-cli -- gui-smoke --manifest-path {manifest} --report-path target/axion/reports/gui-smoke.json --timeout-ms 30000 --require-check bridge.bootstrap --require-check app.ping --require-check input.snapshot --require-command app.ping --require-command window.info --require-host-event window.ready --require-window main --cargo-target-dir target --serial-build"
+                "axion-cli gui-smoke --manifest-path {manifest} --report-path target/axion/reports/gui-smoke.json --timeout-ms 30000 --require-check bridge.bootstrap --require-check app.ping --require-check input.snapshot --require-command app.ping --require-command window.info --require-host-event window.ready --require-window main --cargo-target-dir target --serial-build"
             ),
             format!(
-                "from Axion checkout: cargo run -p axion-cli --features servo-runtime -- dev --manifest-path {manifest} --launch --fallback-packaged --watch --reload --restart-on-change --event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json"
+                "axion-cli dev --manifest-path {manifest} --launch --fallback-packaged --watch --reload --restart-on-change --event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json"
             ),
             format!(
-                "from Axion checkout: cargo run -p axion-cli -- release --manifest-path {manifest} --check-report-path target/axion/reports/check.json --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar"
+                "axion-cli release --manifest-path {manifest} --check-report-path target/axion/reports/check.json --json --report-path target/axion/reports/release.json --bundle-report-path target/axion/reports/bundle.json --archive --archive-path target/axion/reports/bundle.tar"
             ),
-            "from Axion checkout: cargo run -p axion-cli -- report target/axion/reports/release.json --output target/axion/reports/release-summary.json".to_owned(),
-            "from Axion checkout: cargo run -p axion-cli -- report target/axion/reports/gui-smoke.json --allow-failed --output target/axion/reports/gui-smoke-summary.json".to_owned(),
+            "axion-cli report target/axion/reports/release.json --output target/axion/reports/release-summary.json".to_owned(),
+            "axion-cli report target/axion/reports/gui-smoke.json --allow-failed --output target/axion/reports/gui-smoke-summary.json".to_owned(),
         ]
     }
 
@@ -199,10 +213,14 @@ This template is tuned for validating Axion's preview native API surface. The UI
             .replace("@TITLE@", &title_case(&self.name))
             .replace("@TEMPLATE@", self.template.name())
             .replace("@SUMMARY@", self.template_summary())
+            .replace(
+                "@SDK_PATH@",
+                &shell_quote(&self.axion_root.display().to_string()),
+            )
             .replace("@NATIVE_API_FOCUS@", self.native_api_focus_section())
             .replace(
                 "@MANIFEST@",
-                &self.root.join("axion.toml").display().to_string(),
+                &shell_quote(&self.root.join("axion.toml").display().to_string()),
             )
     }
 
@@ -212,7 +230,7 @@ This template is tuned for validating Axion's preview native API surface. The UI
 
     fn cargo_toml(&self) -> String {
         format!(
-            "[package]\nname = {name:?}\nversion = \"0.6.1\"\nedition = \"2024\"\nrust-version = \"1.88.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
+            "[package]\nname = {name:?}\nversion = \"0.6.2\"\nedition = \"2024\"\nrust-version = \"1.88.0\"\n\n[features]\ndefault = []\nservo-runtime = [\"axion-runtime/servo-runtime\"]\n\n[dependencies]\naxion-core = {{ path = {core:?} }}\naxion-manifest = {{ path = {manifest:?} }}\naxion-runtime = {{ path = {runtime:?} }}\n",
             name = self.name,
             core = self
                 .axion_root
@@ -283,15 +301,30 @@ impl NewTemplate {
 
 fn axion_root_for_templates() -> Result<PathBuf, AxionCliError> {
     let cli_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    if let Some(axion_root) = cli_manifest_dir
+    let candidate = cli_manifest_dir
         .parent()
         .and_then(Path::parent)
-        .filter(|path| path.join("crates").join("axion-core").exists())
-    {
-        return Ok(axion_root.to_path_buf());
-    }
+        .filter(|path| path.join("Cargo.toml").is_file())
+        .map(Path::to_path_buf)
+        .unwrap_or(std::env::current_dir()?);
+    sdk::validate_sdk_root(&candidate)
+        .map(|sdk| sdk.root)
+        .map_err(|message| {
+            std::io::Error::other(format!("{message}; use new --sdk-path <Axion checkout>"))
+        })
+        .map_err(Into::into)
+}
 
-    Ok(std::env::current_dir()?)
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_./-".contains(&byte))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
 }
 
 fn normalize_project_name(name: &str) -> String {
@@ -334,6 +367,125 @@ fn title_case(name: &str) -> String {
 mod tests {
     use super::{NewProject, axion_root_for_templates, normalize_project_name, title_case};
     use crate::cli::NewTemplate;
+
+    #[test]
+    fn explicit_sdk_and_both_templates_support_external_unicode_paths() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("axion-sdk-生成 项目-{unique}"));
+        let sdk_root = root.join("源码 SDK");
+        super::sdk::fixture_sdk(&sdk_root, env!("CARGO_PKG_VERSION"));
+        for template in [NewTemplate::Vanilla, NewTemplate::NativeApiDemo] {
+            let app_path = root.join(format!("应用 {}", template.name()));
+            let project = NewProject::new(crate::cli::NewArgs {
+                name: "demo".to_owned(),
+                path: Some(app_path.clone()),
+                sdk_path: Some(sdk_root.clone()),
+                template,
+                run_check: false,
+            })
+            .unwrap();
+            project.write().unwrap();
+            assert_eq!(
+                std::fs::read_to_string(app_path.join(".cargo/config.toml")).unwrap(),
+                "# SDK fixture configuration\n"
+            );
+            let detected = super::sdk::application_sdk(&app_path.join("axion.toml")).unwrap();
+            assert_eq!(detected.sdk.root, sdk_root.canonicalize().unwrap());
+            assert!(detected.servo_runtime_feature);
+            assert_eq!(
+                detected.sdk.servo_path,
+                sdk_root.join("servo").canonicalize().unwrap()
+            );
+            assert!(project.next_steps()[0].starts_with("cd '"));
+            assert!(project.readme().contains("'"));
+            assert!(!app_path.join("Cargo.lock").exists());
+            assert!(!sdk_root.join("Cargo.lock").exists());
+            let manifest = app_path.join("Cargo.toml");
+            let source = std::fs::read_to_string(&manifest).unwrap();
+            std::fs::write(
+                &manifest,
+                source.replace(
+                    "servo-runtime = [\"axion-runtime/servo-runtime\"]",
+                    "servo-runtime = []",
+                ),
+            )
+            .unwrap();
+            assert!(
+                !super::sdk::application_sdk(&app_path.join("axion.toml"))
+                    .unwrap()
+                    .servo_runtime_feature
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_or_mismatched_sdk_is_rejected_before_creating_output() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("axion-sdk-invalid-{unique}"));
+        let sdk_root = root.join("sdk");
+        super::sdk::fixture_sdk(&sdk_root, "0.5.0");
+        for path in [sdk_root.clone(), root.join("missing")] {
+            let result = NewProject::new(crate::cli::NewArgs {
+                name: "demo".to_owned(),
+                path: Some(root.join("app")),
+                sdk_path: Some(path),
+                template: NewTemplate::Vanilla,
+                run_check: false,
+            });
+            assert!(result.is_err());
+            assert!(!root.join("app").exists());
+        }
+        assert!(
+            super::sdk::validate_sdk_root(&sdk_root)
+                .unwrap_err()
+                .contains("0.5.0")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn application_rejects_mixed_sdk_bindings_and_accepts_rebinding() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("axion-sdk-rebind-{unique}"));
+        let original_sdk = root.join("old SDK");
+        let new_sdk = root.join("新 SDK");
+        let app_path = root.join("app");
+        super::sdk::fixture_sdk(&original_sdk, env!("CARGO_PKG_VERSION"));
+        super::sdk::fixture_sdk(&new_sdk, env!("CARGO_PKG_VERSION"));
+        super::sdk::fixture_application(&app_path, &original_sdk);
+        let manifest = app_path.join("Cargo.toml");
+        let source = std::fs::read_to_string(&manifest).unwrap();
+        let mixed = source.replace(
+            &format!("{:?}", original_sdk.join("crates/axion-core")),
+            &format!("{:?}", new_sdk.join("crates/axion-core")),
+        );
+        std::fs::write(&manifest, mixed).unwrap();
+        assert!(
+            super::sdk::application_sdk(&app_path.join("axion.toml"))
+                .unwrap_err()
+                .contains("not bound to the same SDK")
+        );
+        super::sdk::fixture_application(&app_path, &new_sdk);
+        assert_eq!(
+            super::sdk::application_sdk(&app_path.join("axion.toml"))
+                .unwrap()
+                .sdk
+                .root,
+            new_sdk.canonicalize().unwrap()
+        );
+        assert!(!app_path.join("Cargo.lock").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn project_name_is_normalized_for_package_use() {
@@ -508,7 +660,7 @@ mod tests {
         assert!(project.app_js().contains("dialog.open"));
         assert!(project.app_js().contains("fs.write_text"));
         assert!(project.style_css().contains("button:disabled"));
-        assert!(project.cargo_toml().contains("version = \"0.6.1\""));
+        assert!(project.cargo_toml().contains("version = \"0.6.2\""));
     }
 
     #[test]
@@ -594,22 +746,23 @@ mod tests {
 
         let next_steps = project.next_steps();
         assert!(next_steps.iter().any(|step| step
-            == "from Axion checkout: cargo run -p axion-cli -- check --manifest-path /tmp/hello-axion/axion.toml --dev --bundle --json --report-path target/axion/reports/check.json"));
+            == "axion-cli check --manifest-path axion.toml --dev --bundle --json --report-path target/axion/reports/check.json"));
         assert!(
             next_steps
                 .iter()
-                .any(|step| step
-                    .contains("from Axion checkout: cargo run -p axion-cli -- gui-smoke"))
+                .any(|step| step.contains("axion-cli gui-smoke"))
         );
         assert!(next_steps.iter().any(|step| step.contains(
             "--event-log target/axion/reports/dev-events.jsonl --report-path target/axion/reports/dev-report.json"
         )));
-        assert!(next_steps.iter().any(|step| step.contains(
-            "from Axion checkout: cargo run -p axion-cli -- release"
-        )));
-        assert!(next_steps.iter().any(|step| step.contains(
-            "from Axion checkout: cargo run -p axion-cli -- report target/axion/reports/gui-smoke.json --allow-failed"
-        )));
+        assert!(
+            next_steps
+                .iter()
+                .any(|step| step.contains("axion-cli release"))
+        );
+        assert!(next_steps.iter().any(|step| {
+            step.contains("axion-cli report target/axion/reports/gui-smoke.json --allow-failed")
+        }));
         assert!(
             next_steps
                 .iter()

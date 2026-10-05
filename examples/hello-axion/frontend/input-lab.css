@@ -1,0 +1,91 @@
+a {
+  color: #5eead4;
+}
+
+.hero > div > p:last-child {
+  margin-top: 12px;
+}
+
+.hint {
+  color: #a9bad5;
+  font-size: 0.88rem;
+  line-height: 1.6;
+}
+
+.card > p {
+  line-height: 1.6;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.section-heading h2 {
+  margin: 0;
+}
+
+button {
+  border: 1px solid rgba(94, 234, 212, 0.5);
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: #134e4a;
+  color: #d2fbf2;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:focus-visible,
+a:focus-visible,
+.scroll-probe:focus-visible {
+  outline: 2px solid #5eead4;
+  outline-offset: 3px;
+}
+
+.scroll-probe {
+  height: 180px;
+  overflow: auto;
+  border: 1px dashed #5eead4;
+  border-radius: 12px;
+  background: rgba(2, 6, 23, 0.7);
+}
+
+.scroll-content {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  width: 700px;
+  min-height: 600px;
+  padding: 16px;
+}
+
+.scroll-content p {
+  margin: 0;
+}
+
+.scroll-middle {
+  color: #5eead4;
+}
+
+.log-card,
+.export-card {
+  margin-top: 16px;
+}
+
+#event-log {
+  max-height: 300px;
+}
+
+#diagnostics-json {
+  font-size: 0.85rem;
+}
+
+@media (max-width: 720px) {
+  .section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

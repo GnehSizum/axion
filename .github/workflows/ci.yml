@@ -112,6 +112,7 @@ jobs:
       CXX: clang++-19
       HOST_CC: clang-19
       HOST_CXX: clang++-19
+      CLANG_PATH: /usr/bin/clang-19
       LIBCLANG_PATH: /usr/lib/llvm-19/lib
     steps:
       - uses: actions/checkout@v4
@@ -128,6 +129,16 @@ jobs:
             native-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y clang-19 libclang-19-dev cmake gperf libdbus-1-dev libfontconfig1-dev libegl1-mesa-dev libgles2-mesa-dev libglib2.0-dev libharfbuzz-dev liblzma-dev libudev-dev libunwind-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev xorg-dev libxkbcommon-dev libxkbcommon-x11-0 libvulkan1 m4
+      - name: Diagnose native compiler selection
+        run: |
+          test -x "$CLANG_PATH"
+          test -r "$LIBCLANG_PATH/libclang.so"
+          "$CC" --version
+          "$CXX" --version
+          "$CLANG_PATH" --version
+          "$CLANG_PATH" -print-resource-dir
+          "$CLANG_PATH" -E -x c++ /dev/null -v
+          readlink -f "$LIBCLANG_PATH/libclang.so"
       - name: Compile Servo runtime
         run: cargo check --workspace --features servo-runtime --locked
 
@@ -139,6 +150,7 @@ jobs:
       CXX: clang++-19
       HOST_CC: clang-19
       HOST_CXX: clang++-19
+      CLANG_PATH: /usr/bin/clang-19
       LIBCLANG_PATH: /usr/lib/llvm-19/lib
     runs-on: ubuntu-24.04
     if: github.event_name == 'workflow_dispatch' && inputs.run_gui_smoke == 'true'
@@ -159,6 +171,16 @@ jobs:
             native-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
       - name: Install GUI build dependencies
         run: sudo apt-get update && sudo apt-get install -y xvfb clang-19 libclang-19-dev cmake gperf libdbus-1-dev libfontconfig1-dev libegl1-mesa-dev libgles2-mesa-dev libglib2.0-dev libharfbuzz-dev liblzma-dev libudev-dev libunwind-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev xorg-dev libxkbcommon-dev libxkbcommon-x11-0 libvulkan1 m4
+      - name: Diagnose native compiler selection
+        run: |
+          test -x "$CLANG_PATH"
+          test -r "$LIBCLANG_PATH/libclang.so"
+          "$CC" --version
+          "$CXX" --version
+          "$CLANG_PATH" --version
+          "$CLANG_PATH" -print-resource-dir
+          "$CLANG_PATH" -E -x c++ /dev/null -v
+          readlink -f "$LIBCLANG_PATH/libclang.so"
       - name: Run bridge diagnostics GUI smoke
         run: |
           xvfb-run -a cargo run -p axion-cli -- gui-smoke \
@@ -227,19 +249,22 @@ jobs:
             grep -o '"app_name":"[^"]*"' "$report" | head -n 1
           done
       - name: Write GUI smoke report summaries
+        if: always()
         run: |
           for report in target/axion/reports/*-gui-smoke.json; do
+            [ -f "$report" ] || continue
             summary="${report%.json}-summary.json"
-            cargo run -p axion-cli -- report "$report" --output "$summary"
+            cargo run -p axion-cli -- report "$report" --allow-failed --output "$summary"
           done
       - name: Upload GUI smoke artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: axion-gui-smoke
           path: |
             target/axion/reports/*-gui-smoke.json
             target/axion/reports/*-gui-smoke-summary.json
-          if-no-files-found: error
+          if-no-files-found: warn
 
   release-preview:
     name: Optional release preview
@@ -249,6 +274,7 @@ jobs:
       CXX: clang++-19
       HOST_CC: clang-19
       HOST_CXX: clang++-19
+      CLANG_PATH: /usr/bin/clang-19
       LIBCLANG_PATH: /usr/lib/llvm-19/lib
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     runs-on: ubuntu-24.04
@@ -270,6 +296,16 @@ jobs:
             native-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
       - name: Install release build dependencies
         run: sudo apt-get update && sudo apt-get install -y xvfb clang-19 libclang-19-dev cmake gperf libdbus-1-dev libfontconfig1-dev libegl1-mesa-dev libgles2-mesa-dev libglib2.0-dev libharfbuzz-dev liblzma-dev libudev-dev libunwind-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev xorg-dev libxkbcommon-dev libxkbcommon-x11-0 libvulkan1 m4
+      - name: Diagnose native compiler selection
+        run: |
+          test -x "$CLANG_PATH"
+          test -r "$LIBCLANG_PATH/libclang.so"
+          "$CC" --version
+          "$CXX" --version
+          "$CLANG_PATH" --version
+          "$CLANG_PATH" -print-resource-dir
+          "$CLANG_PATH" -E -x c++ /dev/null -v
+          readlink -f "$LIBCLANG_PATH/libclang.so"
       - name: Generate release application
         run: |
           cargo run -p axion-cli -- new release-preview-app --path "$RUNNER_TEMP/axion-release-preview-source"
@@ -333,6 +369,7 @@ jobs:
           grep -q '"verification":{"checked":true,"passed":true' target/axion/reports/hello-release.json
           grep -q '"schema":"axion.report-summary.v1"' target/axion/reports/hello-release-summary.json
       - name: Upload release preview artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: axion-release-preview
@@ -343,4 +380,4 @@ jobs:
             target/axion/reports/hello-bundle.json
             target/axion/reports/hello-bundle.tar
             target/axion/reports/release-deployment.log
-          if-no-files-found: error
+          if-no-files-found: warn

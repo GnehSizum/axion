@@ -1149,7 +1149,9 @@ mod tests {
         let icons = root.join("icons");
         fs::create_dir_all(&frontend).unwrap();
         fs::create_dir_all(&icons).unwrap();
-        fs::create_dir_all(root.join("servo").join("components").join("servo")).unwrap();
+        let sdk_root = root.join("sdk");
+        super::super::sdk::fixture_sdk(&sdk_root, env!("CARGO_PKG_VERSION"));
+        super::super::sdk::fixture_application(&root, &sdk_root);
         fs::write(
             frontend.join("index.html"),
             "<!doctype html><script src=\"app.js\"></script>",

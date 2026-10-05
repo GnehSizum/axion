@@ -31,7 +31,7 @@ pub use axion_bridge::{
     WindowControlHandle, WindowControlRequest, WindowControlResponse, WindowStateSnapshot,
 };
 
-pub const AXION_RELEASE_VERSION: &str = "v0.6.1";
+pub const AXION_RELEASE_VERSION: &str = "v0.6.2";
 pub const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 pub trait RuntimePlugin: Send + Sync {
@@ -1059,7 +1059,9 @@ fn register_builtin_commands(
         let window_control = window_control.clone();
         builder.register_command_async("app.exit", move |_context, _request| {
             let window_control = window_control.clone();
-            axion_bridge::run_blocking_control(move || execute_app_exit_json(&window_control))
+            axion_bridge::run_blocking_control_with_deadline(move |deadline| {
+                execute_app_exit_json(&window_control.with_deadline(deadline))
+            })
         });
     }
 
@@ -1114,7 +1116,8 @@ fn register_builtin_commands(
         let window_control = window_control.clone();
         builder.register_command_async("window.list", move |_context, request| {
             let window_control = window_control.clone();
-            axion_bridge::run_blocking_control(move || {
+            axion_bridge::run_blocking_control_with_deadline(move |deadline| {
+                let window_control = window_control.with_deadline(deadline);
                 validate_native_payload(&request.command, &request.payload)?;
                 execute_window_control_json(&window_control, None, WindowControlRequest::ListStates)
             })
@@ -1128,7 +1131,8 @@ fn register_builtin_commands(
         let window_control = window_control.clone();
         builder.register_command_async("window.info", move |context, request| {
             let window_control = window_control.clone();
-            axion_bridge::run_blocking_control(move || {
+            axion_bridge::run_blocking_control_with_deadline(move |deadline| {
+                let window_control = window_control.with_deadline(deadline);
                 validate_native_payload(&request.command, &request.payload)?;
                 let target_window_id = json_string_field(&request.payload, "target");
                 let state =
@@ -1145,7 +1149,8 @@ fn register_builtin_commands(
         let window_control = window_control.clone();
         builder.register_command_async("window.show", move |_context, request| {
             let window_control = window_control.clone();
-            axion_bridge::run_blocking_control(move || {
+            axion_bridge::run_blocking_control_with_deadline(move |deadline| {
+                let window_control = window_control.with_deadline(deadline);
                 validate_native_payload(&request.command, &request.payload)?;
                 let target_window_id = json_string_field(&request.payload, "target");
                 execute_window_control_json(
@@ -1164,7 +1169,8 @@ fn register_builtin_commands(
         let window_control = window_control.clone();
         builder.register_command_async("window.hide", move |_context, request| {
             let window_control = window_control.clone();
-            axion_bridge::run_blocking_control(move || {
+            axion_bridge::run_blocking_control_with_deadline(move |deadline| {
+                let window_control = window_control.with_deadline(deadline);
                 validate_native_payload(&request.command, &request.payload)?;
                 let target_window_id = json_string_field(&request.payload, "target");
                 execute_window_control_json(
@@ -1183,7 +1189,8 @@ fn register_builtin_commands(
         let window_control = window_control.clone();
         builder.register_command_async("window.close", move |_context, request| {
             let window_control = window_control.clone();
-            axion_bridge::run_blocking_control(move || {
+            axion_bridge::run_blocking_control_with_deadline(move |deadline| {
+                let window_control = window_control.with_deadline(deadline);
                 validate_native_payload(&request.command, &request.payload)?;
                 let target_window_id = json_string_field(&request.payload, "target");
                 execute_window_control_json(
@@ -1202,7 +1209,8 @@ fn register_builtin_commands(
         let window_control = window_control.clone();
         builder.register_command_async("window.confirm_close", move |_context, request| {
             let window_control = window_control.clone();
-            axion_bridge::run_blocking_control(move || {
+            axion_bridge::run_blocking_control_with_deadline(move |deadline| {
+                let window_control = window_control.with_deadline(deadline);
                 validate_native_payload(&request.command, &request.payload)?;
                 let request_id =
                     json_string_field(&request.payload, "requestId").ok_or_else(|| {
@@ -1227,7 +1235,8 @@ fn register_builtin_commands(
         let window_control = window_control.clone();
         builder.register_command_async("window.prevent_close", move |_context, request| {
             let window_control = window_control.clone();
-            axion_bridge::run_blocking_control(move || {
+            axion_bridge::run_blocking_control_with_deadline(move |deadline| {
+                let window_control = window_control.with_deadline(deadline);
                 validate_native_payload(&request.command, &request.payload)?;
                 let request_id =
                     json_string_field(&request.payload, "requestId").ok_or_else(|| {
@@ -1252,7 +1261,8 @@ fn register_builtin_commands(
         let window_control = window_control.clone();
         builder.register_command_async("window.focus", move |_context, request| {
             let window_control = window_control.clone();
-            axion_bridge::run_blocking_control(move || {
+            axion_bridge::run_blocking_control_with_deadline(move |deadline| {
+                let window_control = window_control.with_deadline(deadline);
                 validate_native_payload(&request.command, &request.payload)?;
                 let target_window_id = json_string_field(&request.payload, "target");
                 execute_window_control_json(
@@ -1271,7 +1281,8 @@ fn register_builtin_commands(
         let window_control = window_control.clone();
         builder.register_command_async("window.reload", move |_context, request| {
             let window_control = window_control.clone();
-            axion_bridge::run_blocking_control(move || {
+            axion_bridge::run_blocking_control_with_deadline(move |deadline| {
+                let window_control = window_control.with_deadline(deadline);
                 validate_native_payload(&request.command, &request.payload)?;
                 let target_window_id = json_string_field(&request.payload, "target");
                 execute_window_control_json(
@@ -1290,7 +1301,8 @@ fn register_builtin_commands(
         let window_control = window_control.clone();
         builder.register_command_async("window.set_title", move |_context, request| {
             let window_control = window_control.clone();
-            axion_bridge::run_blocking_control(move || {
+            axion_bridge::run_blocking_control_with_deadline(move |deadline| {
+                let window_control = window_control.with_deadline(deadline);
                 validate_native_payload(&request.command, &request.payload)?;
                 let target_window_id = json_string_field(&request.payload, "target");
                 let title = json_string_field(&request.payload, "title").ok_or_else(|| {
@@ -1315,7 +1327,8 @@ fn register_builtin_commands(
         let window_control = window_control.clone();
         builder.register_command_async("window.set_size", move |_context, request| {
             let window_control = window_control.clone();
-            axion_bridge::run_blocking_control(move || {
+            axion_bridge::run_blocking_control_with_deadline(move |deadline| {
+                let window_control = window_control.with_deadline(deadline);
                 validate_native_payload(&request.command, &request.payload)?;
                 let target_window_id = json_string_field(&request.payload, "target");
                 let width = json_u32_field(&request.payload, "width").ok_or_else(|| {
@@ -1590,8 +1603,13 @@ fn execute_window_control_json(
 ) -> Result<String, String> {
     match window_control
         .execute(target_window_id, request)
-        .map_err(|error| window_error("control-failed", &error))?
-    {
+        .map_err(|error| {
+            if error.starts_with("window.control-timeout:") {
+                error
+            } else {
+                window_error("control-failed", &error)
+            }
+        })? {
         WindowControlResponse::AppExit { .. } => Err(window_error(
             "unexpected-response",
             "window control backend returned an unexpected app exit response",
@@ -1617,8 +1635,13 @@ fn execute_window_control_json(
 fn execute_app_exit_json(window_control: &WindowControlHandle) -> Result<String, String> {
     match window_control
         .execute(None, WindowControlRequest::ExitApp)
-        .map_err(|error| app_error("exit-failed", &error))?
-    {
+        .map_err(|error| {
+            if error.starts_with("window.control-timeout:") {
+                error
+            } else {
+                app_error("exit-failed", &error)
+            }
+        })? {
         WindowControlResponse::AppExit {
             request_id,
             window_count,
@@ -1656,6 +1679,7 @@ fn current_window_state(
             "unexpected-response",
             "window control backend returned an unexpected app exit response",
         )),
+        Err(error) if error.starts_with("window.control-timeout:") => Err(error),
         Err(_) if target_window_id.is_none_or(|target| target == context.window.id) => {
             Ok(WindowStateSnapshot {
                 id: context.window.id.clone(),
@@ -2455,7 +2479,7 @@ mod tests {
         ))
         .expect("app.version should dispatch");
         assert!(version.contains("\"framework\":\"axion\""));
-        assert!(version.contains("\"release\":\"v0.6.1\""));
+        assert!(version.contains("\"release\":\"v0.6.2\""));
 
         let dialog_open = block_on(binding.bridge_bindings.command_registry.dispatch(
             &binding.command_context,

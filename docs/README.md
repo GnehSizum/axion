@@ -7,6 +7,8 @@ This directory contains public, user-facing documentation for Axion.
 - `getting-started.md`: create and run a minimal Axion app.
 - `cli.md`: command reference for `axion-cli`.
 - `ci.md`: CI validation flow and report artifact guidance.
+- `platform-support.md`: measured platform scope, remaining validation gaps, and initial performance samples.
+- `input-validation.md`: native IME, editing, display scale, mouse, and trackpad acceptance steps.
 - `manifest.md`: `axion.toml` configuration guide.
 - `capabilities.md`: profile expansion, permission risk, and least-privilege examples.
 - `packaging.md`: bundle layouts, verification, icons, and release checks.
@@ -23,7 +25,7 @@ This directory contains public, user-facing documentation for Axion.
 
 ## Current Version
 
-Axion is at **v0.6.1 developer preview**. The current preview focuses on the core desktop framework loop:
+Axion is at **v0.6.2 developer preview**. The current preview focuses on the core desktop framework loop:
 
 1. load an app manifest
 2. build a runtime plan

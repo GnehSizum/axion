@@ -10,7 +10,7 @@ Public releases and Git tags use this format:
 v<major>.<minor>.<patch>
 ```
 
-Example: `v0.6.1`.
+Example: `v0.6.2`.
 
 The public version does not append the internal Axion feature milestone or a separate bugfix component. The Servo baseline and internal feature milestone are recorded separately in `Cargo.toml` under `[workspace.metadata.axion]`.
 
@@ -22,17 +22,17 @@ Rust crates in this workspace use the same version without the `v` prefix:
 <major>.<minor>.<patch>
 ```
 
-For public release `v0.6.1`, workspace crates use Cargo version `0.6.1`.
+For public release `v0.6.2`, workspace crates use Cargo version `0.6.2`.
 
 ## Current Release Baseline
 
 The current release baseline is:
 
-- public release: `v0.6.1`
-- Cargo workspace version: `0.6.1`
+- public release: `v0.6.2`
+- Cargo workspace version: `0.6.2`
 - Servo baseline: `0.6` (vendored engine release `0.6.0`)
 - internal Axion feature milestone: `33`
-- internal Axion bugfix milestone: `1`
+- internal Axion bugfix milestone: `2`
 
 ## Historical Versions
 

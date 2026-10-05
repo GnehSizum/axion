@@ -1,6 +1,6 @@
 # Packaging
 
-Axion v0.6.1 provides bundle scaffolds and preview release artifacts for local validation and early distribution experiments. These bundles are not signed installers yet.
+Axion v0.6.2 provides bundle scaffolds and preview release artifacts for local validation and early distribution experiments. These bundles are not signed installers yet.
 
 ## Bundle Command
 

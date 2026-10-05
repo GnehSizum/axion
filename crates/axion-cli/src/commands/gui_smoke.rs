@@ -640,8 +640,11 @@ fn gui_smoke_failure(
 
     let detail = stderr
         .lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
+        .find(|line| {
+            let line = line.trim_start();
+            line.starts_with("error:") || line.starts_with("error[") || line.contains(": error:")
+        })
+        .or_else(|| stderr.lines().rev().find(|line| !line.trim().is_empty()))
         .unwrap_or("no diagnostics report was printed");
     let phase = classify_failure_phase(status, stderr);
     let help = match phase {
@@ -1140,6 +1143,29 @@ mod tests {
 
         assert!(failure.message.contains("error detail"));
         assert_eq!(failure.phase, FailurePhase::Runtime);
+    }
+
+    #[test]
+    fn build_failure_keeps_the_error_before_cargos_trailing_warning() {
+        let failure = gui_smoke_failure(
+            failing_status(),
+            false,
+            "error: failed to run custom build command for `mozangle v0.7.1`\n\nwarning: build failed, waiting for other jobs to finish...\n",
+        );
+        assert_eq!(failure.phase, FailurePhase::Build);
+        assert!(
+            failure
+                .message
+                .contains("failed to run custom build command for `mozangle")
+        );
+        assert!(!failure.message.contains("waiting for other jobs"));
+
+        let failure = gui_smoke_failure(
+            failing_status(),
+            false,
+            "Compiling engine\n/usr/include/input.h:23:3: error: unknown builtin\nwarning: build failed, waiting for other jobs to finish...\n",
+        );
+        assert!(failure.message.contains("unknown builtin"));
     }
 
     #[test]

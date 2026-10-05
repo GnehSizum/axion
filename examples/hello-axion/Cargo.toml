@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [features]
 default = []
+lifecycle-probe = ["servo-runtime", "axion-runtime/lifecycle-probe"]
 servo-runtime = ["axion-runtime/servo-runtime"]
 
 [dependencies]

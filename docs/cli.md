@@ -15,6 +15,14 @@ cargo run -p axion-cli -- new demo-app --template vanilla --path /tmp/demo-app
 cargo run -p axion-cli -- new native-demo --template native-api-demo --path /tmp/native-demo --run-check
 ```
 
+To use the CLI outside the repository, first install it from the configured SDK root:
+
+```sh
+cargo install --path crates/axion-cli --features servo-runtime --locked
+```
+
+Then run `axion-cli` from your application directory. The `servo-runtime` feature is needed for `dev --launch`; manifest checks and scaffold commands can use a CLI built without that feature.
+
 Project names are normalized to lowercase kebab-case for package use.
 
 Options:
@@ -22,7 +30,22 @@ Options:
 - `--template vanilla`: generate a plain HTML/CSS/JavaScript app with bridge, native API, custom command, capability-denial, and bundle-icon demos.
 - `--template native-api-demo`: generate the same no-dependency app structure with UI copy, a Native API Workbench "Run all checks" button, and README guidance focused on app/window metadata, clipboard, shell URL validation, app-data filesystem, dialogs, input compatibility, and GUI smoke diagnostics.
 - `--path <path>`: choose the output directory.
+- `--sdk-path <path>`: select a local Axion source SDK. Its `axion-core`, `axion-manifest`, `axion-runtime` and `axion-window-winit` versions must exactly match the CLI version. The SDK must include Servo, `rust-toolchain.toml` and the platform Cargo configuration example. Invalid SDKs fail before creating the application. Without this option, an available SDK checkout used to build the CLI is selected; otherwise supply the path explicitly.
 - `--run-check`: run `check --dev --bundle` immediately after generation.
+
+The selected SDK supplies the application's dependency paths, Rust toolchain and Cargo configuration. Both templates support SDK/application paths containing spaces or Unicode; quote such paths when invoking the shell:
+
+```sh
+axion-cli new notes --sdk-path "/path/源码 SDK" --path "/path/我的应用" --run-check
+cd "/path/我的应用"
+axion-cli doctor --json
+axion-cli gui-smoke --cargo-target-dir target --serial-build
+axion-cli release --archive
+```
+
+### Rebind an existing application to a local SDK
+
+There is no automatic migration command. Install a CLI with the new SDK's exact version, then update all three `[dependencies]` paths in the application's `Cargo.toml` together: `axion-core`, `axion-manifest` and `axion-runtime` must point to their directories under the same SDK's `crates/`. Copy that SDK's `rust-toolchain.toml`; merge its platform `.cargo/config*.example.toml` environment/profile settings into the application's `.cargo/config.toml`, preserving intentional application overrides. From the application directory, run `cargo metadata --no-deps --offline --format-version 1` and `axion-cli doctor --json`, then run the normal check/GUI/release gates. Cargo will update the application's lock file when its dependency graph changes; review and keep the resulting lock file with the application.
 
 ## `dev`
 
@@ -108,6 +131,8 @@ cargo run -p axion-cli --features servo-runtime -- dev \
 After the window opens, edit a file under `examples/hello-axion/frontend/`. A successful live reload prints `reload_requested` and `reload_applied: window=main`. Multi-window apps print one reload result per live window. If any target reports `restart_required`, `--restart-on-change` prints `restart_requested`, `restart_exit_requested`, and then `restart_applied` after the current windows close and the app is relaunched. The event log records the same flow as JSONL with schema `axion.dev-event.v1`; the report file records the session summary as `axion.dev-report.v1`.
 
 ## `doctor`
+
+SDK discovery uses `cargo metadata --no-deps --offline` for the application and its direct local `axion-runtime` dependency. It checks that the Axion dependencies share the same SDK and exactly match the CLI version and that the application's `servo-runtime` feature forwards to the runtime. This metadata query does not compile, download registry dependencies or create/update the application lock file. A nearby `servo/` directory alone is insufficient. The JSON diagnostics include `sdk` with the source root/version, Servo path, package Rust requirement, SDK/application toolchain-file paths and runtime-feature availability. `cargo` and `rustc` versions are queried from the application directory so its toolchain override is active. SDK discovery or feature failures block GUI readiness while pure manifest/self-test/scaffold validation remains available.
 
 Validate Axion version metadata, local tooling, manifest configuration, app metadata, native dialog, clipboard, shell, and lifecycle configuration, effective runtime native backends, frontend assets, runtime diagnostics, capability categories including clipboard and shell access, and Servo path availability.
 

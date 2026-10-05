@@ -74,6 +74,8 @@ Frontend code invokes Rust-side commands through the injected bridge:
 const response = await window.__AXION__.invoke("app.ping", { from: "frontend" });
 ```
 
+Built-in `window.*` and `app.exit` requests share a five-second total deadline, including the bounded control queue. A `window.control-timeout` response means the caller stopped waiting; side effects that already started may still complete. Expired queued requests do not start.
+
 Bridge payloads must be valid JSON values, with at most 64 KiB of UTF-8 data and 64 nested array/object containers. Request ids, command names, event names, and payload sizes are validated before dispatch.
 
 The bridge uses a per-window bearer token, additionally bound to Servo's native `target_webview_id`. An invoke or emit request must carry the exact token registered for its originating WebView; a missing or unknown native context, an invalid token, or another window's token is rejected. The initiating window's capabilities authorize the command, including an explicitly supplied `target` window. Cross-window control does not change the caller's identity.
@@ -86,9 +88,11 @@ This app-data sandbox is a framework-level path sandbox, not an operating-system
 
 Dialog, clipboard, and shell commands are also capability-gated. Keep `[native.dialog] backend = "headless"` and `[native.clipboard] backend = "memory"` for CI and non-interactive environments. Use shell-opening only for trusted packaged UI, because opener calls can hand control to external apps or browsers.
 
+Servo DOM text editing uses its own clipboard delegate. With Servo's `clipboard` Cargo feature enabled, native Copy/Cut/Paste accesses the operating system clipboard without dispatching Axion `clipboard.*` bridge commands. `[native.clipboard] backend = "memory"` controls only those bridge commands; Servo's in-process fallback and Axion's memory store are separate. Enabling this Cargo feature does not itself enable the asynchronous `navigator.clipboard` API.
+
 Close confirmation is intentionally timeout-bound. Keep `[native.lifecycle] close_timeout_ms` long enough for trusted UI prompts, but do not rely on it as a security boundary; it is a lifecycle safety net for unsaved-state flows. Close deadlines run on the native event loop, and confirmation or prevention cancels the pending deadline. Repeated `app.exit` calls while an exit is pending return the same request id. Any prevention ends that exit request and cancels its remaining close requests.
 
-Window-control calls wait at most five seconds for a native response after a control worker submits the request to the event loop; time queued in the control pool is not included. Calls from the event-loop thread fail immediately rather than waiting on themselves; requests that expire in the event-loop queue before execution have no effect. A timeout does not undo an operation that already began.
+Built-in control calls measure their five-second deadline from the future's first poll, including control-pool queue time and the native response. Calls from the event-loop thread fail immediately rather than waiting on themselves; requests that expire before worker or event-loop execution do not start. A timeout does not undo an operation that already began.
 
 If a window can call `app.exit`, at least one trusted packaged window should also be able to call both `window.confirm_close` and `window.prevent_close`. Otherwise application exit can request window closes but frontend code has no authorized close-decision path for guarded shutdown flows.
 

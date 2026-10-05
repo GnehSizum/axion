@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use axion_core::{AppConfig, Builder, RunMode};
@@ -6,6 +6,7 @@ use axion_runtime::{DiagnosticsReport, DiagnosticsWindowReport, json_string_lite
 
 use crate::cli::{DoctorArgs, DoctorRisk};
 use crate::commands::dev::dev_server_is_reachable;
+use crate::commands::sdk::{ApplicationSdk, application_sdk};
 use crate::error::AxionCliError;
 
 pub fn run(args: DoctorArgs) -> Result<(), AxionCliError> {
@@ -22,11 +23,34 @@ pub fn run(args: DoctorArgs) -> Result<(), AxionCliError> {
 
     println!("Axion doctor");
     println!("{}", framework_diagnostic_line());
-    print_tool_status("cargo", &["--version"]);
-    print_rustc_status();
-    let servo_path = servo_path_for_manifest(&args.manifest_path);
-    print_manifest_status(&args.manifest_path, servo_path.as_deref())?;
-    print_servo_status(servo_path.as_deref());
+    let cargo = tool_status_for_manifest("cargo", &["--version"], &args.manifest_path);
+    let rustc = tool_status_for_manifest("rustc", &["--version"], &args.manifest_path);
+    println!("cargo: {} ({})", cargo.status, cargo.detail);
+    println!("rustc: {} ({})", rustc.status, rustc.detail);
+    if rustc.status == "ok" {
+        println!("{}", rustc_msrv_diagnostic_line(&rustc.detail));
+    }
+    let sdk = application_sdk(&args.manifest_path);
+    print_manifest_status(&args.manifest_path, &sdk)?;
+    match &sdk {
+        Ok(application) => {
+            println!(
+                "sdk: ok (path={}, version={})",
+                application.sdk.root.display(),
+                application.sdk.version
+            );
+            println!(
+                "sdk.servo_runtime_feature: {}",
+                application.servo_runtime_feature
+            );
+            println!(
+                "sdk.toolchain_file: {}",
+                application.sdk.toolchain_file.display()
+            );
+            print_servo_status(Some(&application.sdk.servo_path));
+        }
+        Err(error) => println!("sdk: unavailable ({error})"),
+    }
     let gate = doctor_gate_for_manifest(&args)?;
     for line in gate.to_lines() {
         println!("{line}");
@@ -47,42 +71,29 @@ fn framework_diagnostic_line() -> String {
     )
 }
 
-fn print_tool_status(program: &str, args: &[&str]) {
-    let status = tool_status(program, args);
-    println!("{}: {} ({})", status.name, status.status, status.detail);
-}
-
-fn tool_status(program: &str, args: &[&str]) -> ToolDiagnostic {
-    match Command::new(program).args(args).output() {
-        Ok(output) if output.status.success() => {
-            let version = String::from_utf8_lossy(&output.stdout);
-            ToolDiagnostic {
-                name: program.to_owned(),
-                status: "ok".to_owned(),
-                detail: version.trim().to_owned(),
-            }
-        }
-        Ok(output) => {
-            let error = String::from_utf8_lossy(&output.stderr);
-            ToolDiagnostic {
-                name: program.to_owned(),
-                status: "failed".to_owned(),
-                detail: error.trim().to_owned(),
-            }
-        }
+fn tool_status_for_manifest(program: &str, args: &[&str], manifest_path: &Path) -> ToolDiagnostic {
+    let directory = manifest_path.parent().unwrap_or(Path::new("."));
+    let mut command = Command::new(program);
+    command.args(args);
+    if directory.is_dir() {
+        command.current_dir(directory);
+    }
+    match command.output() {
+        Ok(output) if output.status.success() => ToolDiagnostic {
+            name: program.to_owned(),
+            status: "ok".to_owned(),
+            detail: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        },
+        Ok(output) => ToolDiagnostic {
+            name: program.to_owned(),
+            status: "failed".to_owned(),
+            detail: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        },
         Err(error) => ToolDiagnostic {
             name: program.to_owned(),
             status: "missing".to_owned(),
             detail: error.to_string(),
         },
-    }
-}
-
-fn print_rustc_status() {
-    let status = tool_status("rustc", &["--version"]);
-    println!("rustc: {} ({})", status.status, status.detail);
-    if status.status == "ok" {
-        println!("{}", rustc_msrv_diagnostic_line(&status.detail));
     }
 }
 
@@ -128,7 +139,7 @@ fn parse_semver(value: &str) -> Option<(u64, u64, u64)> {
 
 fn print_manifest_status(
     manifest_path: &Path,
-    servo_path: Option<&Path>,
+    sdk: &Result<ApplicationSdk, String>,
 ) -> Result<(), AxionCliError> {
     if !manifest_path.exists() {
         println!("manifest: missing ({})", manifest_path.display());
@@ -163,7 +174,7 @@ fn print_manifest_status(
         }
         Err(error) => println!("runtime: invalid ({error})"),
     }
-    let readiness = readiness_diagnostics(&config, &security, runtime.as_ref().ok(), servo_path);
+    let readiness = readiness_with_sdk(&config, &security, runtime.as_ref().ok(), sdk);
     for line in readiness.to_lines() {
         println!("{line}");
     }
@@ -1150,7 +1161,7 @@ fn readiness_diagnostics(
 
     if servo_path.is_none() {
         gui_blockers.push(
-            "servo source was not found near the manifest; run GUI smoke from an Axion checkout"
+            "Servo source could not be identified from the application Cargo dependencies"
                 .to_owned(),
         );
     }
@@ -1376,21 +1387,34 @@ fn print_servo_status(servo_path: Option<&Path>) {
     if let Some(servo_path) = servo_path {
         println!("servo: ok ({})", servo_path.display());
     } else {
-        println!("servo: missing (searched manifest ancestors)");
+        println!("servo: missing (application Cargo dependency metadata)");
     }
 }
 
-fn servo_path_for_manifest(manifest_path: &Path) -> Option<PathBuf> {
-    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-
-    for ancestor in manifest_dir.ancestors() {
-        let candidate = ancestor.join("servo");
-        if candidate.join("components").join("servo").exists() {
-            return Some(candidate);
-        }
+fn readiness_with_sdk(
+    config: &AppConfig,
+    security: &SecurityDiagnostics,
+    runtime: Option<&axion_runtime::RuntimeDiagnosticReport>,
+    sdk: &Result<ApplicationSdk, String>,
+) -> DoctorReadiness {
+    let servo_path = sdk
+        .as_ref()
+        .ok()
+        .map(|application| application.sdk.servo_path.as_path());
+    let mut readiness = readiness_diagnostics(config, security, runtime, servo_path);
+    let issue = match sdk {
+        Err(error) => Some(format!("gui_smoke: SDK discovery failed: {error}")),
+        Ok(application) if !application.servo_runtime_feature => Some(
+            "gui_smoke: application feature 'servo-runtime' must enable axion-runtime/servo-runtime".to_owned()
+        ),
+        _ => None,
+    };
+    if let Some(issue) = issue {
+        readiness.ready_for_gui_smoke = false;
+        readiness.blockers.push(issue);
+        readiness.blockers.sort();
     }
-
-    None
+    readiness
 }
 
 fn manifest_security_diagnostics(
@@ -1431,19 +1455,23 @@ pub(crate) fn doctor_readiness_for_manifest(
     let config = axion_manifest::load_app_config_from_path(manifest_path)?;
     let runtime = runtime_diagnostic_report(&config)?;
     let security = manifest_security_diagnostics(&config, manifest_path)?;
-    Ok(readiness_diagnostics(
+    Ok(readiness_with_sdk(
         &config,
         &security,
         Some(&runtime),
-        servo_path_for_manifest(manifest_path).as_deref(),
+        &application_sdk(manifest_path),
     ))
 }
 
 fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> {
     let manifest_path = &args.manifest_path;
-    let cargo = tool_status("cargo", &["--version"]);
-    let rustc = tool_status("rustc", &["--version"]);
-    let servo_path = servo_path_for_manifest(manifest_path);
+    let cargo = tool_status_for_manifest("cargo", &["--version"], manifest_path);
+    let rustc = tool_status_for_manifest("rustc", &["--version"], manifest_path);
+    let sdk = application_sdk(manifest_path);
+    let servo_path = sdk
+        .as_ref()
+        .ok()
+        .map(|application| application.sdk.servo_path.as_path());
     let missing_gate = DoctorGate {
         passed: false,
         failed_reasons: vec!["manifest is missing".to_owned()],
@@ -1483,7 +1511,8 @@ fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> 
                 security: None,
                 gate: &missing_gate,
                 readiness: &missing_readiness,
-                servo_path: servo_path.as_deref(),
+                servo_path,
+                sdk: Some(&sdk),
                 dev_server: None,
                 runtime: None,
             })),
@@ -1496,8 +1525,7 @@ fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> 
     let runtime = axion_runtime::diagnostic_report(&app, RunMode::Production);
     let security = manifest_security_diagnostics(&config, manifest_path)?;
     let gate = DoctorGate::evaluate(&security, args);
-    let readiness =
-        readiness_diagnostics(&config, &security, Some(&runtime), servo_path.as_deref());
+    let readiness = readiness_with_sdk(&config, &security, Some(&runtime), &sdk);
     let rustc_msrv = if rustc.status == "ok" {
         rustc_msrv_diagnostic_line(&rustc.detail)
     } else {
@@ -1603,7 +1631,8 @@ fn doctor_report(args: &DoctorArgs) -> Result<DiagnosticsReport, AxionCliError> 
             security: Some(&security),
             gate: &gate,
             readiness: &readiness,
-            servo_path: servo_path.as_deref(),
+            servo_path,
+            sdk: Some(&sdk),
             dev_server: Some(dev_server_diagnostic_line(&config)),
             runtime: Some(&runtime),
         })),
@@ -1619,6 +1648,7 @@ struct DoctorDiagnosticsInput<'a> {
     gate: &'a DoctorGate,
     readiness: &'a DoctorReadiness,
     servo_path: Option<&'a Path>,
+    sdk: Option<&'a Result<ApplicationSdk, String>>,
     dev_server: Option<String>,
     runtime: Option<&'a axion_runtime::RuntimeDiagnosticReport>,
 }
@@ -1634,6 +1664,11 @@ fn doctor_diagnostics_json(input: DoctorDiagnosticsInput<'_>) -> String {
             json_string_literal(&path.display().to_string())
         ),
         None => "{\"status\":\"missing\",\"path\":null}".to_owned(),
+    };
+    let sdk = match input.sdk {
+        Some(Ok(application)) => serde_json::json!({"status":"ok", "application":application}),
+        Some(Err(error)) => serde_json::json!({"status":"unavailable", "error":error}),
+        None => serde_json::Value::Null,
     };
     let runtime = input
         .runtime
@@ -1654,7 +1689,7 @@ fn doctor_diagnostics_json(input: DoctorDiagnosticsInput<'_>) -> String {
         .unwrap_or_else(|| "null".to_owned());
 
     format!(
-        "{{\"framework\":{{\"cli_version\":{},\"release\":{},\"msrv\":{}}},\"tools\":[{},{}],\"rustc_msrv\":{},\"security\":{},\"gate\":{},\"readiness\":{},\"servo\":{},\"dev_server\":{},\"runtime\":{}}}",
+        "{{\"framework\":{{\"cli_version\":{},\"release\":{},\"msrv\":{}}},\"tools\":[{},{}],\"rustc_msrv\":{},\"security\":{},\"gate\":{},\"readiness\":{},\"servo\":{},\"sdk\":{},\"dev_server\":{},\"runtime\":{}}}",
         json_string_literal(env!("CARGO_PKG_VERSION")),
         json_string_literal(axion_runtime::AXION_RELEASE_VERSION),
         json_string_literal(option_env!("CARGO_PKG_RUST_VERSION").unwrap_or("unknown")),
@@ -1665,6 +1700,7 @@ fn doctor_diagnostics_json(input: DoctorDiagnosticsInput<'_>) -> String {
         input.gate.to_json(),
         input.readiness.to_json(),
         servo,
+        sdk,
         dev_server,
         runtime,
     )
@@ -1716,7 +1752,7 @@ mod tests {
         dev_server_diagnostic_line, dev_server_diagnostic_line_with, doctor_report,
         framework_diagnostic_line, manifest_diagnostic_lines, parse_rustc_semver, parse_semver,
         readiness_diagnostics, runtime_diagnostic_lines, rustc_msrv_diagnostic_line,
-        security_diagnostics, servo_path_for_manifest,
+        security_diagnostics,
     };
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1731,16 +1767,14 @@ mod tests {
     }
 
     #[test]
-    fn servo_path_searches_manifest_ancestors() {
+    fn adjacent_servo_tree_is_not_an_application_sdk() {
         let root = temp_dir();
         let app_dir = root.join("examples").join("hello");
         fs::create_dir_all(root.join("servo").join("components").join("servo")).unwrap();
         fs::create_dir_all(&app_dir).unwrap();
 
-        assert_eq!(
-            servo_path_for_manifest(&app_dir.join("axion.toml")),
-            Some(root.join("servo"))
-        );
+        assert!(super::application_sdk(&app_dir.join("axion.toml")).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1748,7 +1782,7 @@ mod tests {
         let line = framework_diagnostic_line();
 
         assert!(line.contains("axion: cli_version="));
-        assert!(line.contains("release=v0.6.1"));
+        assert!(line.contains("release=v0.6.2"));
         assert!(line.contains("msrv="));
     }
 
@@ -1996,7 +2030,9 @@ allowed_navigation_origins = ["https://docs.example"]
         let frontend = app_dir.join("frontend");
         fs::create_dir_all(&frontend).unwrap();
         fs::create_dir_all(app_dir.join("icons")).unwrap();
-        fs::create_dir_all(root.join("servo").join("components").join("servo")).unwrap();
+        let sdk_root = root.join("sdk");
+        super::super::sdk::fixture_sdk(&sdk_root, env!("CARGO_PKG_VERSION"));
+        super::super::sdk::fixture_application(&app_dir, &sdk_root);
         fs::write(
             frontend.join("index.html"),
             "<!doctype html><script src=\"app.js\"></script>",
@@ -2035,7 +2071,7 @@ profiles = ["app-info"]
         .unwrap();
 
         let json = doctor_report(&DoctorArgs {
-            manifest_path: manifest,
+            manifest_path: manifest.clone(),
             json: true,
             deny_warnings: true,
             max_risk: Some(DoctorRisk::Medium),
@@ -2049,6 +2085,36 @@ profiles = ["app-info"]
         assert!(json.contains("\"blockers\":[]"));
         assert!(json.contains("\"warnings\":[]"));
         assert!(json.contains("\"result\":\"ok\""));
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let sdk = &value["diagnostics"]["sdk"];
+        assert_eq!(sdk["status"], "ok");
+        assert_eq!(sdk["application"]["servo_runtime_feature"], true);
+        assert_eq!(
+            sdk["application"]["sdk"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
+
+        let cargo_manifest = app_dir.join("Cargo.toml");
+        let source = fs::read_to_string(&cargo_manifest).unwrap();
+        fs::write(
+            &cargo_manifest,
+            source.replace(
+                "servo-runtime = [\"axion-runtime/servo-runtime\"]",
+                "servo-runtime = []",
+            ),
+        )
+        .unwrap();
+        let readiness = super::doctor_readiness_for_manifest(&manifest).unwrap();
+        assert!(readiness.ready_for_dev);
+        assert!(readiness.ready_for_bundle);
+        assert!(!readiness.ready_for_gui_smoke);
+        assert!(
+            readiness
+                .blockers
+                .iter()
+                .any(|blocker| { blocker.contains("must enable axion-runtime/servo-runtime") })
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

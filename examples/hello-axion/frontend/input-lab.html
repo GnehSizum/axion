@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Axion 输入验收</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="input-lab.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Axion Input Lab</p>
+          <h1>输入与设备验收</h1>
+          <p>使用真实输入法和设备操作。页面记录诊断，不自动宣告硬件验收通过。</p>
+          <p><a href="index.html">返回 Hello Axion</a></p>
+        </div>
+        <p class="status">人工验收 · 设备结果尚未记录</p>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2>普通文本控件</h2>
+          <p>建议测试文本：Axion 中文🙂。尝试拼音预编辑、选词、Enter 提交、Esc 取消、切换英文，以及选中一段后替换。</p>
+          <label class="field">
+            <span>单行输入</span>
+            <input id="lab-input" type="text" autocomplete="off" spellcheck="false" placeholder="请用真实键盘输入测试文本">
+          </label>
+          <label class="field">
+            <span>多行输入</span>
+            <textarea id="lab-textarea" rows="6" autocomplete="off" spellcheck="false" placeholder="比较提交与普通 Enter 换行；尝试 emoji、粘贴和选区替换"></textarea>
+          </label>
+          <p class="hint">本页不安装选区兼容补丁，不合成键盘或 composition 事件。诊断只记录长度和选区，UTF-16 长度不等于字符数量。</p>
+          <pre id="field-snapshot">等待页面初始化…</pre>
+        </article>
+
+        <article class="card">
+          <h2>DPI、点击、滚动与焦点</h2>
+          <pre id="device-snapshot">等待页面初始化…</pre>
+          <p>移动窗口到不同缩放的显示器，再点击文本控件。client 坐标以 CSS 逻辑像素表示；请目视核对命中位置和候选框。</p>
+          <div id="scroll-probe" class="scroll-probe" tabindex="0" aria-label="鼠标与触控板滚动测试区域">
+            <div class="scroll-content">
+              <p>滚动区域顶部：分别测试鼠标滚轮、触控板及水平滚动。</p>
+              <p class="scroll-middle">中部标记</p>
+              <p>滚动区域底部：观察 scrollTop / scrollLeft，而不是只看 wheel 事件。</p>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="card log-card">
+        <div class="section-heading">
+          <h2>最近事件（最多 80 条）</h2>
+          <button id="clear-events" type="button">清空事件</button>
+        </div>
+        <p class="hint">保留 compositionstart/update/end、输入、键盘、选区与焦点的顺序。数据内容和字符键值不进入日志；isTrusted 仅供诊断，不能单独证明系统输入法实测。</p>
+        <pre id="event-log" aria-label="输入事件日志">尚无输入事件。</pre>
+      </section>
+
+      <section class="card export-card">
+        <div class="section-heading">
+          <h2>可复制诊断 JSON</h2>
+          <button id="export-diagnostics" type="button">生成并选择 JSON</button>
+        </div>
+        <p class="hint" id="export-status" aria-live="polite">生成后按 Cmd+C / Ctrl+C 复制。报告不包含输入文本、composition 数据、页面 URL、bridge token 或剪贴板内容。设备验收结论请另填文档矩阵。</p>
+        <textarea id="diagnostics-json" rows="8" readonly spellcheck="false" aria-label="可复制诊断 JSON"></textarea>
+      </section>
+    </main>
+    <script src="input-lab.js"></script>
+  </body>
+</html>

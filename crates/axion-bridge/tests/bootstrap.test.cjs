@@ -13,7 +13,7 @@ function configuration(overrides = {}) {
   return {
     appName: 'test-app', bridgeToken: 'test-token', commands: ['app.ping'],
     events: ['app.log'], hostEvents: ['app.ready'], trustedOrigins: ['axion://app'],
-    protocol: 'axion', version: 'v0.6.1-bootstrap',
+    protocol: 'axion', version: 'v0.6.2-bootstrap',
     diagnosticsReportSchema: 'axion.diagnostics-report.v1', ...overrides
   };
 }

@@ -15,6 +15,27 @@ cargo run -- --plan
 cargo run --features servo-runtime
 ```
 
+## Use An Installed CLI
+
+This project uses the local source SDK at @SDK_PATH@. Its Axion version must exactly match the CLI. Install the CLI once from that SDK's configured root:
+
+```sh
+cd @SDK_PATH@
+cargo install --path crates/axion-cli --features servo-runtime --locked
+```
+
+Return to this application's directory and run:
+
+```sh
+axion-cli doctor --json
+axion-cli check --dev --bundle --json --report-path target/axion/reports/check.json
+axion-cli dev --launch --fallback-packaged --watch --reload
+axion-cli gui-smoke --cargo-target-dir target --serial-build
+axion-cli release --archive
+```
+
+To move this project to another SDK, update the `axion-core`, `axion-manifest` and `axion-runtime` dependency paths together, copy the new SDK's Rust toolchain and merge its platform Cargo configuration. Use a CLI matching that SDK version and rerun doctor/check/GUI/release. Source-checkout commands below remain an alternative.
+
 ## Frontend Development
 
 This template has no npm dependency by default. To use your own frontend dev server, add a `[dev]` URL to `axion.toml`, start that server separately, then launch from the Axion checkout:

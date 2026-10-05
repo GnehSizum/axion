@@ -28,11 +28,13 @@ The checked-in `.github/workflows/ci.yml` also selects Node.js 24 LTS, syntax-ch
 
 Code changes in `crates`, `examples`, `servo`, Cargo/toolchain/build configuration or this workflow trigger the Ubuntu 24.04 `native-check` job. It caches registry/git dependencies and `target`, selects Clang 19, installs native dependencies and runs `cargo check --workspace --features servo-runtime --locked`. Pure documentation changes keep the lightweight gate without rebuilding the engine. Default workspace tests include JSON, input/output path, archive permission and state-boundary regressions.
 
+All three native jobs (`native-check`, `gui-smoke` and `release-preview`) set `CC`/`CXX` and `HOST_CC`/`HOST_CXX` to Clang 19, `CLANG_PATH=/usr/bin/clang-19` and `LIBCLANG_PATH=/usr/lib/llvm-19/lib`. `CLANG_PATH` also selects the executable that bindgen's clang-sys support uses to discover system include paths; selecting only the C/C++ compiler and libclang can leave discovery using the runner's default Clang 18 headers. The jobs print the selected compiler versions, resource directory, C++ include search paths and libclang library location before building. When diagnosing bindgen header errors, check that the logged resource/include paths and libclang all use the same LLVM major version.
+
 ## Optional GUI Smoke
 
 Run GUI smoke on manual or platform-specific runners where Servo window startup is available:
 
-The optional Ubuntu GUI job installs `clang-19` and `libclang-19-dev`, explicitly selects the Clang 19 compilers, and points `LIBCLANG_PATH` at `/usr/lib/llvm-19/lib` to meet Servo 0.6.0's native compiler requirement.
+The optional Ubuntu GUI job installs `clang-19` and `libclang-19-dev` and uses the native compiler selection described above to meet Servo 0.6.0's native compiler requirement.
 
 ```sh
 cargo run -p axion-cli -- gui-smoke \
@@ -54,7 +56,9 @@ Use `--require-check`, `--require-command`, `--require-host-event`, and `--requi
 
 The manual GUI job runs the hello, diagnostics, file-access and multi-window examples. The multi-window step validates the smoke checks provided by its partial report: `app.ping`, `window.info`, close prevention, confirmed close completion, close timeout, application exit prevention and `app.exit.idempotent`. Its report and summary use the existing `*-gui-smoke*.json` artifact collection.
 
-If this step fails but still writes a report, summarize it without hiding the original failure:
+The workflow summarizes and uploads any GUI smoke reports even when a preceding smoke step fails. Summaries use `--allow-failed`, and absent reports are skipped so a build failure does not cause a second summary failure. Release preview artifacts are also uploaded on failure when available; a missing archive does not replace the original failed step.
+
+If a local smoke run fails but still writes a report, summarize it without hiding the original failure:
 
 ```sh
 cargo run -p axion-cli -- report target/axion/reports/gui-smoke.json \

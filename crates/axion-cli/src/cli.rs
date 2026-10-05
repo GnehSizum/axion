@@ -277,6 +277,10 @@ pub struct NewArgs {
     #[arg(long)]
     pub path: Option<PathBuf>,
 
+    /// Local Axion source SDK; its version must match this CLI.
+    #[arg(long, value_name = "PATH")]
+    pub sdk_path: Option<PathBuf>,
+
     #[arg(long, value_enum, default_value_t = NewTemplate::Vanilla)]
     pub template: NewTemplate,
 

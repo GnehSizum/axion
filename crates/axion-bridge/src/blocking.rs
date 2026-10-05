@@ -1,4 +1,8 @@
+use std::future::{Future, poll_fn};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
 
@@ -7,6 +11,7 @@ const WORKERS: usize = 4;
 const QUEUE_CAPACITY: usize = 64;
 const CONTROL_WORKERS: usize = 2;
 const CONTROL_QUEUE_CAPACITY: usize = 32;
+pub const WINDOW_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn create_sender(workers: usize, queue_capacity: usize) -> mpsc::SyncSender<Job> {
     let (sender, receiver) = mpsc::sync_channel::<Job>(queue_capacity);
@@ -42,6 +47,33 @@ fn control_sender() -> &'static mpsc::SyncSender<Job> {
     POOL.get_or_init(|| create_sender(CONTROL_WORKERS, CONTROL_QUEUE_CAPACITY))
 }
 
+// Drive control timers even when the caller uses an executor without Tokio.
+// One process-wide thread is shared by all requests, including expired waiters.
+fn control_timer() -> &'static tokio::runtime::Handle {
+    static TIMER: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+    TIMER.get_or_init(|| {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("axion-control-deadlines".to_owned())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .expect("Axion control timer must start");
+                let _ = sender.send(runtime.handle().clone());
+                runtime.block_on(std::future::pending::<()>());
+            })
+            .expect("Axion control timer thread must start");
+        receiver
+            .recv()
+            .expect("Axion control timer must be available")
+    })
+}
+
+fn control_timeout() -> String {
+    "window.control-timeout: control request exceeded its total deadline".to_owned()
+}
+
 /// Run bounded blocking native work without occupying an async executor worker.
 pub async fn run_blocking(
     job: impl FnOnce() -> Result<String, String> + Send + 'static,
@@ -49,20 +81,71 @@ pub async fn run_blocking(
     run_blocking_on(sender(), job).await
 }
 
-/// Run short blocking control work independently of long-running native I/O.
-///
-/// This pool has two workers and a bounded queue of 32 jobs. Queue waiting does
-/// not count toward any response timeout implemented by the control backend.
+/// Run control work with a five-second total wait, including time in its queue.
+/// Already-started work is not rolled back when the waiting future expires.
 pub async fn run_blocking_control(
     job: impl FnOnce() -> Result<String, String> + Send + 'static,
 ) -> Result<String, String> {
-    run_blocking_on(control_sender(), job).await
+    run_blocking_control_with_deadline(move |_| job()).await
+}
+
+/// Pass the same total deadline to the native control backend.
+pub async fn run_blocking_control_with_deadline(
+    job: impl FnOnce(Instant) -> Result<String, String> + Send + 'static,
+) -> Result<String, String> {
+    let deadline = Instant::now() + WINDOW_CONTROL_TIMEOUT;
+    run_blocking_control_on(control_sender(), deadline, job).await
+}
+
+async fn run_blocking_control_on(
+    sender: &mpsc::SyncSender<Job>,
+    deadline: Instant,
+    job: impl FnOnce(Instant) -> Result<String, String> + Send + 'static,
+) -> Result<String, String> {
+    if Instant::now() >= deadline {
+        return Err(control_timeout());
+    }
+    let mut response = submit_job(sender, move || {
+        if Instant::now() >= deadline {
+            return Err(control_timeout());
+        }
+        job(deadline)
+    })?;
+    let sleep = {
+        let _guard = control_timer().enter();
+        tokio::time::sleep_until(deadline.into())
+    };
+    let mut sleep = std::pin::pin!(sleep);
+    poll_fn(|context| {
+        if Instant::now() >= deadline {
+            return Poll::Ready(Err(control_timeout()));
+        }
+        if let Poll::Ready(result) = Pin::new(&mut response).poll(context) {
+            return Poll::Ready(result.unwrap_or_else(|_| {
+                Err("bridge.unavailable: native command did not respond".to_owned())
+            }));
+        }
+        if sleep.as_mut().poll(context).is_ready() {
+            return Poll::Ready(Err(control_timeout()));
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 async fn run_blocking_on(
     sender: &mpsc::SyncSender<Job>,
     job: impl FnOnce() -> Result<String, String> + Send + 'static,
 ) -> Result<String, String> {
+    submit_job(sender, job)?
+        .await
+        .map_err(|_| "bridge.unavailable: native command did not respond".to_owned())?
+}
+
+fn submit_job(
+    sender: &mpsc::SyncSender<Job>,
+    job: impl FnOnce() -> Result<String, String> + Send + 'static,
+) -> Result<oneshot::Receiver<Result<String, String>>, String> {
     let (reply, response) = oneshot::channel();
     sender
         .try_send(Box::new(move || {
@@ -81,9 +164,7 @@ async fn run_blocking_on(
                 "bridge.unavailable: native command workers stopped".to_owned()
             }
         })?;
-    response
-        .await
-        .map_err(|_| "bridge.unavailable: native command did not respond".to_owned())?
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -118,6 +199,128 @@ mod tests {
                 Poll::Pending => std::thread::park_timeout(Duration::from_millis(50)),
             }
         }
+    }
+
+    #[test]
+    fn control_deadline_wakes_a_waiter_while_all_workers_are_blocked() {
+        let sender = create_sender(CONTROL_WORKERS, CONTROL_QUEUE_CAPACITY);
+        let (entered, entries) = mpsc::channel();
+        let mut releases = Vec::new();
+        let mut blocked = Vec::new();
+        for _ in 0..CONTROL_WORKERS {
+            let (release, gate) = mpsc::channel();
+            releases.push(release);
+            let entered = entered.clone();
+            let mut task = Box::pin(run_blocking_on(&sender, move || {
+                entered.send(()).unwrap();
+                gate.recv_timeout(Duration::from_secs(5)).unwrap();
+                Ok("null".to_owned())
+            }));
+            assert!(poll_once(task.as_mut()).is_pending());
+            blocked.push(task);
+        }
+        for _ in 0..CONTROL_WORKERS {
+            entries.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let mut queued = Vec::new();
+        for _ in 0..CONTROL_QUEUE_CAPACITY {
+            let ran = ran.clone();
+            let mut task = Box::pin(run_blocking_control_on(&sender, deadline, move |_| {
+                ran.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("true".to_owned())
+            }));
+            assert!(poll_once(task.as_mut()).is_pending());
+            queued.push(task);
+        }
+        assert_eq!(
+            wait(run_blocking_control_on(&sender, deadline, |_| Ok(
+                "null".to_owned()
+            )))
+            .unwrap_err(),
+            "bridge.busy: native command queue is full"
+        );
+        // No worker can reply. A timer wake must reach an ordinary thread executor.
+        std::thread::park_timeout(Duration::from_secs(2));
+        assert!(Instant::now() < deadline + Duration::from_secs(1));
+        for task in queued {
+            assert!(
+                wait(task)
+                    .unwrap_err()
+                    .starts_with("window.control-timeout:")
+            );
+        }
+        assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 0);
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        for task in blocked {
+            wait(task).unwrap();
+        }
+        // A sentinel runs after every expired queued job has been discarded.
+        assert_eq!(
+            wait(run_blocking_on(&sender, || Ok("sentinel".to_owned()))).unwrap(),
+            "sentinel"
+        );
+        assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn control_timeout_does_not_undo_a_job_that_already_started() {
+        let sender = create_sender(1, 1);
+        let (release, gate) = mpsc::channel();
+        let (entered, entries) = mpsc::channel();
+        let (completed, completion) = mpsc::channel();
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let mut task = Box::pin(run_blocking_control_on(
+            &sender,
+            deadline,
+            move |received| {
+                assert_eq!(received, deadline);
+                entered.send(()).unwrap();
+                gate.recv_timeout(Duration::from_secs(5)).unwrap();
+                completed.send("side effect").unwrap();
+                Ok("null".to_owned())
+            },
+        ));
+        assert!(poll_once(task.as_mut()).is_pending());
+        entries.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            wait(task)
+                .unwrap_err()
+                .starts_with("window.control-timeout:")
+        );
+        release.send(()).unwrap();
+        assert_eq!(
+            completion.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "side effect"
+        );
+    }
+
+    #[test]
+    fn control_work_can_finish_before_its_deadline_and_rejects_already_expired_work() {
+        let sender = create_sender(1, 1);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert_eq!(
+            wait(run_blocking_control_on(
+                &sender,
+                deadline,
+                move |received| {
+                    assert_eq!(received, deadline);
+                    Ok("completed".to_owned())
+                }
+            ))
+            .unwrap(),
+            "completed"
+        );
+        assert!(
+            wait(run_blocking_control_on(&sender, Instant::now(), |_| {
+                panic!("expired work must not run")
+            }))
+            .unwrap_err()
+            .starts_with("window.control-timeout:")
+        );
     }
 
     #[test]

@@ -122,14 +122,20 @@ pub fn manifest_warnings(path: &Path) -> Result<Vec<String>, ManifestError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_DEPLOYMENT_COUNTER: AtomicUsize = AtomicUsize::new(1);
+
     fn fixture() -> PathBuf {
+        let serial = TEST_DEPLOYMENT_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "axion-deployment-{}-{}",
+            "axion-deployment-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            serial
         ));
         std::fs::create_dir_all(path.join("frontend")).unwrap();
         std::fs::write(path.join("frontend/index.html"), "hello").unwrap();

@@ -36,6 +36,9 @@ Thumbs.db
 /examples/*/target/axion-crash-reports/
 /examples/*/crash-reports/
 
+# Python validation bytecode
+/scripts/**/__pycache__/
+
 # Logs and temporary files
 *.log
 *.tmp

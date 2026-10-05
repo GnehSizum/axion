@@ -4,7 +4,7 @@ Axion can generate a small Rust desktop app with a frontend page and an `axion.t
 
 ## Prerequisites
 
-- Rust toolchain compatible with this workspace (`rust-version = 1.88.0` or newer). Rust `1.97.1` is recommended to match the Servo `0.6.0` toolchain.
+- The pinned Rust `1.97.1` toolchain used by the currently validated build. Rust `1.88.0` is the declared minimum and has not yet been validated; see the [platform support matrix](platform-support.md).
 - A GUI-capable desktop session for `servo-runtime` window launches.
 - This repository checked out with the vendored `servo/` directory present.
 
@@ -112,6 +112,20 @@ cargo run --features servo-runtime
 ```
 
 `--run-check` immediately runs `axion check --dev --bundle` against the generated manifest. Omit it if you only want to create files.
+
+For an application outside the checkout, use an explicit SDK and an installed CLI. Run the install from the SDK root after applying the prerequisite Cargo configuration:
+
+```sh
+cargo install --path crates/axion-cli --features servo-runtime --locked
+axion-cli new demo-app --sdk-path "/path/源码 SDK" --path "/path/我的应用" --run-check
+cd "/path/我的应用"
+axion-cli doctor --json
+axion-cli check --dev --bundle
+axion-cli gui-smoke --cargo-target-dir target --serial-build
+axion-cli release --archive
+```
+
+The local source SDK must exactly match the CLI's Axion version; it includes the vendored Servo source and build settings. Both templates copy `rust-toolchain.toml` and the platform Cargo configuration from that selected SDK. SDK paths are local development dependencies; deployed applications still run without the SDK. Doctor discovers the SDK from the application's Cargo metadata rather than its directory ancestors. To relocate or upgrade an existing SDK binding, follow the three-dependency rebinding steps in [CLI Reference](cli.md#rebind-an-existing-application-to-a-local-sdk). Run Cargo-based commands from the application directory to load its generated configuration.
 
 Use `--template native-api-demo` when you want generated UI and README guidance focused on the preview native API surface: app/window metadata, clipboard text, shell URL validation, app-data file lifecycle operations, dialogs, input compatibility, and GUI smoke diagnostics. The generated Native API Workbench includes a "Run all checks" button for manual validation inside the app window.
 

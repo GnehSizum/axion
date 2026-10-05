@@ -1,7 +1,9 @@
 mod blocking;
 mod error;
 pub mod lifecycle;
-pub use blocking::{run_blocking, run_blocking_control};
+pub use blocking::{
+    WINDOW_CONTROL_TIMEOUT, run_blocking, run_blocking_control, run_blocking_control_with_deadline,
+};
 pub use error::BridgeError;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,12 +11,13 @@ use std::fmt::{self, Debug, Display, Formatter};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 pub const BRIDGE_MAX_NAME_BYTES: usize = 128;
 pub const BRIDGE_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const BRIDGE_MAX_REQUEST_ID_BYTES: usize = 128;
 pub const BRIDGE_MAX_JSON_DEPTH: usize = 64;
-const AXION_RELEASE_VERSION: &str = "v0.6.1";
+const AXION_RELEASE_VERSION: &str = "v0.6.2";
 const AXION_DIAGNOSTICS_REPORT_SCHEMA: &str = "axion.diagnostics-report.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,11 +208,24 @@ pub trait WindowControlExecutor: Send + Sync {
         target_window_id: Option<&str>,
         request: WindowControlRequest,
     ) -> Result<WindowControlResponse, String>;
+
+    fn execute_with_deadline(
+        &self,
+        target_window_id: Option<&str>,
+        request: WindowControlRequest,
+        deadline: Instant,
+    ) -> Result<WindowControlResponse, String> {
+        if Instant::now() >= deadline {
+            return Err("window.control-timeout: request expired before execution".to_owned());
+        }
+        self.execute(target_window_id, request)
+    }
 }
 
 #[derive(Clone, Default)]
 pub struct WindowControlHandle {
     inner: Arc<Mutex<Option<Arc<dyn WindowControlExecutor>>>>,
+    deadline: Option<Instant>,
 }
 
 impl Debug for WindowControlHandle {
@@ -224,6 +240,12 @@ impl Debug for WindowControlHandle {
 impl WindowControlHandle {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Bind this handle clone to a deadline without changing other callers.
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
     }
 
     pub fn install_executor(&self, executor: Arc<dyn WindowControlExecutor>) {
@@ -250,7 +272,81 @@ impl WindowControlHandle {
             .map_err(|_| "window control state lock was poisoned".to_owned())?
             .clone()
             .ok_or_else(|| "window control backend is unavailable".to_owned())?;
-        executor.execute(target_window_id, request)
+        match self.deadline {
+            Some(deadline) => executor.execute_with_deadline(target_window_id, request, deadline),
+            None => executor.execute(target_window_id, request),
+        }
+    }
+}
+
+#[cfg(test)]
+mod window_control_deadline_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    struct CountingExecutor(Arc<AtomicUsize>);
+    impl WindowControlExecutor for CountingExecutor {
+        fn execute(
+            &self,
+            _: Option<&str>,
+            _: WindowControlRequest,
+        ) -> Result<WindowControlResponse, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(WindowControlResponse::List(Vec::new()))
+        }
+    }
+
+    #[test]
+    fn expired_handle_skips_execution_and_does_not_change_other_clones() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let handle = WindowControlHandle::new();
+        handle.install_executor(Arc::new(CountingExecutor(count.clone())));
+        let expired = handle.clone().with_deadline(Instant::now());
+        assert!(
+            expired
+                .execute(None, WindowControlRequest::ListStates)
+                .unwrap_err()
+                .starts_with("window.control-timeout:")
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        handle
+            .execute(None, WindowControlRequest::ListStates)
+            .unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    struct DeadlineExecutor(Arc<Mutex<Option<Instant>>>);
+    impl WindowControlExecutor for DeadlineExecutor {
+        fn execute(
+            &self,
+            _: Option<&str>,
+            _: WindowControlRequest,
+        ) -> Result<WindowControlResponse, String> {
+            panic!("the bounded handle must pass its deadline")
+        }
+        fn execute_with_deadline(
+            &self,
+            _: Option<&str>,
+            _: WindowControlRequest,
+            deadline: Instant,
+        ) -> Result<WindowControlResponse, String> {
+            *self.0.lock().unwrap() = Some(deadline);
+            Ok(WindowControlResponse::List(Vec::new()))
+        }
+    }
+
+    #[test]
+    fn handle_forwards_the_original_deadline_to_the_backend() {
+        let captured = Arc::new(Mutex::new(None));
+        let handle = WindowControlHandle::new();
+        handle.install_executor(Arc::new(DeadlineExecutor(captured.clone())));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        handle
+            .with_deadline(deadline)
+            .execute(None, WindowControlRequest::ListStates)
+            .unwrap();
+        assert_eq!(*captured.lock().unwrap(), Some(deadline));
     }
 }
 

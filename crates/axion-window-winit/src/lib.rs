@@ -1,5 +1,8 @@
 use thiserror::Error;
 
+#[cfg(feature = "servo-runtime")]
+mod ime;
+
 #[cfg(any(feature = "servo-runtime", test))]
 mod state;
 
@@ -88,18 +91,19 @@ mod enabled {
         ProtocolRegistry, RelativePos, Request, ResourceFetchTiming, Response, ResponseBody,
     };
     use servo::{
-        Code, DevicePoint, InputEvent, Key, KeyState, KeyboardEvent, Location, Modifiers,
-        MouseButton as ServoMouseButton, MouseButtonAction, MouseButtonEvent,
-        MouseLeftViewportEvent, MouseMoveEvent, NamedKey, RenderingContext, Servo, ServoBuilder,
-        TouchEvent, TouchEventType, TouchId, TouchPointerType, UserContentManager, WebView,
-        WebViewBuilder, WheelDelta, WheelEvent, WheelMode, WindowRenderingContext,
+        Code, DevicePoint, EmbedderControl, EmbedderControlId, InputEvent, InputMethodControl, Key,
+        KeyState, KeyboardEvent, Location, Modifiers, MouseButton as ServoMouseButton,
+        MouseButtonAction, MouseButtonEvent, MouseLeftViewportEvent, MouseMoveEvent, NamedKey,
+        RenderingContext, Servo, ServoBuilder, TouchEvent, TouchEventType, TouchId,
+        TouchPointerType, UserContentManager, WebView, WebViewBuilder, WheelDelta, WheelEvent,
+        WheelMode, WindowRenderingContext,
     };
     use tokio::sync::mpsc::unbounded_channel;
     use url::Url;
     use winit::application::ApplicationHandler;
     use winit::dpi::LogicalSize;
     use winit::event::{
-        ElementState, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+        ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
     };
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
     use winit::keyboard::{
@@ -110,6 +114,7 @@ mod enabled {
     use winit::window::{Window, WindowAttributes};
 
     use crate::WinitRunError;
+    use crate::ime::{ImeState, cursor_area};
     use crate::state::{
         AppExitRequestState, AppExitTracker, PendingCloseRequest, WebViewPolicy,
         expired_close_requests, next_close_deadline, policy_for_webview, receive_control_response,
@@ -123,8 +128,11 @@ mod enabled {
         host_event_names,
     };
 
+    #[cfg(feature = "lifecycle-probe")]
+    mod lifecycle_probe;
+
     const DEFAULT_SELF_TEST_TIMEOUT: Duration = Duration::from_secs(10);
-    const WINDOW_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+    use axion_bridge::WINDOW_CONTROL_TIMEOUT;
 
     pub fn run_dev_server(
         app_name: String,
@@ -173,13 +181,15 @@ mod enabled {
         let failure = Rc::new(RefCell::new(None));
         let mut runner = WinitApp::new(&event_loop, launch, failure.clone());
 
-        event_loop.run_app(&mut runner)?;
-
-        if let Some(error) = failure.borrow_mut().take() {
-            return Err(error);
-        }
-
-        Ok(())
+        let result = event_loop.run_app(&mut runner).map_err(WinitRunError::from);
+        drop(runner);
+        let result = result.and_then(|()| match failure.borrow_mut().take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        });
+        #[cfg(feature = "lifecycle-probe")]
+        lifecycle_probe::finish(result.is_ok());
+        result
     }
 
     #[derive(Clone, Debug)]
@@ -335,6 +345,7 @@ mod enabled {
         visible: std::cell::Cell<bool>,
         focused: std::cell::Cell<bool>,
         cursor_position: std::cell::Cell<DevicePoint>,
+        ime: RefCell<ImeState>,
         // Release the WebView and graphics context while the native window is alive.
         webview: WebView,
         rendering_context: Rc<WindowRenderingContext>,
@@ -373,6 +384,8 @@ mod enabled {
 
     impl Drop for AppState {
         fn drop(&mut self) {
+            #[cfg(feature = "lifecycle-probe")]
+            lifecycle_probe::state_dropping(self.windows.get_mut().len());
             if let Ok(mut policies) = self.webview_policies.lock() {
                 policies.clear();
             }
@@ -415,6 +428,20 @@ mod enabled {
                 }
             } else {
                 state.queue_startup_events(&webview);
+            }
+        }
+
+        fn show_embedder_control(&self, webview: WebView, control: EmbedderControl) {
+            if let EmbedderControl::InputMethod(control) = control
+                && let Some(state) = self.state.upgrade()
+            {
+                state.show_input_method(webview.id(), control);
+            }
+        }
+
+        fn hide_embedder_control(&self, webview: WebView, control_id: EmbedderControlId) {
+            if let Some(state) = self.state.upgrade() {
+                state.hide_input_method(webview.id(), control_id);
             }
         }
 
@@ -585,6 +612,8 @@ mod enabled {
                 ),
             );
             let _ = self.close_window(pending.window_id, Some(request_id), false);
+            #[cfg(feature = "lifecycle-probe")]
+            lifecycle_probe::close_confirmed();
             Ok(WindowControlResponse::State(state))
         }
 
@@ -699,6 +728,8 @@ mod enabled {
         }
 
         fn redraw_window(&self, window_id: winit::window::WindowId) -> Result<(), WinitRunError> {
+            #[cfg(feature = "lifecycle-probe")]
+            lifecycle_probe::before_redraw()?;
             let windows = self.windows.borrow();
             let Some(runtime_window) = windows
                 .iter()
@@ -1082,6 +1113,60 @@ mod enabled {
             self.modifiers_state.set(modifiers);
         }
 
+        fn show_input_method(&self, webview_id: servo::WebViewId, control: InputMethodControl) {
+            if let Some(runtime_window) = self
+                .windows
+                .borrow()
+                .iter()
+                .find(|window| window.webview.id() == webview_id)
+            {
+                runtime_window.ime.borrow_mut().show(control.id());
+                let (position, size) = cursor_area(control.position());
+                runtime_window.window.set_ime_allowed(true);
+                runtime_window.window.set_ime_cursor_area(position, size);
+            }
+        }
+
+        fn hide_input_method(&self, webview_id: servo::WebViewId, control_id: EmbedderControlId) {
+            if let Some(runtime_window) = self
+                .windows
+                .borrow()
+                .iter()
+                .find(|window| window.webview.id() == webview_id)
+                && runtime_window.ime.borrow_mut().hide(control_id)
+            {
+                runtime_window.window.set_ime_allowed(false);
+            }
+        }
+
+        fn ime_input(&self, window_id: winit::window::WindowId, event: Ime) {
+            if let Some(runtime_window) = self
+                .windows
+                .borrow()
+                .iter()
+                .find(|window| window.window.id() == window_id)
+            {
+                let events = runtime_window.ime.borrow_mut().input_events(event);
+                for event in events {
+                    runtime_window.webview.notify_input_event(event);
+                }
+            }
+        }
+
+        fn flush_pending_ime(&self) {
+            let mut finished = false;
+            for runtime_window in self.windows.borrow().iter() {
+                let event = runtime_window.ime.borrow_mut().finish_cleared_preedit();
+                if let Some(event) = event {
+                    runtime_window.webview.notify_input_event(event);
+                    finished = true;
+                }
+            }
+            if finished {
+                self.servo.spin_event_loop();
+            }
+        }
+
         fn keyboard_input(&self, window_id: winit::window::WindowId, event: KeyEvent) {
             if let Some(runtime_window) = self
                 .windows
@@ -1089,7 +1174,12 @@ mod enabled {
                 .iter()
                 .find(|runtime_window| runtime_window.window.id() == window_id)
             {
-                let keyboard_event = keyboard_event_from_winit(&event, self.modifiers_state.get());
+                let mut keyboard_event =
+                    keyboard_event_from_winit(&event, self.modifiers_state.get());
+                runtime_window
+                    .ime
+                    .borrow()
+                    .mark_keyboard_event(&mut keyboard_event);
                 runtime_window
                     .webview
                     .notify_input_event(InputEvent::Keyboard(keyboard_event));
@@ -1466,6 +1556,7 @@ mod enabled {
             let Lifecycle::Running(state) = &self.lifecycle else {
                 return;
             };
+            state.flush_pending_ime();
             let expired =
                 expired_close_requests(&state.pending_close_requests.borrow(), Instant::now());
             for request_id in expired {
@@ -1553,6 +1644,10 @@ mod enabled {
                 WindowEvent::ModifiersChanged(modifiers) => {
                     state.set_modifiers(modifiers.state());
                 }
+                WindowEvent::Ime(event) => {
+                    state.ime_input(window_id, event);
+                    spin_after_event = true;
+                }
                 WindowEvent::KeyboardInput { event, .. } => {
                     state.keyboard_input(window_id, event);
                     spin_after_event = true;
@@ -1601,7 +1696,12 @@ mod enabled {
             windows: RefCell::new(Vec::new()),
         });
 
+        #[cfg(feature = "lifecycle-probe")]
+        lifecycle_probe::capture_state(&app_state);
+
         for window_config in &launch.windows {
+            #[cfg(feature = "lifecycle-probe")]
+            lifecycle_probe::before_window()?;
             let binding = launch
                 .window_bindings
                 .iter()
@@ -1638,6 +1738,14 @@ mod enabled {
                         .with_trusted_origins(binding.security_policy.trusted_origins())
                         .script_source(),
                     Some(PathBuf::from("axion-bootstrap.js")),
+                )));
+            }
+
+            #[cfg(feature = "lifecycle-probe")]
+            if let Some(script) = lifecycle_probe::script_source() {
+                user_content_manager.add_script(Rc::new(UserScript::new(
+                    script,
+                    Some(PathBuf::from("axion-lifecycle-probe.js")),
                 )));
             }
 
@@ -1688,10 +1796,13 @@ mod enabled {
                 visible: std::cell::Cell::new(window_config.visible),
                 focused: std::cell::Cell::new(false),
                 cursor_position: std::cell::Cell::new(DevicePoint::new(0.0, 0.0)),
+                ime: RefCell::new(ImeState::default()),
                 window,
                 rendering_context,
                 webview,
             });
+            #[cfg(feature = "lifecycle-probe")]
+            lifecycle_probe::window_registered(&app_state);
         }
 
         Ok(app_state)
@@ -1964,6 +2075,22 @@ mod enabled {
             target_window_id: Option<&str>,
             request: WindowControlRequest,
         ) -> Result<WindowControlResponse, String> {
+            self.execute_with_deadline(
+                target_window_id,
+                request,
+                Instant::now() + WINDOW_CONTROL_TIMEOUT,
+            )
+        }
+
+        fn execute_with_deadline(
+            &self,
+            target_window_id: Option<&str>,
+            request: WindowControlRequest,
+            deadline: Instant,
+        ) -> Result<WindowControlResponse, String> {
+            if Instant::now() >= deadline {
+                return Err("window.control-timeout: request expired before execution".to_owned());
+            }
             if std::thread::current().id() == self.event_loop_thread {
                 return Err("window control cannot wait on the event loop thread".to_owned());
             }
@@ -1992,12 +2119,15 @@ mod enabled {
                     window_id,
                     request,
                     response: sender,
-                    deadline: Instant::now() + WINDOW_CONTROL_TIMEOUT,
+                    deadline,
                 })))
                 .map_err(|_| {
                     "failed to send window control request to the event loop".to_owned()
                 })?;
-            receive_control_response(&receiver, WINDOW_CONTROL_TIMEOUT)
+            receive_control_response(
+                &receiver,
+                deadline.saturating_duration_since(Instant::now()),
+            )
         }
     }
     #[derive(Clone)]
@@ -2334,6 +2464,8 @@ mod enabled {
             {
                 Ok(resolved) => resolved,
                 Err(error) => {
+                    #[cfg(feature = "lifecycle-probe")]
+                    lifecycle_probe::asset_failed(request.current_url().as_url().path());
                     return Box::pin(std::future::ready(Response::network_error(
                         NetworkError::ResourceLoadError(error.to_string()),
                     )));

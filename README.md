@@ -2,7 +2,7 @@
 
 Axion is a Rust desktop application framework built on a vendored Servo engine. It provides an explicit manifest, capability-gated JavaScript bridge, packaged app assets, runtime diagnostics, and a `winit` desktop backend.
 
-Axion is currently at the **v0.6.1 developer preview**, using the vendored Servo **0.6.0** rendering engine. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
+Axion is currently at the **v0.6.2 developer preview**, using the vendored Servo **0.6.0** rendering engine. It is suitable for framework experiments, examples, and early application prototypes. Production installers, signing, auto-updates, and a complete native API surface are intentionally deferred.
 
 ## What Works Today
 
@@ -136,4 +136,4 @@ Servo warnings from the vendored `servo/` subtree are not Axion release blockers
 
 ## Versioning
 
-Axion public releases use three-part SemVer tags such as `v0.6.1`, matching the Cargo workspace version `0.6.1`. The Servo baseline and internal feature milestone are recorded separately in workspace metadata. Older four-part tags remain historical releases. See `docs/versioning.md`.
+Axion public releases use three-part SemVer tags such as `v0.6.2`, matching the Cargo workspace version `0.6.2`. The Servo baseline and internal feature milestone are recorded separately in workspace metadata. Older four-part tags remain historical releases. See `docs/versioning.md`.
